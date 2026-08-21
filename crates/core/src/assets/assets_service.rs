@@ -2151,7 +2151,18 @@ impl AssetServiceTrait for AssetService {
             .await;
 
         let name = metadata.as_ref().and_then(|m| m.name.clone());
-        let asset_metadata_json = metadata.as_ref().and_then(|m| m.asset_metadata.clone());
+        let asset_metadata_json = metadata
+            .as_ref()
+            .and_then(|m| m.asset_metadata.clone())
+            .or_else(|| {
+                // Fallback: build structured metadata for typed instruments
+                // (options → OptionSpec, bonds → BondSpec) so downstream logic
+                // (e.g. quote sync's ExpiredOption skip) can rely on it.
+                let symbol = metadata
+                    .as_ref()
+                    .and_then(|m| m.instrument_symbol.as_deref().or(m.display_code.as_deref()))?;
+                super::build_asset_metadata(instrument_type.as_ref(), symbol)
+            });
         let explicit_provider_config = metadata.as_ref().and_then(|m| m.provider_config.clone());
         let provider_id = metadata.as_ref().and_then(|m| m.provider_id.clone());
         let provider_symbol = metadata.as_ref().and_then(|m| m.provider_symbol.clone());
