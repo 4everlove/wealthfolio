@@ -7,6 +7,7 @@ import {
   listenDatabaseRestored,
   listenMarketSyncComplete,
   listenMarketSyncError,
+  listenMarketSyncProgress,
   listenMarketSyncStart,
   listenPortfolioUpdateComplete,
   listenPortfolioUpdateError,
@@ -43,6 +44,13 @@ interface MarketSyncCompletePayload {
   failed_syncs?: [string, string][];
   skipped_reasons?: [string, string][];
   show_skipped_reasons?: boolean;
+}
+
+interface MarketSyncProgressPayload {
+  total: number;
+  synced: number;
+  failed: number;
+  skipped: number;
 }
 
 function getSyncFailures(payload?: MarketSyncCompletePayload | null): [string, string][] {
@@ -90,9 +98,31 @@ const useGlobalEventListener = () => {
       } else {
         toast.loading(translationRef.current("common:globalEvents.syncingMarket"), {
           id: TOAST_IDS.marketSyncStart,
-          duration: 3000,
+          duration: Infinity,
         });
       }
+    };
+
+    const handleMarketSyncProgress = (event: {
+      payload: MarketSyncProgressPayload | null;
+    }) => {
+      const p = event.payload;
+      if (!p) return;
+      if (isMobileViewportRef.current && syncContextRef.current) {
+        return;
+      }
+      toast.loading(
+        translationRef.current("common:globalEvents.syncingMarketProgress", {
+          total: p.total,
+          synced: p.synced,
+          failed: p.failed,
+          skipped: p.skipped,
+        }),
+        {
+          id: TOAST_IDS.marketSyncStart,
+          duration: Infinity,
+        },
+      );
     };
 
     const handleMarketSyncComplete = (event: { payload: MarketSyncCompletePayload | null }) => {
@@ -389,6 +419,7 @@ const useGlobalEventListener = () => {
           }),
         ],
         ["market-sync-start", listenMarketSyncStart(handleMarketSyncStart)],
+        ["market-sync-progress", listenMarketSyncProgress(handleMarketSyncProgress)],
         ["market-sync-complete", listenMarketSyncComplete(handleMarketSyncComplete)],
         ["market-sync-error", listenMarketSyncError(handleMarketSyncError)],
         [

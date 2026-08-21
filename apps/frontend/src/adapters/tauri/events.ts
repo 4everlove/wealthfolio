@@ -85,6 +85,13 @@ export async function listenMarketSyncError<T>(handler: EventCallback<T>): Promi
   return adaptUnlisten(unlisten);
 }
 
+export async function listenMarketSyncProgress<T>(
+  handler: EventCallback<T>,
+): Promise<UnlistenFn> {
+  const unlisten = await listen<T>("market:sync-progress", adaptCallback(handler));
+  return adaptUnlisten(unlisten);
+}
+
 export async function listenAssetClassificationsChanged<T>(
   handler: EventCallback<T>,
 ): Promise<UnlistenFn> {

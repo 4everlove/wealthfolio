@@ -8,16 +8,38 @@ use wealthfolio_core::portfolio::snapshot::{
     SnapshotRecalcMode,
 };
 use wealthfolio_core::portfolio::valuation::ValuationRecalcMode;
+use wealthfolio_core::quotes::progress::{SyncProgress, SyncProgressReporter};
 use wealthfolio_core::quotes::MarketSyncMode;
 use wealthfolio_core::utils::time_utils::{parse_user_timezone_or_default, user_today};
 
 use crate::context::ServiceContext;
 use crate::events::{
-    emit_portfolio_trigger_recalculate, emit_portfolio_trigger_update, MarketSyncResult,
-    PortfolioRequestPayload, MARKET_SYNC_COMPLETE, MARKET_SYNC_ERROR, MARKET_SYNC_START,
-    PORTFOLIO_TRIGGER_RECALCULATE, PORTFOLIO_TRIGGER_UPDATE, PORTFOLIO_UPDATE_COMPLETE,
-    PORTFOLIO_UPDATE_ERROR, PORTFOLIO_UPDATE_START,
+    emit_portfolio_trigger_recalculate, emit_portfolio_trigger_update, MarketSyncProgress,
+    MarketSyncResult, PortfolioRequestPayload, MARKET_SYNC_COMPLETE, MARKET_SYNC_ERROR,
+    MARKET_SYNC_PROGRESS, MARKET_SYNC_START, PORTFOLIO_TRIGGER_RECALCULATE,
+    PORTFOLIO_TRIGGER_UPDATE, PORTFOLIO_UPDATE_COMPLETE, PORTFOLIO_UPDATE_ERROR,
+    PORTFOLIO_UPDATE_START,
 };
+
+/// Reporter that forwards `SyncProgress` events from the quote sync service
+/// onto the Tauri event bus as `MARKET_SYNC_PROGRESS` payloads.
+struct TauriMarketSyncProgressReporter {
+    handle: AppHandle,
+}
+
+impl SyncProgressReporter for TauriMarketSyncProgressReporter {
+    fn report(&self, progress: SyncProgress) {
+        let payload = MarketSyncProgress {
+            total: progress.total,
+            synced: progress.synced,
+            failed: progress.failed,
+            skipped: progress.skipped,
+        };
+        if let Err(e) = self.handle.emit(MARKET_SYNC_PROGRESS, &payload) {
+            error!("Failed to emit {} event: {}", MARKET_SYNC_PROGRESS, e);
+        }
+    }
+}
 
 /// Sets up the global event listeners for the application.
 pub fn setup_event_listeners(handle: AppHandle) {
@@ -124,9 +146,18 @@ fn handle_portfolio_request(handle: AppHandle, payload_str: &str, force_recalc: 
                         let sync_start = Instant::now();
                         let asset_ids = market_sync_mode.asset_ids().cloned();
 
+                        let progress_reporter: Arc<dyn SyncProgressReporter> =
+                            Arc::new(TauriMarketSyncProgressReporter {
+                                handle: handle_clone.clone(),
+                            });
+
                         // Convert MarketSyncMode to SyncMode for the quote service
                         let sync_result = match market_sync_mode.to_sync_mode() {
-                            Some(sync_mode) => market_data_service.sync(sync_mode, asset_ids).await,
+                            Some(sync_mode) => {
+                                market_data_service
+                                    .sync_with_progress(sync_mode, asset_ids, progress_reporter)
+                                    .await
+                            }
                             None => {
                                 // This shouldn't happen since we checked requires_sync()
                                 warn!(

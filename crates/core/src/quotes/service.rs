@@ -531,6 +531,17 @@ pub trait QuoteServiceTrait: Send + Sync {
     /// * `BackfillHistory { days }` - Rebuilds full history from activity start (or N days fallback).
     async fn sync(&self, mode: SyncMode, asset_ids: Option<Vec<String>>) -> Result<SyncResult>;
 
+    /// Same as `sync`, but reports incremental progress via the supplied reporter.
+    /// Default implementation ignores the reporter and delegates to `sync`.
+    async fn sync_with_progress(
+        &self,
+        mode: SyncMode,
+        asset_ids: Option<Vec<String>>,
+        _reporter: crate::quotes::progress::SharedSyncProgressReporter,
+    ) -> Result<SyncResult> {
+        self.sync(mode, asset_ids).await
+    }
+
     /// Force resync for specific asset IDs (or all if None) using BackfillHistory mode.
     /// An empty asset ID list is treated as sync nothing.
     async fn resync(&self, asset_ids: Option<Vec<String>>) -> Result<SyncResult>;
@@ -1890,6 +1901,18 @@ where
     async fn sync(&self, mode: SyncMode, asset_ids: Option<Vec<String>>) -> Result<SyncResult> {
         let sync_service = self.get_sync_service().await?;
         sync_service.sync(mode, asset_ids).await
+    }
+
+    async fn sync_with_progress(
+        &self,
+        mode: SyncMode,
+        asset_ids: Option<Vec<String>>,
+        reporter: crate::quotes::progress::SharedSyncProgressReporter,
+    ) -> Result<SyncResult> {
+        let sync_service = self.get_sync_service().await?;
+        sync_service
+            .sync_with_progress(mode, asset_ids, reporter)
+            .await
     }
 
     async fn resync(&self, asset_ids: Option<Vec<String>>) -> Result<SyncResult> {

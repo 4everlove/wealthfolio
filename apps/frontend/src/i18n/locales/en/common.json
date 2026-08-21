@@ -319,6 +319,7 @@
   },
   "globalEvents": {
     "syncingMarket": "Syncing market data...",
+    "syncingMarketProgress": "Syncing market data ({{total}}/{{synced}}/{{failed}}/{{skipped}})...",
     "fetchingAssetMetadata": "Fetching asset metadata...",
     "calculatingPortfolio": "Calculating portfolio...",
     "calculatingPortfolioPerformance": "Calculating portfolio performance...",

@@ -144,6 +144,10 @@ export const listenMarketSyncError = <T>(handler: EventCallback<T>): Promise<Unl
   return portfolioEventBridge.listen("market:sync-error", handler);
 };
 
+export const listenMarketSyncProgress = <T>(handler: EventCallback<T>): Promise<UnlistenFn> => {
+  return portfolioEventBridge.listen("market:sync-progress", handler);
+};
+
 export const listenAssetClassificationsChanged = <T>(
   handler: EventCallback<T>,
 ): Promise<UnlistenFn> => {

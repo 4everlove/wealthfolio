@@ -227,6 +227,7 @@ export {
   listenMarketSyncComplete,
   listenMarketSyncStart,
   listenMarketSyncError,
+  listenMarketSyncProgress,
   listenBrokerSyncStart,
   listenBrokerSyncComplete,
   listenBrokerSyncError,

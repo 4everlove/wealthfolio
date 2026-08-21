@@ -42,6 +42,7 @@ pub mod custom_scraper_provider;
 pub mod errors;
 pub mod import;
 pub mod model;
+pub mod progress;
 pub mod provider_settings;
 pub mod scheduler;
 pub mod service;
@@ -71,6 +72,9 @@ pub use sync::{
     AssetSkipReason, AssetSyncResult, QuoteSyncService, QuoteSyncServiceTrait, SyncError,
     SyncResult, SyncStatus,
 };
+
+// Re-export progress reporting types
+pub use progress::{SharedSyncProgressReporter, SyncProgress, SyncProgressReporter};
 
 // Re-export unified service types
 pub use service::{

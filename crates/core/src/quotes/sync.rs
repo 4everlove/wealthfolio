@@ -34,6 +34,7 @@ use super::client::MarketDataClient;
 use super::constants::*;
 use super::errors::MarketDataError;
 use super::model::Quote;
+use super::progress::{SharedSyncProgressReporter, SyncProgress};
 use super::store::QuoteStore;
 use super::sync_state::{
     calculate_sync_window, determine_sync_category, QuoteSyncState, SymbolSyncPlan, SyncCategory,
@@ -512,6 +513,21 @@ pub trait QuoteSyncServiceTrait: Send + Sync {
     /// * `RefetchRecent { days }` - Refetches the last N days regardless of existing quotes.
     /// * `BackfillHistory { days }` - Rebuilds full history from activity start (or N days fallback).
     async fn sync(&self, mode: SyncMode, asset_ids: Option<Vec<String>>) -> Result<SyncResult>;
+
+    /// Same as `sync`, but reports incremental progress via the supplied reporter.
+    ///
+    /// The reporter is called once when execution begins (with `total` set and
+    /// counters at zero) and again after each asset completes with cumulative
+    /// counts. Default implementation ignores the reporter and delegates to
+    /// `sync` for backwards compatibility with mock implementations.
+    async fn sync_with_progress(
+        &self,
+        mode: SyncMode,
+        asset_ids: Option<Vec<String>>,
+        _reporter: SharedSyncProgressReporter,
+    ) -> Result<SyncResult> {
+        self.sync(mode, asset_ids).await
+    }
 
     /// Force resync of quotes for specific assets using BackfillHistory mode.
     ///
@@ -1046,13 +1062,18 @@ where
     fn execute_sync_plans(
         &self,
         plans: Vec<SymbolSyncPlan>,
+        reporter: Option<SharedSyncProgressReporter>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = SyncResult> + Send + '_>> {
         Box::pin(async move {
             if plans.is_empty() {
+                if let Some(ref rep) = reporter {
+                    rep.report(SyncProgress::default());
+                }
                 return SyncResult::default();
             }
 
-            debug!("Executing sync for {} assets", plans.len());
+            let total = plans.len();
+            debug!("Executing sync for {} assets", total);
 
             // Get all assets for the plans
             let asset_ids: Vec<String> = plans.iter().map(|p| p.asset_id.clone()).collect();
@@ -1065,6 +1086,14 @@ where
                         result.failures.push((plan.asset_id.clone(), e.to_string()));
                         result.failed += 1;
                     }
+                    if let Some(ref rep) = reporter {
+                        rep.report(SyncProgress {
+                            total,
+                            synced: 0,
+                            failed: result.failed,
+                            skipped: 0,
+                        });
+                    }
                     return result;
                 }
             };
@@ -1072,7 +1101,23 @@ where
             let asset_map: HashMap<String, Asset> =
                 assets.into_iter().map(|a| (a.id.clone(), a)).collect();
 
-            let asset_results: Vec<AssetSyncResult> = stream::iter(plans)
+            // Emit the initial progress snapshot so listeners can render `total`
+            // (i.e. A/0/0/0) before the first asset completes.
+            if let Some(ref rep) = reporter {
+                rep.report(SyncProgress {
+                    total,
+                    synced: 0,
+                    failed: 0,
+                    skipped: 0,
+                });
+            }
+
+            let mut asset_results: Vec<AssetSyncResult> = Vec::with_capacity(total);
+            let mut synced_count: usize = 0;
+            let mut failed_count: usize = 0;
+            let mut skipped_count: usize = 0;
+
+            let mut stream = stream::iter(plans)
                 .map(|plan| {
                     let asset = asset_map.get(&plan.asset_id).cloned();
                     async move {
@@ -1090,9 +1135,24 @@ where
                         }
                     }
                 })
-                .buffer_unordered(SYNC_CONCURRENCY)
-                .collect()
-                .await;
+                .buffer_unordered(SYNC_CONCURRENCY);
+
+            while let Some(asset_result) = stream.next().await {
+                match asset_result.status {
+                    SyncStatus::Success => synced_count += 1,
+                    SyncStatus::Failed => failed_count += 1,
+                    SyncStatus::Skipped => skipped_count += 1,
+                }
+                if let Some(ref rep) = reporter {
+                    rep.report(SyncProgress {
+                        total,
+                        synced: synced_count,
+                        failed: failed_count,
+                        skipped: skipped_count,
+                    });
+                }
+                asset_results.push(asset_result);
+            }
 
             let mut result = SyncResult::default();
             for asset_result in asset_results {
@@ -1360,17 +1420,14 @@ where
         let assets = self.asset_repo.list()?;
         self.ensure_sync_states_for_assets(&assets, false).await
     }
-}
 
-#[async_trait]
-impl<Q, S, A, R> QuoteSyncServiceTrait for QuoteSyncService<Q, S, A, R>
-where
-    Q: QuoteStore + 'static,
-    S: SyncStateStore + 'static,
-    A: AssetRepositoryTrait + 'static,
-    R: ActivityRepositoryTrait + 'static,
-{
-    async fn sync(&self, mode: SyncMode, asset_ids: Option<Vec<String>>) -> Result<SyncResult> {
+    /// Core sync implementation shared by `sync` and `sync_with_progress`.
+    async fn sync_inner(
+        &self,
+        mode: SyncMode,
+        asset_ids: Option<Vec<String>>,
+        reporter: Option<SharedSyncProgressReporter>,
+    ) -> Result<SyncResult> {
         debug!("Starting sync (mode: {}) for {:?}", mode, asset_ids);
 
         if is_empty_asset_target(asset_ids.as_deref()) {
@@ -1643,10 +1700,32 @@ where
         );
 
         // Execute sync and merge with skipped results
-        let mut exec_result = self.execute_sync_plans(plans).await;
+        let mut exec_result = self.execute_sync_plans(plans, reporter).await;
         exec_result.skipped += result.skipped;
         exec_result.skipped_reasons.extend(result.skipped_reasons);
         Ok(exec_result)
+    }
+}
+
+#[async_trait]
+impl<Q, S, A, R> QuoteSyncServiceTrait for QuoteSyncService<Q, S, A, R>
+where
+    Q: QuoteStore + 'static,
+    S: SyncStateStore + 'static,
+    A: AssetRepositoryTrait + 'static,
+    R: ActivityRepositoryTrait + 'static,
+{
+    async fn sync(&self, mode: SyncMode, asset_ids: Option<Vec<String>>) -> Result<SyncResult> {
+        self.sync_inner(mode, asset_ids, None).await
+    }
+
+    async fn sync_with_progress(
+        &self,
+        mode: SyncMode,
+        asset_ids: Option<Vec<String>>,
+        reporter: SharedSyncProgressReporter,
+    ) -> Result<SyncResult> {
+        self.sync_inner(mode, asset_ids, Some(reporter)).await
     }
 
     async fn resync(&self, asset_ids: Option<Vec<String>>) -> Result<SyncResult> {

@@ -27,6 +27,9 @@ pub const MARKET_SYNC_START: &str = "market:sync-start";
 /// Event emitted when the market data sync process completes successfully.
 pub const MARKET_SYNC_COMPLETE: &str = "market:sync-complete";
 
+/// Event emitted with cumulative per-asset progress during a market data sync.
+pub const MARKET_SYNC_PROGRESS: &str = "market:sync-progress";
+
 /// Payload for market sync completion event.
 #[derive(Serialize)]
 pub struct MarketSyncResult {
@@ -36,6 +39,17 @@ pub struct MarketSyncResult {
     pub skipped_reasons: Vec<(String, String)>,
     /// Whether the frontend should display skipped reasons to the user.
     pub show_skipped_reasons: bool,
+}
+
+/// Payload for market sync progress event.
+///
+/// Fields correspond to the "syncing market data (total/synced/failed/skipped)" tip.
+#[derive(Clone, Copy, Debug, Serialize)]
+pub struct MarketSyncProgress {
+    pub total: usize,
+    pub synced: usize,
+    pub failed: usize,
+    pub skipped: usize,
 }
 
 /// Event emitted when the market data sync process encounters an error.

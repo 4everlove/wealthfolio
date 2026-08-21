@@ -408,6 +408,7 @@ export {
   listenFileDropHover,
   listenMarketSyncComplete,
   listenMarketSyncError,
+  listenMarketSyncProgress,
   listenMarketSyncStart,
   listenNavigateToRoute,
   listenPortfolioUpdateComplete,
