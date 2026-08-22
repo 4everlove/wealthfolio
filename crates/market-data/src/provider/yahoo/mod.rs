@@ -918,6 +918,11 @@ impl MarketDataProvider for YahooProvider {
                 InstrumentKind::Fx,
                 InstrumentKind::Option,
                 InstrumentKind::Metal,
+                // Yahoo returns bars for CME-style tickers passed through as
+                // symbols (e.g. "ES=F", "MESU25.CME"). Coverage is uneven for
+                // individual contract months; the resolver forwards the ticker
+                // as-is and lets Yahoo decide.
+                InstrumentKind::Futures,
             ],
             coverage: Coverage::global_best_effort(),
             supports_latest: true,
@@ -1462,6 +1467,7 @@ mod tests {
                 InstrumentKind::Fx,
                 InstrumentKind::Option,
                 InstrumentKind::Metal,
+                InstrumentKind::Futures,
             ],
             coverage: Coverage::global_best_effort(),
             supports_latest: true,

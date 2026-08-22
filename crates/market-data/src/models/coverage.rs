@@ -67,6 +67,9 @@ impl Coverage {
 
             // Bonds: No geographic filtering (ISIN-based routing handled by resolver)
             InstrumentId::Bond { .. } => true,
+
+            // Futures: No geographic filtering yet (CME-family only for v1).
+            InstrumentId::Futures { .. } => true,
         }
     }
 

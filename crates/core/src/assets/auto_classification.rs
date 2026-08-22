@@ -270,6 +270,8 @@ fn map_instrument_type_to_taxonomy_category(
         InstrumentType::Bond => Some("BOND_CORPORATE"),
         InstrumentType::Metal => Some("PHYSICAL_METAL"),
         InstrumentType::Fx => None,
+        // Taxonomy migration 2026-01-01-000002 defines FUTURE under DERIVATIVE.
+        InstrumentType::Futures => Some("FUTURE"),
     }
 }
 
@@ -283,6 +285,9 @@ fn map_instrument_type_to_asset_class(instrument_type: &InstrumentType) -> Optio
         InstrumentType::Bond => Some("FIXED_INCOME"),
         InstrumentType::Metal => Some("COMMODITIES"),
         InstrumentType::Fx => None,
+        // Most retail futures are equity-index (ES, NQ, RTY). Commodity/rate
+        // reclassification can happen later via provider profile enrichment.
+        InstrumentType::Futures => Some("EQUITY"),
     }
 }
 

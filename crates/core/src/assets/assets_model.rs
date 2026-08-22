@@ -46,12 +46,13 @@ pub enum AssetKind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum InstrumentType {
-    Equity, // Stocks, ETFs, funds
-    Crypto, // Cryptocurrencies
-    Fx,     // Currency exchange rates
-    Option, // Options contracts
-    Metal,  // Precious metal spot prices (XAU, XAG)
-    Bond,   // Fixed-income instruments (bonds, T-bills, notes)
+    Equity,  // Stocks, ETFs, funds
+    Crypto,  // Cryptocurrencies
+    Fx,      // Currency exchange rates
+    Option,  // Options contracts
+    Metal,   // Precious metal spot prices (XAU, XAG)
+    Bond,    // Fixed-income instruments (bonds, T-bills, notes)
+    Futures, // Futures contracts (equity index, energy, metals, rates, FX, crypto)
 }
 
 /// How the asset is priced/quoted
@@ -108,6 +109,7 @@ impl InstrumentType {
             InstrumentType::Option => "OPTION",
             InstrumentType::Metal => "METAL",
             InstrumentType::Bond => "BOND",
+            InstrumentType::Futures => "FUTURES",
         }
     }
 
@@ -120,6 +122,7 @@ impl InstrumentType {
             "OPTION" => Some(InstrumentType::Option),
             "METAL" => Some(InstrumentType::Metal),
             "BOND" => Some(InstrumentType::Bond),
+            "FUTURES" => Some(InstrumentType::Futures),
             _ => None,
         }
     }
@@ -127,8 +130,8 @@ impl InstrumentType {
     /// Parses provider/UI instrument labels into the canonical instrument type.
     pub fn from_external_str(s: &str) -> Option<Self> {
         match s.trim().to_uppercase().as_str() {
-            "EQUITY" | "STOCK" | "ETF" | "MUTUALFUND" | "MUTUAL_FUND" | "MUTUAL FUND" | "INDEX"
-            | "FUTURE" | "FUTURES" => Some(InstrumentType::Equity),
+            "EQUITY" | "STOCK" | "ETF" | "MUTUALFUND" | "MUTUAL_FUND" | "MUTUAL FUND"
+            | "INDEX" => Some(InstrumentType::Equity),
             "CRYPTO" | "CRYPTOCURRENCY" => Some(InstrumentType::Crypto),
             "FX" | "FOREX" | "CURRENCY" => Some(InstrumentType::Fx),
             "OPTION" => Some(InstrumentType::Option),
@@ -136,6 +139,7 @@ impl InstrumentType {
             "BOND" | "FIXEDINCOME" | "FIXED_INCOME" | "DEBT" | "MONEYMARKET" => {
                 Some(InstrumentType::Bond)
             }
+            "FUTURE" | "FUTURES" | "FUT" => Some(InstrumentType::Futures),
             _ => None,
         }
     }
@@ -165,6 +169,30 @@ pub struct BondSpec {
     pub face_value: Option<Decimal>,  // Par value per bond (typically 1000.0)
     pub coupon_frequency: Option<String>, // ANNUAL, SEMI_ANNUAL, QUARTERLY, MONTHLY
     pub isin: Option<String>,
+}
+
+/// Futures contract specification stored in Asset.metadata["futures"]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FuturesSpec {
+    /// CME-style root symbol (e.g. "ES", "CL", "6E").
+    pub root: String,
+    /// First day of the delivery month.
+    pub contract_month: chrono::NaiveDate,
+    /// Last trading day.
+    pub expiration: chrono::NaiveDate,
+    /// $-per-point value (50 for ES, 1000 for CL, etc.).
+    pub multiplier: Decimal,
+    /// Minimum price increment.
+    pub tick_size: Decimal,
+    /// $ value per tick (multiplier × tick_size for most contracts).
+    pub tick_value: Decimal,
+    /// Exchange MIC where the contract trades (XCME, XNYM, XCEC, XCBT).
+    pub exchange_mic: Option<String>,
+    /// True when expiration was inferred from a fallback rule because no
+    /// spec was available for this root at ingest time.
+    #[serde(default)]
+    pub estimated_expiration: bool,
 }
 
 /// Builds structured asset metadata (OptionSpec, BondSpec) for the given instrument type.
@@ -207,6 +235,24 @@ pub fn build_asset_metadata(
                 ..Default::default()
             };
             Some(serde_json::json!({ "bond": spec }))
+        }
+        InstrumentType::Futures => {
+            let parsed = crate::utils::futures_symbol::parse_futures_symbol(symbol).ok()?;
+            let spec = FuturesSpec {
+                root: parsed.root,
+                contract_month: parsed.contract_month,
+                expiration: parsed.expiration,
+                multiplier: parsed.multiplier,
+                tick_size: parsed.tick_size,
+                tick_value: parsed.tick_value,
+                exchange_mic: if parsed.exchange_mic.is_empty() {
+                    None
+                } else {
+                    Some(parsed.exchange_mic)
+                },
+                estimated_expiration: parsed.estimated_expiration,
+            };
+            Some(serde_json::json!({ "futures": spec }))
         }
         _ => None,
     }
@@ -410,12 +456,20 @@ impl Asset {
         self.instrument_type == Some(InstrumentType::Metal)
     }
 
+    /// Returns true if this asset is a futures contract.
+    pub fn is_futures(&self) -> bool {
+        self.instrument_type == Some(InstrumentType::Futures)
+    }
+
     /// Returns the contract multiplier for this asset.
     ///
     /// For options, this is the number of shares per contract (typically 100).
+    /// For futures, this is the $-per-point value (50 for ES, 1000 for CL, etc.).
     /// Other contract instruments can provide an explicit multiplier in asset metadata.
     pub fn contract_multiplier(&self) -> Decimal {
         if let Some(spec) = self.option_spec() {
+            spec.multiplier
+        } else if let Some(spec) = self.futures_spec() {
             spec.multiplier
         } else if let Some(multiplier) = self
             .metadata
@@ -446,6 +500,17 @@ impl Asset {
         self.metadata
             .as_ref()
             .and_then(|m| m.get("option"))
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+    }
+
+    /// Get futures metadata if this is a futures contract (instrument_type = FUTURES).
+    pub fn futures_spec(&self) -> Option<FuturesSpec> {
+        if !self.is_futures() {
+            return None;
+        }
+        self.metadata
+            .as_ref()
+            .and_then(|m| m.get("futures"))
             .and_then(|v| serde_json::from_value(v.clone()).ok())
     }
 
@@ -533,6 +598,12 @@ impl Asset {
                     .or_else(|| self.instrument_symbol.as_ref().map(|s| s.to_uppercase()))?;
                 Some(InstrumentId::Bond {
                     isin: Arc::from(isin),
+                })
+            }
+            InstrumentType::Futures => {
+                let ticker = self.instrument_symbol.as_ref()?;
+                Some(InstrumentId::Futures {
+                    ticker: Arc::from(ticker.as_str()),
                 })
             }
         }
@@ -1107,6 +1178,19 @@ pub fn canonicalize_market_identity(
                 quote_ccy: normalized_quote,
             }
         }
+        Some(InstrumentType::Futures) => {
+            // Futures use CME-style tickers (e.g. ESH26) globally unique across
+            // exchanges — no MIC needed. Uppercase for consistency.
+            if let Some(raw) = instrument_symbol.as_deref() {
+                instrument_symbol = Some(raw.to_uppercase());
+            }
+            CanonicalMarketIdentity {
+                display_code: instrument_symbol.clone(),
+                instrument_symbol,
+                instrument_exchange_mic: None,
+                quote_ccy: normalized_quote,
+            }
+        }
         Some(InstrumentType::Bond) => {
             // Bonds use ISIN as symbol (uppercase, no exchange suffix)
             if let Some(raw) = instrument_symbol.as_deref() {
@@ -1468,5 +1552,50 @@ mod tests {
             "US Treasury CUSIP with USD currency should get US prefix, got {}",
             sym
         );
+    }
+
+    #[test]
+    fn test_build_asset_metadata_futures_esh26() {
+        let meta = build_asset_metadata(Some(&InstrumentType::Futures), "ESH26")
+            .expect("known root should produce metadata");
+        let spec: FuturesSpec =
+            serde_json::from_value(meta.get("futures").cloned().unwrap()).unwrap();
+        assert_eq!(spec.root, "ES");
+        assert_eq!(spec.multiplier, dec!(50));
+        assert_eq!(spec.tick_size, dec!(0.25));
+        assert_eq!(spec.exchange_mic.as_deref(), Some("XCME"));
+        assert!(!spec.estimated_expiration);
+    }
+
+    #[test]
+    fn test_build_asset_metadata_futures_unknown_root_still_produces_spec() {
+        let meta = build_asset_metadata(Some(&InstrumentType::Futures), "XYZH26")
+            .expect("unknown root should still parse via fallback");
+        let spec: FuturesSpec =
+            serde_json::from_value(meta.get("futures").cloned().unwrap()).unwrap();
+        assert_eq!(spec.root, "XYZ");
+        assert_eq!(spec.multiplier, Decimal::ONE);
+        assert!(spec.estimated_expiration);
+    }
+
+    #[test]
+    fn test_futures_spec_serde_roundtrip() {
+        let orig = FuturesSpec {
+            root: "ES".into(),
+            contract_month: chrono::NaiveDate::from_ymd_opt(2026, 3, 1).unwrap(),
+            expiration: chrono::NaiveDate::from_ymd_opt(2026, 3, 20).unwrap(),
+            multiplier: dec!(50),
+            tick_size: dec!(0.25),
+            tick_value: dec!(12.5),
+            exchange_mic: Some("XCME".into()),
+            estimated_expiration: false,
+        };
+        let json = serde_json::to_value(&orig).unwrap();
+        // camelCase field names as declared.
+        assert!(json.get("contractMonth").is_some());
+        let back: FuturesSpec = serde_json::from_value(json).unwrap();
+        assert_eq!(back.root, orig.root);
+        assert_eq!(back.multiplier, orig.multiplier);
+        assert_eq!(back.expiration, orig.expiration);
     }
 }

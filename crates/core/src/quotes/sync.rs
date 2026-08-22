@@ -88,12 +88,12 @@ fn effective_market_today(now: DateTime<Utc>, exchange_mic: Option<&str>) -> Nai
 
 /// Pre-activity buffer in days for a given asset.
 ///
-/// Options are listed only weeks before purchase; using the equity 45-day
-/// buffer for them requests pre-listing history that no provider serves,
-/// permanently pinning the asset to `NeedsBackfill`. Return a short window
-/// for options and the standard buffer for everything else.
+/// Options and futures are listed only weeks/months before purchase; using the
+/// equity 45-day buffer for them requests pre-listing history that no provider
+/// serves, permanently pinning the asset to `NeedsBackfill`. Return a short
+/// window for these derivatives and the standard buffer for everything else.
 fn history_buffer_days_for(asset: &Asset) -> i64 {
-    if asset.is_option() {
+    if asset.is_option() || asset.is_futures() {
         OPTION_HISTORY_BUFFER_DAYS
     } else {
         QUOTE_HISTORY_BUFFER_DAYS
@@ -207,6 +207,15 @@ fn asset_skip_reason(asset: &Asset, allow_inactive: bool) -> Option<AssetSkipRea
         if let Some(spec) = asset.option_spec() {
             if spec.expiration < Utc::now().date_naive() {
                 return Some(AssetSkipReason::ExpiredOption);
+            }
+        }
+    }
+
+    // Skip expired futures — contract no longer trades.
+    if asset.is_futures() {
+        if let Some(spec) = asset.futures_spec() {
+            if spec.expiration < Utc::now().date_naive() {
+                return Some(AssetSkipReason::ExpiredFutures);
             }
         }
     }
@@ -401,6 +410,8 @@ pub enum AssetSkipReason {
     MaturedBond,
     /// Option has expired — no further quotes available.
     ExpiredOption,
+    /// Futures contract has expired — no further quotes available.
+    ExpiredFutures,
 }
 
 impl std::fmt::Display for AssetSkipReason {
@@ -419,6 +430,7 @@ impl std::fmt::Display for AssetSkipReason {
             }
             AssetSkipReason::MaturedBond => write!(f, "Bond has matured (price is par)"),
             AssetSkipReason::ExpiredOption => write!(f, "Option has expired"),
+            AssetSkipReason::ExpiredFutures => write!(f, "Futures contract has expired"),
         }
     }
 }
@@ -1484,12 +1496,15 @@ where
                 if matches!(reason, AssetSkipReason::MaturedBond) {
                     self.ensure_matured_bond_par_quote(asset).await;
                 }
-                if matches!(reason, AssetSkipReason::ExpiredOption) {
-                    // Clear any lingering sync errors so expired options
-                    // don't show up in health checks
+                if matches!(
+                    reason,
+                    AssetSkipReason::ExpiredOption | AssetSkipReason::ExpiredFutures
+                ) {
+                    // Clear any lingering sync errors so expired contracts
+                    // don't show up in health checks.
                     if let Err(e) = self.sync_state_store.update_after_sync(&asset.id).await {
                         warn!(
-                            "Failed to reset sync state for expired option {}: {:?}",
+                            "Failed to reset sync state for expired contract {}: {:?}",
                             asset.id, e
                         );
                     }

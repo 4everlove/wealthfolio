@@ -62,7 +62,8 @@ impl AssetResolutionInput {
             | InstrumentType::Fx
             | InstrumentType::Option
             | InstrumentType::Metal
-            | InstrumentType::Bond => true,
+            | InstrumentType::Bond
+            | InstrumentType::Futures => true,
         }
     }
 }

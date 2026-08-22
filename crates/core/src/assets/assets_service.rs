@@ -32,24 +32,28 @@ use wealthfolio_market_data::{
     ProviderId, ProviderInstrument, QuoteContext, ResolverChain, SymbolResolver,
 };
 
-/// Returns true when the given OCC-format option symbol is already expired.
+/// Returns true when the given symbol represents an already-expired derivative
+/// (option or futures).
 ///
 /// Used to short-circuit provider currency lookups during bulk CSV imports —
 /// no market data will ever be fetched for these contracts (they're skipped
-/// by `AssetSkipReason::ExpiredOption` in the sync loop), so paying the
-/// per-asset resolve_quote_ccy round-trip is pure waste.
+/// by `AssetSkipReason::ExpiredOption` / `ExpiredFutures` in the sync loop),
+/// so paying the per-asset resolve_quote_ccy round-trip is pure waste.
 fn is_expired_option_symbol(
     instrument_type: Option<&InstrumentType>,
     symbol: Option<&str>,
 ) -> bool {
-    if instrument_type != Some(&InstrumentType::Option) {
-        return false;
-    }
     let Some(sym) = symbol else { return false };
-    let Ok(parsed) = crate::utils::occ_symbol::parse_occ_symbol(sym) else {
-        return false;
-    };
-    parsed.expiration < chrono::Utc::now().date_naive()
+    let today = chrono::Utc::now().date_naive();
+    match instrument_type {
+        Some(&InstrumentType::Option) => crate::utils::occ_symbol::parse_occ_symbol(sym)
+            .ok()
+            .is_some_and(|parsed| parsed.expiration < today),
+        Some(&InstrumentType::Futures) => crate::utils::futures_symbol::parse_futures_symbol(sym)
+            .ok()
+            .is_some_and(|parsed| parsed.expiration < today),
+        _ => false,
+    }
 }
 
 /// Converts a provider's asset_type string to our InstrumentType enum.
@@ -816,9 +820,8 @@ impl AssetService {
     ) -> Option<ProviderInstrument> {
         let symbol = Arc::from(provider_symbol);
         match instrument_type {
-            Some(InstrumentType::Equity | InstrumentType::Option) | None => {
-                Some(ProviderInstrument::EquitySymbol { symbol })
-            }
+            Some(InstrumentType::Equity | InstrumentType::Option | InstrumentType::Futures)
+            | None => Some(ProviderInstrument::EquitySymbol { symbol }),
             Some(InstrumentType::Crypto) => Some(ProviderInstrument::CryptoSymbol { symbol }),
             Some(InstrumentType::Fx) => Some(ProviderInstrument::FxSymbol { symbol }),
             Some(InstrumentType::Metal) => Some(ProviderInstrument::MetalSymbol {
@@ -857,6 +860,9 @@ impl AssetService {
             }),
             InstrumentType::Bond => Some(MarketInstrumentId::Bond {
                 isin: Arc::from(symbol),
+            }),
+            InstrumentType::Futures => Some(MarketInstrumentId::Futures {
+                ticker: Arc::from(symbol),
             }),
         }
     }

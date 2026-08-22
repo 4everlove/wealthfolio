@@ -8,12 +8,13 @@ use super::types::{Currency, Mic};
 /// Used for provider capability filtering (separate from portfolio's AssetKind).
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum InstrumentKind {
-    Equity, // Exchange-traded securities
-    Crypto, // Cryptocurrencies
-    Fx,     // Foreign exchange pairs
-    Metal,  // Precious metals
-    Option, // Options contracts
-    Bond,   // Fixed-income instruments
+    Equity,  // Exchange-traded securities
+    Crypto,  // Cryptocurrencies
+    Fx,      // Foreign exchange pairs
+    Metal,   // Precious metals
+    Option,  // Options contracts
+    Bond,    // Fixed-income instruments
+    Futures, // Futures contracts
 }
 
 /// Asset classification
@@ -55,6 +56,10 @@ pub enum InstrumentId {
 
     /// Fixed-income instrument (ISIN)
     Bond { isin: Arc<str> },
+
+    /// Futures contract identified by its CME-style ticker (e.g. "ESH26").
+    /// Providers resolve the ticker to their own format at lookup time.
+    Futures { ticker: Arc<str> },
 }
 
 impl InstrumentId {
@@ -67,6 +72,9 @@ impl InstrumentId {
             Self::Metal { .. } => AssetKind::Commodity,
             Self::Option { .. } => AssetKind::Option,
             Self::Bond { .. } => AssetKind::Security,
+            // Futures share the derivative-y flavor of options; portfolio side
+            // treats them as their own class via the Rust InstrumentType.
+            Self::Futures { .. } => AssetKind::Security,
         }
     }
 
@@ -79,6 +87,7 @@ impl InstrumentId {
             Self::Metal { .. } => InstrumentKind::Metal,
             Self::Option { .. } => InstrumentKind::Option,
             Self::Bond { .. } => InstrumentKind::Bond,
+            Self::Futures { .. } => InstrumentKind::Futures,
         }
     }
 }

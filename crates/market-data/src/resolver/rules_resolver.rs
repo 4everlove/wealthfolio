@@ -194,6 +194,31 @@ impl RulesResolver {
         }
     }
 
+    /// Resolve a futures contract to a provider-specific symbol.
+    ///
+    /// Yahoo has no per-contract-month coverage for futures — passing `ESH26`
+    /// returns 404. It does return bars for the continuous back-adjusted series
+    /// keyed as `<ROOT>=F` (`ES=F`, `CL=F`, `GC=F`, `6E=F`, ...). Map the CME
+    /// ticker to that continuous series so open long-term futures at least get
+    /// approximate MTM values. Providers that carry actual per-contract series
+    /// can override later.
+    fn resolve_futures(
+        &self,
+        ticker: &Arc<str>,
+        provider: &ProviderId,
+    ) -> Option<ProviderInstrument> {
+        match provider.as_ref() {
+            "YAHOO" => {
+                let root = strip_month_year_suffix(ticker.as_ref())?;
+                let continuous = format!("{}=F", root);
+                Some(ProviderInstrument::EquitySymbol {
+                    symbol: Arc::from(continuous.as_str()),
+                })
+            }
+            _ => None,
+        }
+    }
+
     /// Resolve a metal instrument.
     fn resolve_metal(
         &self,
@@ -230,6 +255,37 @@ impl Default for RulesResolver {
     }
 }
 
+/// Strip trailing year digits and month code from a CME futures ticker,
+/// returning the root symbol. `ESH26` → `ES`, `MESU5` → `MES`, `6EM26` → `6E`.
+///
+/// Returns `None` when the tail isn't a valid `<MONTH_CODE><YEAR_DIGITS>` suffix
+/// so we don't silently mangle unrelated symbols passed in as futures.
+fn strip_month_year_suffix(ticker: &str) -> Option<String> {
+    let up = ticker.trim().to_uppercase();
+    let bytes = up.as_bytes();
+    let mut i = bytes.len();
+    while i > 0 && bytes[i - 1].is_ascii_digit() {
+        i -= 1;
+    }
+    let year_len = up.len() - i;
+    if year_len == 0 || year_len > 2 || i == 0 {
+        return None;
+    }
+    let month_char = bytes[i - 1] as char;
+    if !matches!(
+        month_char,
+        'F' | 'G' | 'H' | 'J' | 'K' | 'M' | 'N' | 'Q' | 'U' | 'V' | 'X' | 'Z'
+    ) {
+        return None;
+    }
+    let root = &up[..i - 1];
+    if root.is_empty() {
+        None
+    } else {
+        Some(root.to_string())
+    }
+}
+
 impl Resolver for RulesResolver {
     fn resolve(
         &self,
@@ -247,6 +303,7 @@ impl Resolver for RulesResolver {
                 InstrumentId::Metal { code, .. } => code.clone(),
                 InstrumentId::Bond { isin } => isin.clone(),
                 InstrumentId::Option { occ_symbol } => occ_symbol.clone(),
+                InstrumentId::Futures { ticker } => ticker.clone(),
             };
             return Some(Ok(ResolvedInstrument {
                 instrument: ProviderInstrument::EquitySymbol { symbol },
@@ -280,6 +337,11 @@ impl Resolver for RulesResolver {
             InstrumentId::Bond { isin } => {
                 (self.resolve_bond(isin, provider)?, ResolutionSource::Rules)
             }
+
+            InstrumentId::Futures { ticker } => (
+                self.resolve_futures(ticker, provider)?,
+                ResolutionSource::Rules,
+            ),
         };
 
         Some(Ok(ResolvedInstrument { instrument, source }))
@@ -289,6 +351,57 @@ impl Resolver for RulesResolver {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn make_futures_context(ticker: &str) -> QuoteContext {
+        QuoteContext {
+            instrument: InstrumentId::Futures {
+                ticker: Arc::from(ticker),
+            },
+            identifiers: Default::default(),
+            overrides: None,
+            currency_hint: None,
+            preferred_provider: None,
+            bond_metadata: None,
+            custom_provider_code: None,
+        }
+    }
+
+    #[test]
+    fn strip_suffix_common_roots() {
+        assert_eq!(strip_month_year_suffix("ESH26"), Some("ES".into()));
+        assert_eq!(strip_month_year_suffix("MESU25"), Some("MES".into()));
+        assert_eq!(strip_month_year_suffix("6EM26"), Some("6E".into()));
+        assert_eq!(strip_month_year_suffix("CLZ26"), Some("CL".into()));
+        assert_eq!(strip_month_year_suffix("ESH6"), Some("ES".into())); // 1-digit year
+    }
+
+    #[test]
+    fn strip_suffix_rejects_non_futures_shapes() {
+        assert_eq!(strip_month_year_suffix("AAPL"), None); // no digit tail
+        assert_eq!(strip_month_year_suffix("ESA26"), None); // A not a month code
+        assert_eq!(strip_month_year_suffix("H26"), None); // no root
+    }
+
+    #[test]
+    fn resolves_futures_to_yahoo_continuous() {
+        let resolver = RulesResolver::new();
+        let ctx = make_futures_context("ESH26");
+        let resolved = resolver
+            .resolve(&"YAHOO".into(), &ctx)
+            .expect("YAHOO must claim the futures instrument")
+            .expect("resolution must succeed");
+        match resolved.instrument {
+            ProviderInstrument::EquitySymbol { symbol } => assert_eq!(symbol.as_ref(), "ES=F"),
+            other => panic!("expected EquitySymbol, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn futures_declines_for_unsupported_provider() {
+        let resolver = RulesResolver::new();
+        let ctx = make_futures_context("ESH26");
+        assert!(resolver.resolve(&"ALPHA_VANTAGE".into(), &ctx).is_none());
+    }
 
     fn make_equity_context(ticker: &str, mic: Option<&'static str>) -> QuoteContext {
         QuoteContext {

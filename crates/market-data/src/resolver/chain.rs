@@ -111,6 +111,9 @@ impl SymbolResolver for ResolverChain {
             InstrumentId::Metal { quote, .. } => Some(quote.clone()),
             InstrumentId::Option { .. } => None,
             InstrumentId::Bond { .. } => None,
+            // Futures currency lives on the FuturesSpec, not on InstrumentId.
+            // Callers already carry it in QuoteContext.
+            InstrumentId::Futures { .. } => None,
         }
     }
 }
