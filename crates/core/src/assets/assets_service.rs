@@ -32,6 +32,26 @@ use wealthfolio_market_data::{
     ProviderId, ProviderInstrument, QuoteContext, ResolverChain, SymbolResolver,
 };
 
+/// Returns true when the given OCC-format option symbol is already expired.
+///
+/// Used to short-circuit provider currency lookups during bulk CSV imports —
+/// no market data will ever be fetched for these contracts (they're skipped
+/// by `AssetSkipReason::ExpiredOption` in the sync loop), so paying the
+/// per-asset resolve_quote_ccy round-trip is pure waste.
+fn is_expired_option_symbol(
+    instrument_type: Option<&InstrumentType>,
+    symbol: Option<&str>,
+) -> bool {
+    if instrument_type != Some(&InstrumentType::Option) {
+        return false;
+    }
+    let Some(sym) = symbol else { return false };
+    let Ok(parsed) = crate::utils::occ_symbol::parse_occ_symbol(sym) else {
+        return false;
+    };
+    parsed.expiration < chrono::Utc::now().date_naive()
+}
+
 /// Converts a provider's asset_type string to our InstrumentType enum.
 /// Provider data uses various naming conventions (e.g., "CRYPTOCURRENCY", "ETF", "Equity").
 /// Returns None if the string doesn't map to a known type (caller decides fallback).
@@ -2124,14 +2144,15 @@ impl AssetServiceTrait for AssetService {
             .and_then(|m| m.instrument_exchange_mic.clone());
 
         let instrument_type = inferred_instrument_type;
+        let symbol_for_resolution = metadata
+            .as_ref()
+            .and_then(|m| m.instrument_symbol.as_deref().or(m.display_code.as_deref()));
         let allow_provider_lookup = quote_mode == QuoteMode::Market
             && !matches!(
                 instrument_type.as_ref(),
                 Some(InstrumentType::Crypto | InstrumentType::Fx)
-            );
-        let symbol_for_resolution = metadata
-            .as_ref()
-            .and_then(|m| m.instrument_symbol.as_deref().or(m.display_code.as_deref()));
+            )
+            && !is_expired_option_symbol(instrument_type.as_ref(), symbol_for_resolution);
         let explicit_requested_quote_ccy = metadata
             .as_ref()
             .and_then(|m| m.requested_quote_ccy.as_deref());
@@ -2545,15 +2566,16 @@ impl AssetServiceTrait for AssetService {
             let quote_mode = resolved_spec
                 .quote_mode
                 .unwrap_or_else(|| Self::default_quote_mode_for_kind(&resolved_spec.kind));
-            let allow_provider_lookup = quote_mode == QuoteMode::Market
-                && !matches!(
-                    resolved_spec.instrument_type.as_ref(),
-                    Some(InstrumentType::Crypto | InstrumentType::Fx)
-                );
             let symbol = resolved_spec
                 .instrument_symbol
                 .as_deref()
                 .or(resolved_spec.display_code.as_deref());
+            let allow_provider_lookup = quote_mode == QuoteMode::Market
+                && !matches!(
+                    resolved_spec.instrument_type.as_ref(),
+                    Some(InstrumentType::Crypto | InstrumentType::Fx)
+                )
+                && !is_expired_option_symbol(resolved_spec.instrument_type.as_ref(), symbol);
             let exchange_mic = resolved_spec.instrument_exchange_mic.as_deref();
             let instrument_type = resolved_spec.instrument_type.as_ref();
             let explicit_quote_ccy = resolved_spec.requested_quote_ccy.as_deref();
