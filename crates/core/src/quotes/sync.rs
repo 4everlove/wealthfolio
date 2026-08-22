@@ -86,6 +86,20 @@ fn effective_market_today(now: DateTime<Utc>, exchange_mic: Option<&str>) -> Nai
     time_utils::market_effective_date(now, exchange_mic)
 }
 
+/// Pre-activity buffer in days for a given asset.
+///
+/// Options are listed only weeks before purchase; using the equity 45-day
+/// buffer for them requests pre-listing history that no provider serves,
+/// permanently pinning the asset to `NeedsBackfill`. Return a short window
+/// for options and the standard buffer for everything else.
+fn history_buffer_days_for(asset: &Asset) -> i64 {
+    if asset.is_option() {
+        OPTION_HISTORY_BUFFER_DAYS
+    } else {
+        QUOTE_HISTORY_BUFFER_DAYS
+    }
+}
+
 fn market_fetch_end_date(now: DateTime<Utc>, exchange_mic: Option<&str>) -> NaiveDate {
     time_utils::market_calendar_date(now, exchange_mic)
 }
@@ -307,7 +321,7 @@ fn calculate_targeted_closed_incremental_window(
         .or_else(|| {
             inputs
                 .activity_min
-                .map(|activity_min| activity_min - Duration::days(QUOTE_HISTORY_BUFFER_DAYS))
+                .map(|activity_min| activity_min - Duration::days(inputs.history_buffer_days))
         })
         .unwrap_or_else(|| end_date - Duration::days(MIN_SYNC_LOOKBACK_DAYS));
 
@@ -707,7 +721,7 @@ where
                 );
                 let (start, end) = calculate_sync_window(&category, inputs, planning_today)
                     .unwrap_or((
-                        fetch_end_date - Duration::days(QUOTE_HISTORY_BUFFER_DAYS),
+                        fetch_end_date - Duration::days(history_buffer_days_for(asset)),
                         fetch_end_date,
                     ));
 
@@ -732,7 +746,7 @@ where
                         .map(|dt| dt.date_naive());
 
                     let start = global_earliest
-                        .map(|d| d - Duration::days(QUOTE_HISTORY_BUFFER_DAYS))
+                        .map(|d| d - Duration::days(history_buffer_days_for(asset)))
                         .unwrap_or_else(|| fetch_end_date - Duration::days(days));
 
                     debug!(
@@ -743,7 +757,7 @@ where
                 } else {
                     let start = inputs
                         .activity_min
-                        .map(|d| d - Duration::days(QUOTE_HISTORY_BUFFER_DAYS))
+                        .map(|d| d - Duration::days(history_buffer_days_for(asset)))
                         .unwrap_or_else(|| fetch_end_date - Duration::days(days));
                     (start, fetch_end_date)
                 }
@@ -1275,6 +1289,7 @@ where
                 activity_max,
                 quote_min,
                 quote_max,
+                history_buffer_days: history_buffer_days_for(asset),
             };
 
             let effective_today =
@@ -1557,6 +1572,7 @@ where
                 activity_max,
                 quote_min,
                 quote_max,
+                history_buffer_days: history_buffer_days_for(asset),
             };
 
             // Determine category for priority
@@ -1754,10 +1770,17 @@ where
         let existing = self.sync_state_store.get_by_asset_id(symbol)?;
 
         if let Some(mut state) = existing {
-            // Check if we need backfill by computing quote bounds on-the-fly
-            // Use QUOTE_HISTORY_BUFFER_DAYS + BACKFILL_SAFETY_MARGIN_DAYS for conservative detection
-            let required_start = activity_date.0
-                - Duration::days(QUOTE_HISTORY_BUFFER_DAYS + BACKFILL_SAFETY_MARGIN_DAYS);
+            // Check if we need backfill by computing quote bounds on-the-fly.
+            // Pick the per-asset buffer so short-lived instruments (options)
+            // don't get flagged as NeedsBackfill for unreachable pre-listing history.
+            let buffer_days = self
+                .asset_repo
+                .get_by_id(symbol)
+                .ok()
+                .map(|asset| history_buffer_days_for(&asset))
+                .unwrap_or(QUOTE_HISTORY_BUFFER_DAYS);
+            let required_start =
+                activity_date.0 - Duration::days(buffer_days + BACKFILL_SAFETY_MARGIN_DAYS);
 
             // Compute quote bounds for this asset filtered by provider
             let quote_bounds = self
@@ -2270,6 +2293,7 @@ mod tests {
             activity_max: None,
             quote_min: None,
             quote_max: None,
+            history_buffer_days: QUOTE_HISTORY_BUFFER_DAYS,
         };
         let inputs_with_history_start = SyncPlanningInputs {
             activity_min: Some(NaiveDate::from_ymd_opt(2025, 11, 1).unwrap()),
@@ -2299,6 +2323,7 @@ mod tests {
             activity_max: Some(NaiveDate::from_ymd_opt(2026, 2, 15).unwrap()),
             quote_min: Some(NaiveDate::from_ymd_opt(2025, 1, 1).unwrap()),
             quote_max: Some(NaiveDate::from_ymd_opt(2026, 2, 1).unwrap()),
+            history_buffer_days: QUOTE_HISTORY_BUFFER_DAYS,
         };
 
         let (start, end) = calculate_targeted_closed_incremental_window(
@@ -2320,6 +2345,7 @@ mod tests {
             activity_max: Some(NaiveDate::from_ymd_opt(2026, 2, 15).unwrap()),
             quote_min: Some(NaiveDate::from_ymd_opt(2025, 1, 1).unwrap()),
             quote_max: Some(NaiveDate::from_ymd_opt(2026, 6, 1).unwrap()),
+            history_buffer_days: QUOTE_HISTORY_BUFFER_DAYS,
         };
 
         assert_eq!(

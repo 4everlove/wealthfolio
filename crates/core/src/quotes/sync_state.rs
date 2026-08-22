@@ -169,9 +169,9 @@ impl SyncCategory {
 // Sync Planning (Explicit Inputs)
 // =============================================================================
 
-use super::constants::{
-    BACKFILL_SAFETY_MARGIN_DAYS, MIN_SYNC_LOOKBACK_DAYS, OVERLAP_DAYS, QUOTE_HISTORY_BUFFER_DAYS,
-};
+use super::constants::{BACKFILL_SAFETY_MARGIN_DAYS, MIN_SYNC_LOOKBACK_DAYS, OVERLAP_DAYS};
+#[cfg(test)]
+use super::constants::QUOTE_HISTORY_BUFFER_DAYS;
 
 /// Inputs for sync planning, computed on-the-fly from operational tables.
 ///
@@ -191,6 +191,12 @@ pub struct SyncPlanningInputs {
     pub quote_min: Option<NaiveDate>,
     /// Latest quote date for this asset+provider (computed from quotes table)
     pub quote_max: Option<NaiveDate>,
+    /// Pre-activity buffer in days for this asset.
+    ///
+    /// Callers pass a per-asset value so short-lived instruments (options)
+    /// don't get trapped in `NeedsBackfill` requesting pre-listing history.
+    /// Defaults to `QUOTE_HISTORY_BUFFER_DAYS` for equities.
+    pub history_buffer_days: i64,
 }
 
 /// Determines the sync category based on explicit planning inputs.
@@ -210,7 +216,7 @@ pub fn determine_sync_category(
     // Check if needs backfill (activity date - buffer - margin before earliest quote)
     if let (Some(activity_min), Some(quote_min)) = (inputs.activity_min, inputs.quote_min) {
         let required_start =
-            activity_min - Duration::days(QUOTE_HISTORY_BUFFER_DAYS + BACKFILL_SAFETY_MARGIN_DAYS);
+            activity_min - Duration::days(inputs.history_buffer_days + BACKFILL_SAFETY_MARGIN_DAYS);
         if required_start < quote_min {
             return SyncCategory::NeedsBackfill;
         }
@@ -260,9 +266,9 @@ pub fn calculate_sync_window(
                 .or_else(|| {
                     inputs
                         .activity_min
-                        .map(|d| d - Duration::days(QUOTE_HISTORY_BUFFER_DAYS))
+                        .map(|d| d - Duration::days(inputs.history_buffer_days))
                 })
-                .unwrap_or_else(|| today - Duration::days(QUOTE_HISTORY_BUFFER_DAYS));
+                .unwrap_or_else(|| today - Duration::days(inputs.history_buffer_days));
 
             // Ensure minimum lookback
             let start = if start >= today {
@@ -278,8 +284,8 @@ pub fn calculate_sync_window(
             // Full history from activity start
             let start = inputs
                 .activity_min
-                .map(|d| d - Duration::days(QUOTE_HISTORY_BUFFER_DAYS))
-                .unwrap_or_else(|| today - Duration::days(QUOTE_HISTORY_BUFFER_DAYS));
+                .map(|d| d - Duration::days(inputs.history_buffer_days))
+                .unwrap_or_else(|| today - Duration::days(inputs.history_buffer_days));
 
             Some((start, today))
         }
@@ -290,7 +296,7 @@ pub fn calculate_sync_window(
             let start = inputs
                 .activity_min
                 .map(|d| {
-                    d - Duration::days(QUOTE_HISTORY_BUFFER_DAYS + BACKFILL_SAFETY_MARGIN_DAYS)
+                    d - Duration::days(inputs.history_buffer_days + BACKFILL_SAFETY_MARGIN_DAYS)
                 })
                 .unwrap_or(today);
 
@@ -565,6 +571,7 @@ mod tests {
             activity_max,
             quote_min,
             quote_max,
+            history_buffer_days: QUOTE_HISTORY_BUFFER_DAYS,
         }
     }
 

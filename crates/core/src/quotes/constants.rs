@@ -52,6 +52,14 @@ pub const BACKFILL_SAFETY_MARGIN_DAYS: i64 = 7;
 /// (e.g., weekends, holidays, market not yet open).
 pub const MIN_SYNC_LOOKBACK_DAYS: i64 = 5;
 
+/// Pre-activity buffer for option assets.
+///
+/// Options are listed only weeks before purchase, so the equity-oriented
+/// 45-day buffer reaches past the contract's listing date and traps the
+/// asset in perpetual `NeedsBackfill`. A short 5-day window is enough
+/// to warm up valuation for daily-EOD pricing.
+pub const OPTION_HISTORY_BUFFER_DAYS: i64 = 5;
+
 /// Days to look back when filling missing quotes for gap-filling operations.
 pub const QUOTE_LOOKBACK_DAYS: i64 = 14;
 
