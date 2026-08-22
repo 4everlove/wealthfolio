@@ -121,3 +121,10 @@ apps/tauri/db/
 tasks
 **/*.local.md
 wealthfolio.db
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
