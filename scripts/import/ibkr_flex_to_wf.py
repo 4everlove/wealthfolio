@@ -262,9 +262,11 @@ def convert_trades(
         key = (acct, row["Symbol"])
         per_asset[key].append(row)
 
-    # For aggregation: (account, date, currency, bucket) → running sum of NetCash + fees
+    # For aggregation: (account, date, currency, bucket) → running sum of NetCash
+    # NetCash already has commission netted in — do NOT add fee separately (would
+    # double-count when Wealthfolio's CREDIT handler subtracts fee from amount).
     agg_cash: dict[tuple[str, date, str, str], Decimal] = defaultdict(lambda: Decimal(0))
-    agg_fees: dict[tuple[str, date, str, str], Decimal] = defaultdict(lambda: Decimal(0))
+    agg_commission_ref: dict[tuple[str, date, str, str], Decimal] = defaultdict(lambda: Decimal(0))
     agg_settle_keys: set[tuple[str, str, str, str, str, str, str]] = set()
 
     per_trade_rows: list[dict] = []
@@ -297,17 +299,21 @@ def convert_trades(
                         agg_cash[key] += Decimal(r["NetCash"] or "0")
                     except Exception:
                         pass
-                    # IBCommission is already netted into NetCash for ExchTrade;
-                    # only pull it out for reporting.
                     try:
-                        agg_fees[key] += abs(Decimal(r["IBCommission"] or "0"))
+                        agg_commission_ref[key] += abs(Decimal(r["IBCommission"] or "0"))
                     except Exception:
                         pass
-                # Fold matching OptionEAE Cash Settlements into the bucket.
+                # Fold matching OptionEAE Cash Settlement into the bucket ONCE
+                # per unique settle key (a single 0DTE typically has many opening
+                # rows that all map to the same settlement).
                 if ac == "OPT":
+                    seen_in_day: set = set()
                     for r in day_rows:
                         settle_key = _settle_key_from_trade(r)
-                        if settle_key in cash_settlements:
+                        if settle_key in seen_in_day:
+                            continue
+                        seen_in_day.add(settle_key)
+                        if settle_key in cash_settlements and settle_key not in agg_settle_keys:
                             agg_cash[key] += cash_settlements[settle_key]
                             agg_settle_keys.add(settle_key)
             else:
@@ -341,25 +347,30 @@ def convert_trades(
             sourceRecordId=synth_id("ibkr_eae", acct, occ, dstr),
         ))
 
-    # Emit aggregated CREDIT rows.
+    # Emit aggregated CREDIT rows with SIGNED amount + gross-of-fee. Wealthfolio
+    # handle_income computes net = amount - fee - tax, applied signed, so this
+    # works symmetrically for winning and losing days.
+    #   NetCash sum is fee-netted, so amount = NetCash + commission (grosses up).
     for (acct, trade_date, currency, bucket), amt in agg_cash.items():
         wf_acct = account_map.get(acct, acct)
-        fees = agg_fees[(acct, trade_date, currency, bucket)]
-        # CREDIT handles positive AND negative amounts via handle_income → add_cash.
+        commission = agg_commission_ref[(acct, trade_date, currency, bucket)]
+        # gross = net + fee; Wealthfolio computes net_amount = amount - fee.
+        # Works symmetrically for winning (positive amt) and losing (negative amt) days.
+        gross = amt + commission
         output.append(wf_row(
             date=trade_date.isoformat(),
             symbol="",
             instrumentType="",
             quantity="1",
             activityType="CREDIT",
-            unitPrice=fmt_amount(amt),
+            unitPrice=fmt_amount(gross),
             currency=currency,
-            fee=fmt_amount(fees),
+            fee=fmt_amount(commission),
             tax="0",
-            amount=fmt_amount(amt),
+            amount=fmt_amount(gross),
             subtype="IBKR_DAILY",
             accountId=wf_acct,
-            notes=f"IBKR {bucket} daily P&L (round-trip aggregate)",
+            notes=f"IBKR {bucket} daily P&L (gross of commission)",
             sourceRecordId=synth_id("ibkr_agg", acct, trade_date, currency, bucket),
         ))
 
@@ -476,6 +487,11 @@ def _emit_trade_row(
 
 def convert_cash_txns(cash_rows: list[dict], account_map: dict[str, str]) -> list[dict]:
     output = []
+    # Fees aggregated to one row per (account, date, currency); most days have
+    # 5-10 small market-data fee items that add no signal individually.
+    fee_agg: dict[tuple[str, date, str], Decimal] = defaultdict(lambda: Decimal(0))
+    fee_agg_count: dict[tuple[str, date, str], int] = defaultdict(int)
+
     for r in cash_rows:
         acct = r["ClientAccountID"]
         if not acct:
@@ -504,11 +520,19 @@ def convert_cash_txns(cash_rows: list[dict], account_map: dict[str, str]) -> lis
             tick = description.split("(")[0].strip()
             symbol = tick
             instrument_type = "EQUITY"
-        elif typ in ("Broker Interest Received", "Broker Interest Paid"):
+        elif typ == "Broker Interest Received":
             activity_type = "INTEREST"
-        elif typ == "Other Fees":
+        elif typ == "Broker Interest Paid":
+            # Route to FEE — Wealthfolio's INTEREST is always magnitude
+            # (STAKING_REWARD etc.), so a negative interest amount would be
+            # abs'd on import. FEE always subtracts cash, matching the intent.
             activity_type = "FEE"
             amount = abs(amount)
+        elif typ == "Other Fees":
+            # Sum into daily aggregate; emitted after the loop.
+            fee_agg[(acct, d, currency)] += abs(amount)
+            fee_agg_count[(acct, d, currency)] += 1
+            continue
         elif typ in ("Deposits & Withdrawals", "Deposits", "Withdrawals"):
             activity_type = "DEPOSIT" if amount >= 0 else "WITHDRAWAL"
             amount = abs(amount)
@@ -530,6 +554,24 @@ def convert_cash_txns(cash_rows: list[dict], account_map: dict[str, str]) -> lis
             accountId=wf_acct,
             notes=description[:200],
             sourceRecordId=synth_id("ibkr_cash", acct, d, description, r["Amount"]),
+        ))
+
+    for (acct, d, currency), total in fee_agg.items():
+        wf_acct = account_map.get(acct, acct)
+        count = fee_agg_count[(acct, d, currency)]
+        output.append(wf_row(
+            date=d.isoformat(),
+            symbol="",
+            instrumentType="",
+            quantity="1",
+            activityType="FEE",
+            unitPrice=fmt_amount(total),
+            currency=currency,
+            fee="0", tax="0",
+            amount=fmt_amount(total),
+            accountId=wf_acct,
+            notes=f"IBKR daily fees ({count} items)",
+            sourceRecordId=synth_id("ibkr_fee_agg", acct, d, currency),
         ))
     return output
 
