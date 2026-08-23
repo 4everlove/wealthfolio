@@ -419,18 +419,9 @@ impl ActivityService {
     }
 
     fn parse_instrument_type(value: Option<&str>) -> Option<InstrumentType> {
-        match value?.trim().to_uppercase().as_str() {
-            "EQUITY" | "STOCK" | "ETF" | "MUTUALFUND" | "MUTUAL_FUND" | "INDEX" | "FUTURE"
-            | "FUTURES" => Some(InstrumentType::Equity),
-            "CRYPTO" | "CRYPTOCURRENCY" => Some(InstrumentType::Crypto),
-            "FX" | "FOREX" | "CURRENCY" => Some(InstrumentType::Fx),
-            "OPTION" => Some(InstrumentType::Option),
-            "METAL" | "COMMODITY" => Some(InstrumentType::Metal),
-            "BOND" | "FIXEDINCOME" | "FIXED_INCOME" | "DEBT" | "MONEYMARKET" => {
-                Some(InstrumentType::Bond)
-            }
-            _ => None,
-        }
+        // Delegate to the canonical parser so alias updates (e.g. FUTURE(S) → Futures)
+        // propagate here without a second place to keep in sync.
+        InstrumentType::from_external_str(value?)
     }
 
     fn normalize_quote_ccy(value: Option<&str>) -> Option<String> {
