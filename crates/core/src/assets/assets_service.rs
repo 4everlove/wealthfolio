@@ -1581,26 +1581,33 @@ impl AssetServiceTrait for AssetService {
                 instrument_type_is_explicit: instrument_type_input.is_some(),
             };
             let mut provider_result = None;
-            for search_symbol in Self::import_provider_search_symbols(
-                &resolution_symbol,
-                &local_canonical_symbol,
-                exchange_mic.as_deref(),
-                local_quote_ccy,
-                local_instrument_type.as_ref(),
-            ) {
-                provider_result = self
-                    .quote_service
-                    .search_symbol_with_currency(&search_symbol, Some(&terminal_currency))
-                    .await
-                    .ok()
-                    .and_then(|results| {
-                        Self::select_provider_result_for_import(
-                            results,
-                            &provider_selection_constraints,
-                        )
-                    });
-                if provider_result.is_some() {
-                    break;
+            // OCC option and CME futures symbols are self-describing. Skip the
+            // provider search entirely — Yahoo has no per-contract-month
+            // coverage for either, so the search 404s (or returns a `.CME`
+            // suggestion that also 404s at fetch time), and downstream code
+            // constructs a valid draft from local metadata alone.
+            if !input.reviewed_metadata_is_sufficient() {
+                for search_symbol in Self::import_provider_search_symbols(
+                    &resolution_symbol,
+                    &local_canonical_symbol,
+                    exchange_mic.as_deref(),
+                    local_quote_ccy,
+                    local_instrument_type.as_ref(),
+                ) {
+                    provider_result = self
+                        .quote_service
+                        .search_symbol_with_currency(&search_symbol, Some(&terminal_currency))
+                        .await
+                        .ok()
+                        .and_then(|results| {
+                            Self::select_provider_result_for_import(
+                                results,
+                                &provider_selection_constraints,
+                            )
+                        });
+                    if provider_result.is_some() {
+                        break;
+                    }
                 }
             }
 
