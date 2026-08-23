@@ -4536,6 +4536,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_create_credit_preserves_negative_amount() {
+        // CREDIT is the one type that must NOT be sign-normalized: a negative
+        // amount represents a legitimate cash outflow (daily trading loss).
+        let account_service = Arc::new(MockAccountService::new());
+        let asset_service = Arc::new(MockAssetService::new());
+        let fx_service = Arc::new(MockFxService::new());
+        let activity_repository = Arc::new(MockActivityRepository::new());
+        account_service.add_account(create_test_account("acc-1", "USD"));
+
+        let quote_service = Arc::new(MockQuoteService);
+        let activity_service = ActivityService::new(
+            activity_repository,
+            account_service,
+            asset_service,
+            fx_service,
+            quote_service,
+        );
+
+        let activity = activity_service
+            .create_activity(NewActivity {
+                id: Some("credit-loss".to_string()),
+                account_id: "acc-1".to_string(),
+                asset: None,
+                activity_type: "CREDIT".to_string(),
+                subtype: Some("IBKR_DAILY".to_string()),
+                activity_date: "2024-01-15".to_string(),
+                quantity: Some(dec!(1)),
+                unit_price: Some(dec!(-89040)),
+                currency: "USD".to_string(),
+                fee: Some(dec!(1098)),
+                tax: None,
+                amount: Some(dec!(-89040)),
+                status: None,
+                notes: None,
+                fx_rate: None,
+                metadata: None,
+                needs_review: None,
+                source_system: None,
+                source_record_id: None,
+                source_group_id: None,
+                idempotency_key: None,
+                import_run_id: None,
+            })
+            .await
+            .expect("negative CREDIT should preserve sign");
+
+        assert_eq!(activity.amount, Some(dec!(-89040)));
+        assert_eq!(activity.fee, Some(dec!(1098)));
+    }
+
+    #[tokio::test]
     async fn test_sync_prepare_canonicalizes_provider_position_subtype_label() {
         let account_service = Arc::new(MockAccountService::new());
         let asset_service = Arc::new(MockAssetService::new());

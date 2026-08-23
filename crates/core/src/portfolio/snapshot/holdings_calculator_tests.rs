@@ -1959,6 +1959,53 @@ mod tests {
     }
 
     #[test]
+    fn test_credit_negative_amount_reduces_cash() {
+        // Trading-loss aggregate imports (e.g. IBKR daily P&L) emit CREDIT with
+        // a negative signed amount plus a positive fee. Cash must decrease by
+        // |amount| + fee.
+        let mock_fx_service = MockFxService::new();
+        let target_date_str = "2023-01-06";
+        let target_date = NaiveDate::from_str(target_date_str).unwrap();
+        let account_currency = "USD";
+
+        let base_currency = Arc::new(RwLock::new(account_currency.to_string()));
+        let mut calculator = create_calculator(Arc::new(mock_fx_service), base_currency);
+
+        let mut previous_snapshot =
+            create_initial_snapshot("acc_credit_loss", account_currency, "2023-01-05");
+        previous_snapshot
+            .cash_balances
+            .insert(account_currency.to_string(), dec!(1000));
+        previous_snapshot.net_contribution = dec!(500);
+        previous_snapshot.net_contribution_base = dec!(500);
+
+        let loss_activity = create_cash_activity(
+            "act_credit_loss_1",
+            ActivityType::Credit,
+            dec!(-100),
+            dec!(2),
+            account_currency,
+            target_date_str,
+        );
+
+        let result =
+            calculator.calculate_next_holdings(&previous_snapshot, &[loss_activity], target_date);
+        assert!(result.is_ok(), "Calculation failed: {:?}", result.err());
+        let next_state = result.unwrap().snapshot;
+
+        // Cash: 1000 + (-100 - 2 fee) = 898
+        assert_eq!(
+            next_state.cash_balances.get(account_currency),
+            Some(&dec!(898))
+        );
+        // Non-BONUS credit does not affect net_contribution regardless of sign
+        assert_eq!(
+            next_state.net_contribution,
+            previous_snapshot.net_contribution
+        );
+    }
+
+    #[test]
     fn test_credit_bonus_with_tax_deducts_cash_and_adds_gross_contribution() {
         use crate::activities::ACTIVITY_SUBTYPE_BONUS;
 

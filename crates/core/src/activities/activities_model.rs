@@ -254,6 +254,14 @@ impl Activity {
         self.amount.unwrap_or(Decimal::ZERO).abs()
     }
 
+    /// Get amount preserving its sign, defaulting to zero if not set.
+    /// Used by income-style activities (CREDIT/INTEREST/DIVIDEND) where a
+    /// negative amount is a legitimate cash outflow (trading loss, margin
+    /// interest paid, return-of-capital dividend reversal).
+    pub fn signed_amt(&self) -> Decimal {
+        self.amount.unwrap_or(Decimal::ZERO)
+    }
+
     /// Get fee, defaulting to zero if not set.
     /// Always returns absolute value.
     pub fn fee_amt(&self) -> Decimal {

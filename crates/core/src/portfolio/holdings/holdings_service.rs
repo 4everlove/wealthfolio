@@ -998,8 +998,11 @@ fn calculate_asset_income(
 }
 
 fn activity_income_amount(activity: &Activity) -> Decimal {
-    let amount = activity.amt();
-    if amount > Decimal::ZERO {
+    // signed_amt preserves the sign so income reports reflect losses/reversals
+    // (e.g. negative CREDIT from daily trading aggregate, return-of-capital
+    // dividends). Fall back to qty × price only when amount is exactly zero.
+    let amount = activity.signed_amt();
+    if !amount.is_zero() {
         amount
     } else {
         activity.qty() * activity.price()

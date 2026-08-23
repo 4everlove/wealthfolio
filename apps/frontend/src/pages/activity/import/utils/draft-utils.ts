@@ -763,8 +763,20 @@ export function createDraftActivities(
     const resolvedInstrumentType =
       normalizedCsvInstrumentType || prefixInstrumentType || mappedInstrumentType;
     const quantity = parseNumericValue(rawQuantity, decimalSeparator, thousandsSeparator);
-    const unitPrice = parseNumericValue(rawUnitPrice, decimalSeparator, thousandsSeparator);
-    let amount = parseNumericValue(rawAmount, decimalSeparator, thousandsSeparator);
+    // unitPrice for CREDIT mirrors the signed amount (aggregate broker imports
+    // emit unitPrice=amount for display). Preserve sign there; strip elsewhere
+    // (BUY/SELL etc. use magnitude).
+    const unitPrice =
+      activityType === ActivityType.CREDIT
+        ? parseSignedNumericValue(rawUnitPrice, decimalSeparator, thousandsSeparator)
+        : parseNumericValue(rawUnitPrice, decimalSeparator, thousandsSeparator);
+    // CREDIT treats a negative amount as a real cash outflow (e.g. daily
+    // trading-loss aggregate). All other types encode direction via type and
+    // want an unsigned magnitude.
+    let amount =
+      activityType === ActivityType.CREDIT
+        ? parseSignedNumericValue(rawAmount, decimalSeparator, thousandsSeparator)
+        : parseNumericValue(rawAmount, decimalSeparator, thousandsSeparator);
     const rawCurrencyValue = rawCurrency?.trim();
     const currency = rawCurrencyValue || defaultCurrency;
     const currencySource = rawCurrencyValue ? "csv" : "default";

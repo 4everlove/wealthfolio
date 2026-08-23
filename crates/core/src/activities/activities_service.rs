@@ -131,10 +131,27 @@ impl PreparationMode {
 }
 
 impl ActivityService {
+    /// CREDIT is the sole activity type where a negative amount carries meaning
+    /// (aggregate trading loss booked as a single cash-out row). All other
+    /// types encode direction via the type itself and normalize to magnitude.
+    fn preserves_amount_sign(activity_type: &str) -> bool {
+        activity_type == ACTIVITY_TYPE_CREDIT
+    }
+
+    fn normalize_amount_sign(activity_type: &str, amount: Decimal) -> Decimal {
+        if Self::preserves_amount_sign(activity_type) {
+            amount
+        } else {
+            amount.abs()
+        }
+    }
+
     fn normalize_new_activity_economic_signs(activity: &mut NewActivity) {
         activity.quantity = activity.quantity.map(|v| v.abs());
         activity.unit_price = activity.unit_price.map(|v| v.abs());
-        activity.amount = activity.amount.map(|v| v.abs());
+        activity.amount = activity
+            .amount
+            .map(|v| Self::normalize_amount_sign(&activity.activity_type, v));
         activity.fee = activity.fee.map(|v| v.abs());
         activity.tax = activity.tax.map(|v| v.abs());
     }
@@ -1320,7 +1337,10 @@ impl ActivityService {
 
         // Normalize to absolute values and major currencies, matching what
         // prepare_activities_internal does before the apply-step key computation.
+        // CREDIT preserves amount sign so signed daily-aggregate rows don't
+        // dedupe against each other.
         let quantity = activity.quantity.map(|v| v.abs());
+        let normalize_amt = |v: Decimal| Self::normalize_amount_sign(&activity.activity_type, v);
         let (unit_price, amount, fee, currency) =
             if let Some(rule) = get_normalization_rule(activity.currency.as_str()) {
                 let unit_price = activity
@@ -1328,7 +1348,7 @@ impl ActivityService {
                     .map(|v| normalize_amount(v.abs(), activity.currency.as_str()).0);
                 let amount = activity
                     .amount
-                    .map(|v| normalize_amount(v.abs(), activity.currency.as_str()).0);
+                    .map(|v| normalize_amount(normalize_amt(v), activity.currency.as_str()).0);
                 let fee = activity
                     .fee
                     .map(|v| normalize_amount(v.abs(), activity.currency.as_str()).0);
@@ -1341,7 +1361,7 @@ impl ActivityService {
                 };
                 (
                     activity.unit_price.map(|v| v.abs()),
-                    activity.amount.map(|v| v.abs()),
+                    activity.amount.map(normalize_amt),
                     activity.fee.map(|v| v.abs()),
                     ccy,
                 )
@@ -2288,10 +2308,13 @@ impl ActivityService {
             }
         }
 
-        // Normalize amounts to absolute values (direction is determined by activity type)
+        // Normalize amounts to absolute values (direction is determined by activity type).
+        // CREDIT preserves amount sign; see preserves_amount_sign().
         activity.quantity = activity.quantity.map(|v| v.abs());
         activity.unit_price = activity.unit_price.map(|v| v.abs());
-        activity.amount = activity.amount.map(|v| v.abs());
+        activity.amount = activity
+            .amount
+            .map(|v| Self::normalize_amount_sign(&activity.activity_type, v));
         activity.fee = activity.fee.map(|v| v.abs());
 
         // Securities transfer `unit_price` is book cost basis. Transfer-date
@@ -2729,10 +2752,13 @@ impl ActivityService {
             }
         }
 
-        // Normalize amounts to absolute values (direction is determined by activity type)
+        // Normalize amounts to absolute values (direction is determined by activity type).
+        // CREDIT preserves amount sign; see preserves_amount_sign().
         activity.quantity = activity.quantity.map(|v| v.map(|d| d.abs()));
         activity.unit_price = activity.unit_price.map(|v| v.map(|d| d.abs()));
-        activity.amount = activity.amount.map(|v| v.map(|d| d.abs()));
+        activity.amount = activity
+            .amount
+            .map(|v| v.map(|d| Self::normalize_amount_sign(&activity.activity_type, d)));
         activity.fee = activity.fee.map(|v| v.map(|d| d.abs()));
         activity.tax = activity.tax.map(|v| v.map(|d| d.abs()));
 

@@ -150,6 +150,15 @@ export function parseAndAbsoluteValue(value: string | undefined): number | undef
   return normalized !== undefined ? Math.abs(normalized) : undefined;
 }
 
+/**
+ * Parses a numeric value preserving sign. Used for `amount` on income-style
+ * activities where a negative value is meaningful (CREDIT trading loss,
+ * INTEREST margin interest paid, DIVIDEND return-of-capital reversal).
+ */
+export function parseSignedValue(value: string | undefined): number | undefined {
+  return normalizeNumericValue(value);
+}
+
 // Use the importValidationResult from types.ts
 export type ValidationResult = ImportValidationResult;
 
@@ -371,13 +380,13 @@ const activityLogicMap: Partial<Record<ActivityType, ActivityLogicConfig>> = {
   },
   [ActivityType.CREDIT]: {
     calculateSymbol: () => "",
+    // Signed amount preserved: negative CREDIT expresses trading loss (e.g. from
+    // daily-aggregate broker imports).
     calculateAmount: (activity) => {
       const amt = toNum(activity.amount);
       return amt
-        ? Math.abs(amt)
-        : Math.abs(
-            calculateCashActivityAmount(toNum(activity.quantity), toNum(activity.unitPrice)),
-          );
+        ? amt
+        : calculateCashActivityAmount(toNum(activity.quantity), toNum(activity.unitPrice));
     },
     calculateFee: (activity) => {
       const f = toNum(activity.fee);
@@ -445,7 +454,9 @@ function transformRowToActivity(
   const rawUnitPrice = parseAndAbsoluteValue(getMappedValue(ImportFormat.UNIT_PRICE));
   const rawFee = parseAndAbsoluteValue(getMappedValue(ImportFormat.FEE));
   const rawTax = parseAndAbsoluteValue(getMappedValue(ImportFormat.TAX));
-  const rawAmount = parseAndAbsoluteValue(getMappedValue(ImportFormat.AMOUNT));
+  // Amount preserves sign at parse time; per-activity-type logic below decides
+  // whether to abs() (BUY/SELL/DEPOSIT etc.) or keep signed (CREDIT/INTEREST/DIVIDEND).
+  const rawAmount = parseSignedValue(getMappedValue(ImportFormat.AMOUNT));
 
   // Assign potentially NaN values first, they will be cleaned up later
   activity.quantity = rawQuantity;

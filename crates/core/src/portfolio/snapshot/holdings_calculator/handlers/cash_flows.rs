@@ -120,7 +120,10 @@ impl HoldingsCalculator {
         account_currency: &str,
     ) -> Result<()> {
         let activity_currency = &activity.currency;
-        let activity_amount = activity.amt();
+        // Use signed amount: negative values are legitimate for CREDIT (trading
+        // losses in daily-aggregate imports), INTEREST (margin interest paid),
+        // and DIVIDEND (return-of-capital reversal).
+        let activity_amount = activity.signed_amt();
 
         // Book cash in ACTIVITY currency (gross income - fees - withholding tax).
         // All types dispatched here (DIVIDEND/INTEREST/CREDIT) apply withholding tax.
