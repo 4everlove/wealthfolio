@@ -40,7 +40,15 @@ impl AssetResolutionInput {
         let Some(instrument_type) = self.instrument_type.as_ref() else {
             return false;
         };
-        if !reviewed_quote_ccy_is_valid(self.quote_ccy.as_deref()) {
+
+        // OCC option and CME futures symbols are self-describing — the parser
+        // recovers underlying, expiration, strike/multiplier without a provider
+        // round-trip. Requiring `quote_ccy` here would push every derivative
+        // row through a search that 404s anyway (Yahoo has no per-contract
+        // coverage; other providers rate-limit on unknown symbols).
+        let requires_quote_ccy =
+            !matches!(instrument_type, InstrumentType::Option | InstrumentType::Futures);
+        if requires_quote_ccy && !reviewed_quote_ccy_is_valid(self.quote_ccy.as_deref()) {
             return false;
         }
 
