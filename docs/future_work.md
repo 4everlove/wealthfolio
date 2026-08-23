@@ -113,3 +113,142 @@ hint.
 4. Run "purge expired option quotes" cleanup.
 5. `VACUUM`.
 6. Decide if #3 (option buffer) is worth codifying.
+
+---
+
+## Yahoo symbol cross-contamination for ambiguous tickers
+
+When an asset's stored `instrument_symbol` doesn't exist verbatim on Yahoo
+(`/chart/{ticker}` returns 404), the enrichment / resolver path falls back to
+Yahoo's search endpoint, which fuzzy-matches to whatever the "best" hit is —
+often a European-listed company sharing the same ticker string. Observed in a
+production DB:
+
+- **BRKB** (`XNYS`, USD) → matched Frankfurt-listed Berkshire proxy → quotes in
+  EUR at ~€440 (approximately-right for BRK, wrong currency)
+- **EXL** (`XNAS`, USD) → matched **Exasol AG** (German software) → quotes at
+  €1.97 (completely wrong company)
+- **MASI** (`XNAS`, USD) → matched **Masi Agricola** (Italian winery) → quotes
+  at €4.28 (completely wrong company)
+
+Symptoms in `metadata.profile`: `countries` says Germany/Italy on assets whose
+MIC says XNYS/XNAS.
+
+### Detection query
+
+Filter by quote-currency mismatch, not by incorporation country — many
+foreign-domiciled companies (Jazz, Atlassian, SolarEdge, Genpact, …) are
+legitimately US-listed and would false-positive on a country check.
+
+```sql
+SELECT a.display_code, a.instrument_exchange_mic AS mic,
+       q.currency AS quote_ccy, ROUND(q.close, 2) AS close, q.day AS latest_day
+FROM assets a
+LEFT JOIN quotes q ON q.asset_id=a.id AND q.day = (
+  SELECT MAX(day) FROM quotes q2 WHERE q2.asset_id=a.id
+)
+WHERE a.instrument_exchange_mic IN ('XNYS','XNAS','XASE','BATS','ARCX')
+  AND a.quote_ccy='USD'
+  AND (q.currency != 'USD'                              -- wrong currency
+       OR (q.close IS NOT NULL AND q.close < 5))        -- suspiciously low price
+ORDER BY a.display_code;
+```
+
+Any row where the latest quote is non-USD or the price is implausibly low for a
+US listing is a candidate for cross-contamination. Cross-check the
+`metadata.profile` for the company name to distinguish real bugs from
+legitimately-cheap US penny stocks.
+
+### Ad-hoc remediation
+
+1. Correct the `instrument_symbol` to Yahoo's canonical form (e.g. `BRKB` →
+   `BRK.B`; `EXL` → `EXLS`).
+2. Clear `metadata` so enrichment reruns.
+3. Purge the wrong quotes.
+4. Trigger a manual sync.
+
+Example: [committed as ad-hoc SQL block in support conversation on 2026-08-23].
+
+### Proper fix (code)
+
+Two guardrails in the resolver / enrichment path:
+
+- **Reject cross-currency search hits.** If asset has a declared MIC in a known
+  currency (e.g. XNYS → USD), any provider search result returning a different
+  currency should be treated as a non-match, not accepted silently.
+- **Don't substitute unresolved tickers.** When `/chart/{ticker}` returns 404
+  and the resolver has no explicit provider mapping, mark the asset as
+  unresolvable (surface in health page) rather than swallowing Yahoo's fuzzy
+  search suggestion.
+
+Likely touches `RulesResolver::resolve_equity`, `QuoteService::search_symbol`,
+and the enrichment code in `assets_service.rs`. Add a coverage check comparing
+`asset.instrument_exchange_mic → mic_to_currency()` against the resolved
+`ProviderInstrument`'s expected currency.
+
+---
+
+## Historical futures valuation gap
+
+Yahoo's futures resolver maps CME tickers to the continuous back-adjusted series
+(`ESH27 → ES=F`). For **recent** history this is a reasonable approximation of
+the specific contract's price during its front-month period. For **older**
+history the back-adjustment factor grows, so continuous prices drift from actual
+per-contract prices. A 9-year historical import will show increasing accuracy
+loss the further back you go.
+
+### Symptoms
+
+- Historical NLV chart during an old futures holding period shows a value that
+  differs from what the position was actually worth at the time.
+- Realized P&L (from BUY/SELL trades) is unaffected — it's captured from the
+  trade prices, not from marks during hold.
+
+### Mitigations already shipped
+
+- Cost-basis fallback in `valuation_calculator.rs` and `net_worth_service.rs`:
+  for contract instruments (multiplier > 1) with no quote at all, valuation
+  falls back to book value so the NLV chart stays flat during unknown-price
+  windows rather than dropping to zero.
+
+### Follow-up options
+
+- **Detect stale continuous data.** If the difference between a fetched
+  continuous quote and the position's cost basis exceeds some threshold on the
+  BUY date, log a warning ("continuous series may not match this specific
+  contract's historical price").
+- **Ingest per-contract futures history from Barchart / CQG / broker export.**
+  Real per-contract series would resolve this entirely; requires paid feed or
+  broker cooperation.
+- **Trust broker's own historical marks.** IBKR Flex reports can include
+  positions with daily marks — a broker-sourced quote path would bypass
+  continuous approximation for imported historical data.
+
+## Futures cash-flow model
+
+Wealthfolio books BUY/SELL as `qty × price × multiplier` cash outflow/inflow,
+treating futures like options. For options that matches reality (premium × 100
+is real cash cost). For futures it's wrong (you post margin ~5% of notional, not
+the full notional). Symptoms in the NLV chart during a futures holding period:
+
+- Cash goes deeply negative on BUY (by full notional)
+- Investment MV rises to full notional (matches, so total NLV stays flat if
+  quotes track cost basis)
+- On SELL: both reverse, realized P&L nets out correctly
+
+Net NLV is arithmetically correct at start and end of the position. The
+individual cash / investment components look weird mid-position but the total
+line ties out.
+
+### Follow-up
+
+- Add "margin-traded" flag distinguishing futures/FOPs from premium-traded
+  (options) or full-notional (equity).
+- Book cash flow as initial margin on BUY + realized P&L on SELL for
+  margin-traded instruments; keep the existing model for premium-traded.
+- Track margin usage as a separate line item on the account (so users see how
+  much of their cash is tied up in margin vs available).
+
+Non-trivial change; touches holdings calculator, cash accounting, and
+account-level margin tracking. Prioritize when futures usage becomes real enough
+that the cash-swing visualization becomes a pain point.
