@@ -132,7 +132,12 @@ export default function HistoryChart({
               wrapperStyle={{ pointerEvents: "none" }}
             />
             {interval !== "ALL" && interval !== "1Y" ? (
-              <YAxis hide={true} type="number" domain={["auto", "auto"]} />
+              <YAxis
+                hide={true}
+                type="number"
+                domain={["auto", "auto"]}
+                padding={{ top: 24, bottom: 8 }}
+              />
             ) : null}
             <XAxis hide dataKey="timestamp" type="category" />
             <Area
