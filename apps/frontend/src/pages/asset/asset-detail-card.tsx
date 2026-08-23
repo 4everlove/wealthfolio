@@ -52,6 +52,15 @@ interface AssetDetail {
     right?: string | null;
     strike?: number | null;
     expiration?: string | null;
+    multiplier?: number | null;
+  } | null;
+  futuresSpec?: {
+    root?: string | null;
+    contractMonth?: string | null;
+    expiration?: string | null;
+    multiplier?: number | null;
+    tickSize?: number | null;
+    exchangeMic?: string | null;
   } | null;
   className?: string;
 }
@@ -99,10 +108,13 @@ const AssetDetailCard: React.FC<AssetDetailProps> = ({ assetData, className }) =
     quote,
     bondSpec,
     optionSpec,
+    futuresSpec,
   } = assetData;
 
   const isOption = optionSpec != null;
-  const quantityLabel = isOption ? t("asset:detailCard.contracts") : t("asset:detailCard.shares");
+  const isFutures = futuresSpec != null;
+  const isContract = isOption || isFutures;
+  const quantityLabel = isContract ? t("asset:detailCard.contracts") : t("asset:detailCard.shares");
   const averageCostLabel = isOption
     ? t("asset:detailCard.average_premium")
     : t("asset:detailCard.average_cost");
@@ -386,7 +398,7 @@ const AssetDetailCard: React.FC<AssetDetailProps> = ({ assetData, className }) =
         {optionSpec && (
           <>
             <Separator className="my-3" />
-            <div className="grid grid-cols-3 gap-x-4">
+            <div className="grid grid-cols-4 gap-x-4">
               {optionSpec.right && (
                 <div className="flex flex-col">
                   <span className="text-muted-foreground text-xs">
@@ -410,7 +422,7 @@ const AssetDetailCard: React.FC<AssetDetailProps> = ({ assetData, className }) =
                 </div>
               )}
               {optionSpec.expiration && (
-                <div className="flex flex-col items-end">
+                <div className="flex flex-col">
                   <span className="text-muted-foreground text-xs">
                     {t("asset:detailCard.expiry")}
                   </span>
@@ -423,7 +435,80 @@ const AssetDetailCard: React.FC<AssetDetailProps> = ({ assetData, className }) =
                   </span>
                 </div>
               )}
+              {optionSpec.multiplier != null && (
+                <div className="flex flex-col items-end">
+                  <span className="text-muted-foreground text-xs">Multiplier</span>
+                  <span className="text-sm font-medium">
+                    {numberFormatting.formatDecimal(optionSpec.multiplier)}
+                  </span>
+                </div>
+              )}
             </div>
+          </>
+        )}
+
+        {futuresSpec && (
+          <>
+            <Separator className="my-3" />
+            <div className="grid grid-cols-4 gap-x-4">
+              {futuresSpec.root && (
+                <div className="flex flex-col">
+                  <span className="text-muted-foreground text-xs">Root</span>
+                  <span className="text-sm font-medium">{futuresSpec.root}</span>
+                </div>
+              )}
+              {futuresSpec.contractMonth && (
+                <div className="flex flex-col">
+                  <span className="text-muted-foreground text-xs">Contract Month</span>
+                  <span className="text-sm font-medium">
+                    {dateFormatting.formatCalendarDate(futuresSpec.contractMonth, {
+                      year: "numeric",
+                      month: "short",
+                    })}
+                  </span>
+                </div>
+              )}
+              {futuresSpec.expiration && (
+                <div className="flex flex-col">
+                  <span className="text-muted-foreground text-xs">
+                    {t("asset:detailCard.expiry")}
+                  </span>
+                  <span className="text-sm font-medium">
+                    {dateFormatting.formatCalendarDate(futuresSpec.expiration, {
+                      year: "numeric",
+                      month: "short",
+                      day: "numeric",
+                    })}
+                  </span>
+                </div>
+              )}
+              {futuresSpec.multiplier != null && (
+                <div className="flex flex-col items-end">
+                  <span className="text-muted-foreground text-xs">Multiplier</span>
+                  <span className="text-sm font-medium">
+                    {numberFormatting.formatDecimal(futuresSpec.multiplier)}
+                  </span>
+                </div>
+              )}
+            </div>
+            {(futuresSpec.tickSize != null || futuresSpec.exchangeMic) && (
+              <div className="mt-2 grid grid-cols-4 gap-x-4">
+                {futuresSpec.tickSize != null && (
+                  <div className="flex flex-col">
+                    <span className="text-muted-foreground text-xs">Tick Size</span>
+                    <span className="text-sm font-medium">
+                      {numberFormatting.formatDecimal(futuresSpec.tickSize)}
+                    </span>
+                  </div>
+                )}
+                {futuresSpec.exchangeMic && (
+                  <div className="col-start-4 flex flex-col items-end">
+                    <span className="text-muted-foreground text-xs">Exchange</span>
+                    <span className="text-sm font-medium">{futuresSpec.exchangeMic}</span>
+                  </div>
+                )}
+              </div>
+            )}
           </>
         )}
       </CardContent>

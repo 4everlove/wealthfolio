@@ -131,6 +131,15 @@ interface AssetDetailData {
     right?: string | null;
     strike?: number | null;
     expiration?: string | null;
+    multiplier?: number | null;
+  } | null;
+  futuresSpec?: {
+    root?: string | null;
+    contractMonth?: string | null;
+    expiration?: string | null;
+    multiplier?: number | null;
+    tickSize?: number | null;
+    exchangeMic?: string | null;
   } | null;
 }
 
@@ -503,10 +512,33 @@ export const AssetProfilePage = () => {
   const optionSpec = useMemo(() => {
     if (assetProfile?.instrumentType !== "OPTION" || !assetProfile?.metadata) return null;
     const option = assetProfile.metadata.option as
-      | { right?: string | null; strike?: number | null; expiration?: string | null }
+      | {
+          right?: string | null;
+          strike?: number | null;
+          expiration?: string | null;
+          multiplier?: number | null;
+        }
       | undefined;
     if (!option || (!option.right && option.strike == null && !option.expiration)) return null;
     return option;
+  }, [assetProfile]);
+
+  // Futures metadata for display (only when asset is a futures contract)
+  const futuresSpec = useMemo(() => {
+    if (assetProfile?.instrumentType !== "FUTURES" || !assetProfile?.metadata) return null;
+    const futures = assetProfile.metadata.futures as
+      | {
+          root?: string | null;
+          contractMonth?: string | null;
+          expiration?: string | null;
+          multiplier?: number | null;
+          tickSize?: number | null;
+          exchangeMic?: string | null;
+        }
+      | undefined;
+    if (!futures || (!futures.root && !futures.expiration && futures.multiplier == null))
+      return null;
+    return futures;
   }, [assetProfile]);
 
   const isExpiredOption = useMemo(() => {
@@ -714,8 +746,12 @@ export const AssetProfilePage = () => {
     const quantity = Number(holding?.quantity ?? 0);
 
     const contractMultiplier = Number(holding?.contractMultiplier ?? 1);
-    const costUnits =
-      optionSpec && contractMultiplier > 0 ? quantity * contractMultiplier : quantity;
+    // Any contract instrument (options + futures) stores cost basis as
+    // qty × price × multiplier under the hood (see `effective_unit_price`
+    // in holdings_calculator/economics.rs). Divide by the same scale so the
+    // reference line reads in per-share/per-point units and lines up with
+    // the chart's price series.
+    const costUnits = contractMultiplier > 1 ? quantity * contractMultiplier : quantity;
     const averageCostPrice =
       holding?.costBasis?.local && costUnits !== 0
         ? Number(holding.costBasis.local) / costUnits
@@ -852,6 +888,7 @@ export const AssetProfilePage = () => {
       quote: quoteData?.quote ?? null,
       bondSpec: bondSpec ?? null,
       optionSpec: optionSpec ?? null,
+      futuresSpec: futuresSpec ?? null,
     };
   }, [
     holding,
@@ -861,6 +898,7 @@ export const AssetProfilePage = () => {
     assetLots,
     assetProfile,
     assetId,
+    futuresSpec,
     bondSpec,
     optionSpec,
     baseCurrency,

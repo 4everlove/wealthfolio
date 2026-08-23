@@ -211,14 +211,16 @@ fn asset_skip_reason(asset: &Asset, allow_inactive: bool) -> Option<AssetSkipRea
         }
     }
 
-    // Skip expired futures — contract no longer trades.
-    if asset.is_futures() {
-        if let Some(spec) = asset.futures_spec() {
-            if spec.expiration < Utc::now().date_naive() {
-                return Some(AssetSkipReason::ExpiredFutures);
-            }
-        }
-    }
+    // No ExpiredFutures skip: our futures resolver maps to Yahoo's continuous
+    // series (`ES=F`, `GC=F`, ...), which returns useful bars for the period
+    // when this specific contract was the front month. For recent history
+    // this is accurate; for older history there is some drift from the true
+    // per-contract price, but it beats leaving positions unpriced. Once the
+    // position closes, the ClosedPosition category skips further syncs so
+    // ongoing API traffic stays bounded. If a quote can't be fetched for
+    // some other reason, the valuation layer falls back to book value.
+    // AssetSkipReason::ExpiredFutures is retained for compatibility but no
+    // longer surfaced here.
 
     None
 }

@@ -476,10 +476,23 @@ impl NetWorthServiceTrait for NetWorthService {
                     {
                         Some((p, c, d)) => (p, c, d),
                         None => {
-                            // No quote found, use cost basis as fallback
+                            // No quote found, use cost basis as fallback so the
+                            // NLV chart stays flat during holding periods without
+                            // real market data (e.g. historical imports of closed
+                            // options / futures). `total_cost_basis` is already
+                            // multiplier-scaled (see `effective_unit_price` in
+                            // holdings_calculator/economics.rs), so divide by the
+                            // multiplier-inclusive unit count to recover the
+                            // per-share/per-point price that `calculate_market_value`
+                            // will re-multiply.
                             if position.quantity > Decimal::ZERO {
-                                let implied_price = position.total_cost_basis / position.quantity;
-                                // Use snapshot date as valuation date; cost basis is in position.currency (major unit)
+                                let cost_units = if position.contract_multiplier > Decimal::ONE {
+                                    position.quantity * position.contract_multiplier
+                                } else {
+                                    position.quantity
+                                };
+                                let implied_price =
+                                    position.total_cost_basis / cost_units;
                                 (
                                     implied_price,
                                     position.currency.clone(),

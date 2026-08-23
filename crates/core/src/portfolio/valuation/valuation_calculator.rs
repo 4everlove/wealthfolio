@@ -347,6 +347,34 @@ fn calculate_investment_market_value_acct(
             if position.basis_status() == BasisStatus::Complete {
                 performance_eligible_market_value += market_value;
             }
+        } else if position.contract_multiplier > Decimal::ONE {
+            // Contract instrument (option / futures) with no quote for this
+            // date — fall back to book value so historical NLV stays flat
+            // during holding periods without market data. Live options and
+            // futures normally have Yahoo quotes; the fallback fires only
+            // for imported closed / expired contracts where no per-contract
+            // history is retrievable. `total_cost_basis` is already
+            // multiplier-scaled (see `effective_unit_price` in
+            // holdings_calculator/economics.rs), so it plugs in directly.
+            // Stocks stay in the unavailable path below because "no quote"
+            // for a live equity is a data-integrity signal, not a normal
+            // condition.
+            let cost_fx_rate = if position.currency == account_currency {
+                Decimal::ONE
+            } else {
+                get_rate_from_map(
+                    fx_rates_today,
+                    &position.currency,
+                    account_currency,
+                    target_date,
+                )?
+            };
+            let book_value = position.total_cost_basis * cost_fx_rate;
+            total_position_market_value += book_value;
+            unpriced_positions += 1;
+            if position.basis_status() == BasisStatus::Complete {
+                performance_eligible_market_value += book_value;
+            }
         } else {
             unpriced_positions += 1;
         }
