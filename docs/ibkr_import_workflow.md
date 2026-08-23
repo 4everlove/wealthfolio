@@ -85,12 +85,17 @@ awk -F, 'NR>1 {print $5}' /tmp/wf_2026-06.csv | sort | uniq -c
 Typical distribution:
 
 - `CREDIT` — daily P&L aggregates (positive for winning days, negative for
-  losing days)
+  losing days). Buckets: `SPXW` (0DTE index options), `OPT` (multi-day
+  round-tripped equity/index options), `FOP` (0DTE futures options like ES),
+  `FUT` (futures round-trips, including forced FUT round-trips from FOP
+  exercise), `STK` (equity round-trips).
 - `BUY / SELL` — multi-day holds only (round-trips aggregated away)
 - `ADJUSTMENT` — option assignments/expiries + orphan cash settlements
 - `FEE` — daily market-data fees + margin interest paid
 - `INTEREST` — Broker Interest Received
 - `DIVIDEND` — cash dividends on stock holdings
+- `DEPOSIT / WITHDRAWAL` — ACH/wire cash movements (IBKR type
+  `Deposits/Withdrawals`)
 
 ### 4. Reconcile a sample day
 
@@ -158,6 +163,12 @@ Not blockers, but be aware:
    `ADJUSTMENT(OPTION_EXPIRY)` rows that reference positions Wealthfolio doesn't
    know about. Rust handler logs a warning and skips — no data corruption. Cash
    impact from paired stock assignment / cash settlement still books correctly.
+6. **Multi-day FOPs** — futures options (`FOP` asset class, IBKR symbols like
+   `E1DK6 C7355`) are only supported when they round-trip within a day (0DTE FOP
+   aggregation works). Multi-day FOP holds would emit an "Unknown AssetClass"
+   warning and skip. IBKR doesn't offer OCC symbols for FOPs and Wealthfolio has
+   no native FUTURES_OPTION type; proper support needs pseudo-asset design. Not
+   urgent if your FOP flow is 0DTE only.
 
 ## Recurring imports
 

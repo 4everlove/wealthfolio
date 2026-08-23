@@ -183,6 +183,10 @@ def bucket_for(asset_class: str, underlying: str) -> str:
         return "SPXW"
     if asset_class == "OPT":
         return "OPT"
+    if asset_class == "FOP":
+        # Futures options — IBKR proprietary symbol format, no OCC. Multi-day
+        # FOPs would need pseudo-asset design; for now only 0DTE FOPs aggregate.
+        return "FOP"
     if asset_class == "FUT":
         return "FUT"
     if asset_class == "STK":
@@ -533,7 +537,7 @@ def convert_cash_txns(cash_rows: list[dict], account_map: dict[str, str]) -> lis
             fee_agg[(acct, d, currency)] += abs(amount)
             fee_agg_count[(acct, d, currency)] += 1
             continue
-        elif typ in ("Deposits & Withdrawals", "Deposits", "Withdrawals"):
+        elif typ in ("Deposits & Withdrawals", "Deposits/Withdrawals", "Deposits", "Withdrawals"):
             activity_type = "DEPOSIT" if amount >= 0 else "WITHDRAWAL"
             amount = abs(amount)
         else:
