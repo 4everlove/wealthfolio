@@ -1971,6 +1971,20 @@ impl AssetServiceTrait for AssetService {
         new_asset.instrument_exchange_mic = canonical
             .instrument_exchange_mic
             .or(new_asset.instrument_exchange_mic.clone());
+        // Populate structured metadata (OptionSpec / FuturesSpec / BondSpec) for
+        // typed instruments whose symbols are self-describing. Frontend drafts
+        // reach this path via previewImportAssets → createAsset with
+        // metadata=None, so without this fallback we'd persist assets that
+        // sync-loop filters (ExpiredOption / ExpiredFutures / MaturedBond)
+        // can't recognise.
+        if new_asset.metadata.is_none() {
+            if let Some(symbol) = new_asset.instrument_symbol.as_deref() {
+                new_asset.metadata = super::assets_model::build_asset_metadata(
+                    new_asset.instrument_type.as_ref(),
+                    symbol,
+                );
+            }
+        }
         new_asset.quote_ccy = canonical
             .quote_ccy
             .or_else(|| {

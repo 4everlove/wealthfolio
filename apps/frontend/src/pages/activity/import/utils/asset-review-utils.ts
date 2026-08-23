@@ -82,6 +82,9 @@ export function mapQuoteTypeToInstrumentType(quoteType?: string): string | undef
     case "FX":
     case "FOREX":
       return "FX";
+    case "FUTURE":
+    case "FUTURES":
+      return "FUTURES";
     default:
       return undefined;
   }

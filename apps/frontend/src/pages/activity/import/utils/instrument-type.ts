@@ -18,6 +18,9 @@ const INSTRUMENT_TYPE_ALIASES: Record<string, string> = {
   CURRENCY: "FX",
   METAL: "METAL",
   COMMODITY: "METAL",
+  FUTURES: "FUTURES",
+  FUTURE: "FUTURES",
+  FUT: "FUTURES",
 };
 
 function normalizeToken(raw: string): string {
