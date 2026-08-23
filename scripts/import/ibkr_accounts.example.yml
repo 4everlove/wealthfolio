@@ -1,0 +1,10 @@
+# IBKR account ID → Wealthfolio account ID mapping.
+# Copy to ~/.wealthfolio/ibkr_accounts.yml and adjust.
+accounts:
+  U1896004: IBKR-Main
+  U2858775: IBKR-Trading
+
+# Optional per-account overrides.
+options:
+  # Assume USD for cash txns whose CurrencyPrimary is blank.
+  default_currency: USD

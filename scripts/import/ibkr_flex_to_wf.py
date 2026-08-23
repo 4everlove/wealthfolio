@@ -1,0 +1,623 @@
+#!/usr/bin/env python3
+"""Convert an IBKR Flex Query CSV to a Wealthfolio import CSV.
+
+Expected Flex sections in the CSV (in any order, each preceded by its header row):
+  1. Trades           — every fill, plus book trades for expiry/assignment
+  2. OptionEAE        — Option Exercise/Assignment/Expiration + Cash Settlement rows
+  3. MtM Prices       — daily marks (ignored)
+  4. CashTransactions — dividends, interest, fees, deposits, withdrawals
+
+Behavior:
+  - Round-trip predicate: for each (account, asset), if position was 0 at
+    start of day AND back to 0 at end of day, that day's fills are aggregated
+    into a single CREDIT (or FEE if negative) row per (date, currency, bucket).
+    Buckets: SPXW (SPX/SPXW/XSP/NDX/RUT/VIX index options), STK, FUT, OPT.
+  - Multi-day holds emit per-trade BUY/SELL rows.
+  - Expiry (Ep/Ex) at $0 → ADJUSTMENT with subtype OPTION_EXPIRY (no cash).
+  - Assignment (A) on OPT → same ADJUSTMENT(OPTION_EXPIRY); the paired STK
+    row in Trades is emitted as BUY/SELL at strike.
+  - OptionEAE Cash Settlement → ADJUSTMENT cash row for the settlement amount
+    (folds into the daily aggregate when the underlying option round-tripped
+    that day; otherwise emitted as a standalone cash line).
+  - OptionEAE Buy/Sell STK rows: skipped (dedup by TradeID against Trades).
+  - Cash txns: Dividends → DIVIDEND, Broker Interest → INTEREST,
+               Other Fees → FEE, Deposits/Withdrawals → DEPOSIT/WITHDRAWAL.
+
+Usage:
+  python scripts/import/ibkr_flex_to_wf.py \
+      /path/to/flex.csv \
+      /path/to/output.csv \
+      --account-map ~/.wealthfolio/ibkr_accounts.yml
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import hashlib
+import sys
+from collections import defaultdict
+from dataclasses import dataclass, field
+from datetime import date, datetime
+from decimal import Decimal
+from pathlib import Path
+
+
+
+# ---------- Section detection ----------
+
+SECTION_HEADERS = {
+    "trades": (
+        "ClientAccountID",
+        "CurrencyPrimary",
+        "AssetClass",
+        "Symbol",
+        "Description",
+        "UnderlyingSymbol",
+        "Multiplier",
+        "Strike",
+        "Expiry",
+        "Put/Call",
+        "TradeDate",
+        "TransactionType",
+        "Quantity",
+        "TradePrice",
+        "IBCommission",
+        "IBCommissionCurrency",
+        "NetCash",
+        "Notes/Codes",
+        "OrigOrderID",
+        "Buy/Sell",
+        "OrderTime",
+        "TradeID",
+    ),
+    "option_eae": (
+        "ClientAccountID",
+        "CurrencyPrimary",
+        "UnderlyingSymbol",
+        "Multiplier",
+        "Strike",
+        "Expiry",
+        "Put/Call",
+        "Date",
+        "Transaction Type",
+        "Quantity",
+        "Trade Price",
+        "Close Price",
+        "Proceeds",
+        "Comm/Tax",
+        "TradeID",
+    ),
+    "mtm_prices": (
+        "ClientAccountID",
+        "CurrencyPrimary",
+        "AssetClass",
+        "Symbol",
+        "UnderlyingSymbol",
+        "Multiplier",
+        "Strike",
+        "Expiry",
+        "Put/Call",
+        "Price",
+    ),
+    "cash_txn": (
+        "ClientAccountID",
+        "CurrencyPrimary",
+        "Description",
+        "Date/Time",
+        "Amount",
+        "Type",
+    ),
+}
+
+INDEX_UNDERLYINGS = {"SPX", "SPXW", "XSP", "NDX", "RUT", "VIX", "RUTW", "NDXP"}
+
+
+def parse_sections(csv_path: Path) -> dict[str, list[dict]]:
+    """Split a multi-section IBKR Flex CSV into named record lists."""
+    sections: dict[str, list[dict]] = {k: [] for k in SECTION_HEADERS}
+    current_section: str | None = None
+    current_header: tuple[str, ...] | None = None
+
+    with csv_path.open(newline="", encoding="utf-8") as f:
+        reader = csv.reader(f)
+        for row in reader:
+            if not row:
+                continue
+            row_tuple = tuple(row)
+            matched = None
+            for name, header in SECTION_HEADERS.items():
+                if row_tuple == header:
+                    matched = name
+                    break
+            if matched is not None:
+                current_section = matched
+                current_header = SECTION_HEADERS[matched]
+                continue
+            if current_section is None or current_header is None:
+                continue
+            if len(row) != len(current_header):
+                continue
+            sections[current_section].append(dict(zip(current_header, row)))
+    return sections
+
+
+# ---------- Symbol composition ----------
+
+MONTH_ABBR = {
+    1: "JAN", 2: "FEB", 3: "MAR", 4: "APR", 5: "MAY", 6: "JUN",
+    7: "JUL", 8: "AUG", 9: "SEP", 10: "OCT", 11: "NOV", 12: "DEC",
+}
+
+
+def compose_occ_symbol(root: str, expiry_yyyymmdd: str, put_call: str, strike: str) -> str:
+    """Build OCC 21-char option symbol: 6-char root + YYMMDD + C/P + 8-digit strike*1000."""
+    d = datetime.strptime(expiry_yyyymmdd, "%Y%m%d").date()
+    yy_mm_dd = d.strftime("%y%m%d")
+    strike_int = int(round(Decimal(strike) * 1000))
+    return f"{root.ljust(6)}{yy_mm_dd}{put_call.upper()}{strike_int:08d}"
+
+
+def normalize_trades_symbol(sym: str, asset_class: str) -> str:
+    """Trades section already gives us usable symbols; normalize spacing for options."""
+    if asset_class == "OPT":
+        # IBKR format has variable inner whitespace; collapse to a single space
+        # only in the root area. Actual OCC standard uses space-padded 6-char root.
+        # e.g. "IBIT  260605C00042500" -> "IBIT  260605C00042500" (already OK).
+        # For SPXW: "SPXW  260601C07575000" -> keep as-is.
+        return sym
+    return sym.strip()
+
+
+# ---------- Round-trip detector ----------
+
+@dataclass
+class DailyPosition:
+    start_qty: Decimal = Decimal(0)
+    end_qty: Decimal = Decimal(0)
+    trades: list[dict] = field(default_factory=list)
+
+
+def bucket_for(asset_class: str, underlying: str) -> str:
+    if asset_class == "OPT" and underlying in INDEX_UNDERLYINGS:
+        return "SPXW"
+    if asset_class == "OPT":
+        return "OPT"
+    if asset_class == "FUT":
+        return "FUT"
+    if asset_class == "STK":
+        return "STK"
+    return "OTHER"
+
+
+def signed_qty(row: dict) -> Decimal:
+    """Signed quantity from Trades row: positive for BUY, negative for SELL."""
+    qty = Decimal(row["Quantity"])
+    # IBKR Quantity is already signed on many rows, but Buy/Sell is the truth.
+    if row.get("Buy/Sell") == "SELL":
+        return -abs(qty)
+    return abs(qty)
+
+
+def is_zero_price_expiry(row: dict) -> bool:
+    """Book trade at price 0 with expiry/assignment code."""
+    if row.get("TransactionType") != "BookTrade":
+        return False
+    try:
+        if Decimal(row["TradePrice"]) != 0:
+            return False
+    except Exception:
+        return False
+    return (row.get("Notes/Codes") or "").upper() in {"A", "EP", "EX"}
+
+
+# ---------- Wealthfolio row emitter ----------
+
+WF_HEADER = [
+    "date", "symbol", "instrumentType", "quantity", "activityType",
+    "unitPrice", "currency", "fee", "tax", "amount", "fxRate", "subtype",
+    "accountId", "notes", "sourceRecordId",
+]
+
+
+def wf_row(**kw) -> dict:
+    row = {k: "" for k in WF_HEADER}
+    row.update(kw)
+    return row
+
+
+def synth_id(prefix: str, *parts) -> str:
+    key = "|".join(str(p) for p in parts)
+    return f"{prefix}:{hashlib.sha1(key.encode()).hexdigest()[:16]}"
+
+
+def fmt_amount(x: Decimal) -> str:
+    return f"{x:.6f}".rstrip("0").rstrip(".") or "0"
+
+
+# ---------- Converters ----------
+
+def convert_trades(
+    trades: list[dict],
+    cash_settlements: dict[tuple[str, str, str, str, str, str, str], Decimal],
+    account_map: dict[str, str],
+    warnings: list[str],
+) -> list[dict]:
+    """Produce Wealthfolio rows from Trades + folded-in cash settlements.
+
+    cash_settlements: keyed by (account, currency, underlying, expiry, put_call,
+    strike_str, date) → Proceeds sum. Consumed as we emit per-trade rows or
+    folded into daily aggregates for round-tripped assets.
+    """
+    output: list[dict] = []
+
+    # Bucket trades by (account, symbol) so we can walk chronologically and
+    # find round-trip days per asset.
+    per_asset: dict[tuple[str, str], list[dict]] = defaultdict(list)
+    for row in trades:
+        acct = row["ClientAccountID"]
+        # Skip rows with no useful account (headers etc.)
+        if not acct:
+            continue
+        key = (acct, row["Symbol"])
+        per_asset[key].append(row)
+
+    # For aggregation: (account, date, currency, bucket) → running sum of NetCash + fees
+    agg_cash: dict[tuple[str, date, str, str], Decimal] = defaultdict(lambda: Decimal(0))
+    agg_fees: dict[tuple[str, date, str, str], Decimal] = defaultdict(lambda: Decimal(0))
+    agg_settle_keys: set[tuple[str, str, str, str, str, str, str]] = set()
+
+    per_trade_rows: list[dict] = []
+
+    for (acct, symbol), rows in per_asset.items():
+        rows.sort(key=lambda r: (r["TradeDate"], r.get("OrderTime", "")))
+        running_qty = Decimal(0)
+        # Walk day by day.
+        by_day: dict[str, list[dict]] = defaultdict(list)
+        for r in rows:
+            by_day[r["TradeDate"]].append(r)
+
+        days_sorted = sorted(by_day.keys())
+        for d in days_sorted:
+            start_qty = running_qty
+            day_rows = by_day[d]
+            end_qty = start_qty + sum(signed_qty(r) for r in day_rows)
+            round_tripped = start_qty == 0 and end_qty == 0
+            if round_tripped:
+                # Aggregate into daily bucket.
+                first = day_rows[0]
+                ac = first["AssetClass"]
+                und = first["UnderlyingSymbol"]
+                bucket = bucket_for(ac, und)
+                currency = first["CurrencyPrimary"]
+                trade_date = datetime.strptime(d, "%Y%m%d").date()
+                key = (acct, trade_date, currency, bucket)
+                for r in day_rows:
+                    try:
+                        agg_cash[key] += Decimal(r["NetCash"] or "0")
+                    except Exception:
+                        pass
+                    # IBCommission is already netted into NetCash for ExchTrade;
+                    # only pull it out for reporting.
+                    try:
+                        agg_fees[key] += abs(Decimal(r["IBCommission"] or "0"))
+                    except Exception:
+                        pass
+                # Fold matching OptionEAE Cash Settlements into the bucket.
+                if ac == "OPT":
+                    for r in day_rows:
+                        settle_key = _settle_key_from_trade(r)
+                        if settle_key in cash_settlements:
+                            agg_cash[key] += cash_settlements[settle_key]
+                            agg_settle_keys.add(settle_key)
+            else:
+                # Emit per-trade rows.
+                for r in day_rows:
+                    for row_out in _emit_trade_row(r, acct, account_map, cash_settlements, agg_settle_keys, warnings):
+                        per_trade_rows.append(row_out)
+            running_qty = end_qty
+
+    # Emit any orphan cash settlements (settlement without matching trade in window).
+    for settle_key, proceeds in cash_settlements.items():
+        if settle_key in agg_settle_keys:
+            continue
+        (acct, currency, underlying, expiry, put_call, strike_str, dstr) = settle_key
+        trade_date = datetime.strptime(dstr, "%Y%m%d").date()
+        occ = compose_occ_symbol(underlying, expiry, put_call, strike_str)
+        wf_acct = account_map.get(acct, acct)
+        per_trade_rows.append(wf_row(
+            date=trade_date.isoformat(),
+            symbol="",
+            instrumentType="",
+            quantity="1",
+            activityType="ADJUSTMENT",
+            unitPrice=fmt_amount(proceeds),
+            currency=currency,
+            fee="0",
+            tax="0",
+            amount=fmt_amount(proceeds),
+            accountId=wf_acct,
+            notes=f"IBKR cash settlement: {occ}",
+            sourceRecordId=synth_id("ibkr_eae", acct, occ, dstr),
+        ))
+
+    # Emit aggregated CREDIT rows.
+    for (acct, trade_date, currency, bucket), amt in agg_cash.items():
+        wf_acct = account_map.get(acct, acct)
+        fees = agg_fees[(acct, trade_date, currency, bucket)]
+        # CREDIT handles positive AND negative amounts via handle_income → add_cash.
+        output.append(wf_row(
+            date=trade_date.isoformat(),
+            symbol="",
+            instrumentType="",
+            quantity="1",
+            activityType="CREDIT",
+            unitPrice=fmt_amount(amt),
+            currency=currency,
+            fee=fmt_amount(fees),
+            tax="0",
+            amount=fmt_amount(amt),
+            subtype="IBKR_DAILY",
+            accountId=wf_acct,
+            notes=f"IBKR {bucket} daily P&L (round-trip aggregate)",
+            sourceRecordId=synth_id("ibkr_agg", acct, trade_date, currency, bucket),
+        ))
+
+    output.extend(per_trade_rows)
+    return output
+
+
+def _settle_key_from_trade(row: dict) -> tuple[str, str, str, str, str, str, str]:
+    """Compose the same key format used for OptionEAE Cash Settlement lookups."""
+    return (
+        row["ClientAccountID"],
+        row["CurrencyPrimary"],
+        row["UnderlyingSymbol"],
+        row["Expiry"],
+        row["Put/Call"],
+        row["Strike"],
+        row["TradeDate"],
+    )
+
+
+def _emit_trade_row(
+    row: dict,
+    acct: str,
+    account_map: dict[str, str],
+    cash_settlements: dict,
+    agg_settle_keys: set,
+    warnings: list[str],
+) -> list[dict]:
+    ac = row["AssetClass"]
+    d = datetime.strptime(row["TradeDate"], "%Y%m%d").date()
+    wf_acct = account_map.get(acct, acct)
+    currency = row["CurrencyPrimary"]
+    symbol = normalize_trades_symbol(row["Symbol"], ac)
+    qty = abs(Decimal(row["Quantity"]))
+    buy_sell = row["Buy/Sell"]
+    trade_id = row.get("TradeID") or ""
+
+    instrument_type = {"STK": "EQUITY", "OPT": "OPTION", "FUT": "FUTURES"}.get(ac, "")
+    if not instrument_type:
+        warnings.append(f"Skipped unknown AssetClass={ac} symbol={symbol}")
+        return []
+
+    # Zero-price expiry / exercise / assignment on OPT → ADJUSTMENT(OPTION_EXPIRY)
+    if ac == "OPT" and is_zero_price_expiry(row):
+        out = [wf_row(
+            date=d.isoformat(),
+            symbol=symbol,
+            instrumentType="OPTION",
+            quantity=fmt_amount(qty),
+            activityType="ADJUSTMENT",
+            unitPrice="0",
+            currency=currency,
+            fee="0", tax="0", amount="0",
+            subtype="OPTION_EXPIRY",
+            accountId=wf_acct,
+            notes=f"IBKR {row.get('Notes/Codes') or ''} book close",
+            sourceRecordId=synth_id("ibkr_trade", trade_id),
+        )]
+        # Fold paired OptionEAE Cash Settlement (ITM cash-settled index options)
+        # into a companion ADJUSTMENT cash row.
+        settle_key = _settle_key_from_trade(row)
+        proceeds = cash_settlements.get(settle_key)
+        if proceeds is not None and proceeds != 0:
+            agg_settle_keys.add(settle_key)
+            out.append(wf_row(
+                date=d.isoformat(),
+                symbol="",
+                instrumentType="",
+                quantity="1",
+                activityType="ADJUSTMENT",
+                unitPrice=fmt_amount(proceeds),
+                currency=currency,
+                fee="0", tax="0",
+                amount=fmt_amount(proceeds),
+                accountId=wf_acct,
+                notes=f"IBKR cash settlement: {symbol}",
+                sourceRecordId=synth_id("ibkr_eae", acct, symbol, row['TradeDate']),
+            ))
+        return out
+
+    # Standard BUY/SELL.
+    try:
+        unit_price = Decimal(row["TradePrice"])
+    except Exception:
+        unit_price = Decimal(0)
+    try:
+        net_cash = Decimal(row["NetCash"] or "0")
+    except Exception:
+        net_cash = Decimal(0)
+    try:
+        commission = abs(Decimal(row["IBCommission"] or "0"))
+    except Exception:
+        commission = Decimal(0)
+
+    # Leave amount blank for BUY/SELL; Wealthfolio computes qty × price × multiplier.
+    # IBKR NetCash on FUT rows is variation margin, not notional — using it would
+    # mismatch WF's cost-basis semantics.
+    return [wf_row(
+        date=d.isoformat(),
+        symbol=symbol,
+        instrumentType=instrument_type,
+        quantity=fmt_amount(qty),
+        activityType=buy_sell,
+        unitPrice=fmt_amount(unit_price),
+        currency=currency,
+        fee=fmt_amount(commission),
+        tax="0",
+        amount="",
+        accountId=wf_acct,
+        notes=f"IBKR {row.get('Notes/Codes') or ''}".strip(),
+        sourceRecordId=synth_id("ibkr_trade", trade_id),
+    )]
+
+
+def convert_cash_txns(cash_rows: list[dict], account_map: dict[str, str]) -> list[dict]:
+    output = []
+    for r in cash_rows:
+        acct = r["ClientAccountID"]
+        if not acct:
+            continue
+        wf_acct = account_map.get(acct, acct)
+        currency = r["CurrencyPrimary"]
+        try:
+            amount = Decimal(r["Amount"] or "0")
+        except Exception:
+            continue
+        dt = r["Date/Time"].split(";")[0]
+        try:
+            d = datetime.strptime(dt, "%Y%m%d").date()
+        except ValueError:
+            continue
+        typ = r["Type"]
+        description = r["Description"]
+
+        activity_type = None
+        subtype = ""
+        symbol = ""
+        instrument_type = ""
+        if typ == "Dividends":
+            activity_type = "DIVIDEND"
+            # Description begins with ticker: "HYD(US...) CASH DIVIDEND ..."
+            tick = description.split("(")[0].strip()
+            symbol = tick
+            instrument_type = "EQUITY"
+        elif typ in ("Broker Interest Received", "Broker Interest Paid"):
+            activity_type = "INTEREST"
+        elif typ == "Other Fees":
+            activity_type = "FEE"
+            amount = abs(amount)
+        elif typ in ("Deposits & Withdrawals", "Deposits", "Withdrawals"):
+            activity_type = "DEPOSIT" if amount >= 0 else "WITHDRAWAL"
+            amount = abs(amount)
+        else:
+            # Unknown — book as ADJUSTMENT cash line to preserve NLV
+            activity_type = "ADJUSTMENT"
+
+        output.append(wf_row(
+            date=d.isoformat(),
+            symbol=symbol,
+            instrumentType=instrument_type,
+            quantity="1",
+            activityType=activity_type,
+            unitPrice=fmt_amount(amount),
+            currency=currency,
+            fee="0", tax="0",
+            amount=fmt_amount(amount),
+            subtype=subtype,
+            accountId=wf_acct,
+            notes=description[:200],
+            sourceRecordId=synth_id("ibkr_cash", acct, d, description, r["Amount"]),
+        ))
+    return output
+
+
+# ---------- Cash settlement extraction ----------
+
+def collect_cash_settlements(eae_rows: list[dict], warnings: list[str]) -> dict:
+    """Extract OptionEAE 'Cash Settlement' rows, keyed for lookup by trade context."""
+    out: dict = {}
+    for r in eae_rows:
+        if r.get("Transaction Type") != "Cash Settlement":
+            continue
+        try:
+            proceeds = Decimal(r.get("Proceeds") or "0")
+        except Exception:
+            continue
+        key = (
+            r["ClientAccountID"],
+            r["CurrencyPrimary"],
+            r["UnderlyingSymbol"],
+            r["Expiry"],
+            r["Put/Call"],
+            r["Strike"],
+            r["Date"],
+        )
+        # Multiple settlements possible for same strike/date? Sum them.
+        out[key] = out.get(key, Decimal(0)) + proceeds
+    return out
+
+
+# ---------- Main ----------
+
+def load_account_map(path: Path | None) -> dict[str, str]:
+    """Minimal YAML parser for the account-map file: `accounts:` block of `key: value`."""
+    if path is None or not path.exists():
+        return {}
+    result: dict[str, str] = {}
+    in_accounts = False
+    for line in path.read_text().splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if not line.startswith((" ", "\t")):
+            in_accounts = stripped == "accounts:"
+            continue
+        if in_accounts and ":" in stripped:
+            k, v = stripped.split(":", 1)
+            result[k.strip()] = v.strip().strip('"').strip("'")
+    return result
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("input_csv", type=Path)
+    ap.add_argument("output_csv", type=Path)
+    ap.add_argument("--account-map", type=Path, default=Path.home() / ".wealthfolio" / "ibkr_accounts.yml")
+    args = ap.parse_args()
+
+    sections = parse_sections(args.input_csv)
+    print(f"Parsed sections: {{ {', '.join(f'{k}: {len(v)}' for k, v in sections.items())} }}", file=sys.stderr)
+
+    account_map = load_account_map(args.account_map)
+    if account_map:
+        print(f"Account map: {account_map}", file=sys.stderr)
+    else:
+        print(f"No account map found at {args.account_map}; using raw IBKR IDs as accountId.", file=sys.stderr)
+
+    warnings: list[str] = []
+    cash_settlements = collect_cash_settlements(sections["option_eae"], warnings)
+    trade_rows = convert_trades(sections["trades"], cash_settlements, account_map, warnings)
+    cash_rows = convert_cash_txns(sections["cash_txn"], account_map)
+
+    all_rows = trade_rows + cash_rows
+    all_rows.sort(key=lambda r: (r["date"], r["accountId"], r["symbol"]))
+
+    with args.output_csv.open("w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=WF_HEADER)
+        writer.writeheader()
+        writer.writerows(all_rows)
+
+    print(f"Wrote {len(all_rows)} rows to {args.output_csv}", file=sys.stderr)
+    if warnings:
+        print(f"\nWarnings ({len(warnings)}):", file=sys.stderr)
+        for w in warnings[:20]:
+            print(f"  - {w}", file=sys.stderr)
+        if len(warnings) > 20:
+            print(f"  ... and {len(warnings) - 20} more", file=sys.stderr)
+
+
+if __name__ == "__main__":
+    main()

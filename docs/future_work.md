@@ -252,3 +252,27 @@ line ties out.
 Non-trivial change; touches holdings calculator, cash accounting, and
 account-level margin tracking. Prioritize when futures usage becomes real enough
 that the cash-swing visualization becomes a pain point.
+
+## Futures expiry handling
+
+Options expiries are covered by IBKR's OptionEAE section (Assignment / Exercise
+/ Cash Settlement rows), which the IBKR importer folds into the correct
+ADJUSTMENT + cash rows. Futures have no equivalent section — a MES short opened
+on 06-09 that expires on 06-18 shows only the opening SELL in Trades, no closing
+entry. Position stays open in Wealthfolio indefinitely.
+
+### Options
+
+- **Manual close before expiry**: workflow-only fix. Requires user discipline;
+  won't help for backfilled history.
+- **Synthesize closing trade from settlement**: on futures expiry date,
+  auto-emit a BUY/SELL at the settlement price. Needs a settlement-price source
+  (Yahoo's continuous series is approximate; IBKR sometimes reports in the
+  CashReport section).
+- **Explicit "position close on expiry" activity type**: like
+  `ADJUSTMENT(OPTION_EXPIRY)` but for futures. Removes qty, books cash from a
+  supplied settlement price.
+
+Not urgent if user closes futures manually before expiry. Becomes relevant when
+backfilling historical futures held to expiry, or if IBKR eventually starts
+auto-rolling contracts.

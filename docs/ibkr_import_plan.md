@@ -62,46 +62,27 @@ holds, multi-day scalps.
 - `OPT_DAYTRADE` — non-0DTE options round-tripped intraday
 - `OTHER_0DTE` — anything else (FOP, etc.)
 
-## Native futures Phase 1 — checklist
+## Native futures Phase 1 — DONE
 
-Extracted from `docs/futures_support_plan.md`. Everything below is a
-prerequisite for the trades importer to handle futures correctly.
-
-- [ ] `InstrumentType::Futures` enum variant + serde + `as_db_str`/`from_db_str`
-- [ ] `FuturesSpec` model (root, contract_month, expiration, multiplier,
-      tick_size, tick_value, exchange_mic)
-- [ ] `is_futures()`, `futures_spec()` helpers; `contract_multiplier()` extended
-- [ ] `crates/core/src/utils/futures_symbol.rs` with `parse_futures_symbol` (CME
-      format)
-- [ ] Expiration lookup table for top ~30 contracts (equities third Friday,
-      energy 3-BD-before-delivery-month, etc.)
-- [ ] Hardcoded contract-spec table (see `futures_support_plan.md` for the
-      table)
-- [ ] `build_asset_metadata` Futures branch (populates `metadata.futures`)
-- [ ] Sync-loop `AssetSkipReason::ExpiredFutures`
-- [ ] Yahoo provider capability: add `InstrumentKind::Futures`;
-      `MarketDataClient` symbol resolution `root+month+year → Yahoo ticker`
-- [ ] Migration: add `"FUTURES"` to `assets.instrument_type` CHECK constraint
-- [ ] Tests: symbol parser, expired-futures skip, spec serde round-trip,
-      valuation math
-
-Rough estimate: 3–4 days focused work. `docs/futures_support_plan.md` has the
-design details.
+Shipped. See `docs/futures_support_plan.md` for design + status. Phases 2–4
+(broker sync, dedicated UI, continuous back-adjusted charts, margin tracking)
+remain open.
 
 ## IBKR Flex Query setup
 
 ### Sections to enable
 
 - **Trades** — every fill
-- **CashTransactions** — deposits, withdrawals, interest, dividends, tax
-  adjustments
-- **CashReport** — daily interest accrual, margin interest
-- **PriorPeriodPositions** — positions at query start (required for round-trip
-  detection when import scope is partial)
-- **OpenPositions** — positions at query end (sanity check)
-- **ChangeInDividendAccruals** — dividend accruals (optional, helps time
-  DIVIDEND rows)
-- **CorporateActions** — for the warn-only pass
+- **OptionEAE** — **critical**. Option Exercise/Assignment/Expiration + Cash
+  Settlement rows. Without it, ITM cash-settled index-option P&L (SPX/SPXW/NDX
+  etc.) is silently missing — observed ~$300K/month realized loss unaccounted
+  for on a single test file.
+- **CashTransactions** — deposits, withdrawals, interest, dividends, fees
+- **CorporateActions** — warn-only pass (optional; not required for v1)
+- **PriorPeriodPositions** — optional if importing from account inception; only
+  needed when importing a partial window and you want to know pre-existing
+  positions
+- **OpenPositions** — sanity check only; not consumed by importer
 
 ### Fields per section
 
@@ -114,7 +95,21 @@ TradePrice, IBCommission, IBCommissionCurrency, NetCash, CurrencyPrimary,
 TransactionType, NotesCodes, OrderID, TradeID
 ```
 
-`TradeID` doubles as idempotency key for recurring imports.
+`TradeID` doubles as idempotency key for recurring imports. Field-selection
+gotcha: `OrigOrderID` in current samples returns `0` on most rows — needs Flex
+Query re-config if we ever want multi-leg spread grouping via `OrderID`.
+
+**OptionEAE** (required):
+
+```
+ClientAccountID, CurrencyPrimary, UnderlyingSymbol, Multiplier, Strike,
+Expiry, Put/Call, Date, Transaction Type, Quantity, Trade Price,
+Close Price, Proceeds, Comm/Tax, TradeID
+```
+
+`Transaction Type` values used: `Cash Settlement` (ITM cash-settled P&L),
+`Assignment` (position doc), `Exercise` (position doc), `Buy`/`Sell` (STK
+delivery from assignment — deduped against Trades by `TradeID`).
 
 **CashTransactions**:
 
@@ -122,7 +117,11 @@ TransactionType, NotesCodes, OrderID, TradeID
 AccountId, DateTime, Type, Description, Amount, CurrencyPrimary
 ```
 
-**PriorPeriodPositions**:
+Observed `Type` values so far: `Dividends`, `Broker Interest Received`,
+`Other Fees`. Deposits/Withdrawals not yet seen in test samples — verify they
+emit as `Deposits & Withdrawals` when they occur.
+
+**PriorPeriodPositions** (optional):
 
 ```
 AccountId, Symbol, Underlying, AssetClass, Multiplier, Expiry,
@@ -151,43 +150,42 @@ Period: rolling last N days for cadence; whole YTD for first backfill.
 - Wrapper script: `scripts/import/ibkr_flex_fetch.py` — fetch → save CSV →
   invoke converters
 
-## Importer scripts (built on top of native futures)
+## Importer scripts
 
-### `scripts/import/ibkr_shared.py`
+### `scripts/import/ibkr_flex_to_wf.py` — SHIPPED
 
-- Flex parser (CSV; XML fallback if needed)
-- `PriorPeriodPositions` loader → seeds holdings map
-- Round-trip detector (per-account, per-asset, per-date walker)
-- Account mapping loader (reads `.ibkr_accounts.yml`)
-- OCC / futures symbol composers
-- Fee summer (across all commission line items)
+Single script does both aggregation and per-trade in one pass. ~360 lines;
+splitting was not worth it.
 
-### `scripts/import/ibkr_daily_aggregate.py`
+- Multi-section CSV parser (auto-detects Trades / OptionEAE / MtM Prices /
+  CashTransactions header rows, in any order)
+- Round-trip detector: for each (account, asset), if
+  `pos=0 at start of day AND pos=0 at end of day` → aggregate into one CREDIT
+  per `(date, currency, bucket)` where bucket ∈ {SPXW, STK, FUT, OPT}. Otherwise
+  emit per-trade BUY/SELL rows.
+- Zero-price OPT book trades (`A`/`Ep`/`Ex`) → ADJUSTMENT with subtype
+  `OPTION_EXPIRY` (removes qty via FIFO, no cash impact)
+- Paired STK BUY/SELL from physical assignment kept as-is (Trades row is
+  authoritative; OptionEAE STK duplicates are deduped by `TradeID`)
+- OptionEAE Cash Settlement rows → folded into daily aggregate for round-tripped
+  assets; standalone ADJUSTMENT cash row for multi-day holds
+- CashTransactions section → DIVIDEND / INTEREST / FEE (Deposits/Withdrawals not
+  yet observed in samples)
+- Account map via YAML at `~/.wealthfolio/ibkr_accounts.yml` (example at
+  `scripts/import/ibkr_accounts.example.yml`)
+- `sourceRecordId` = `ibkr_trade:<hash(TradeID)>` for idempotent re-runs
+- FUT rows leave `amount` blank so Wealthfolio computes
+  `qty × price × multiplier` itself (IBKR NetCash on FUT is variation margin,
+  not notional)
 
-- Filters trades where round-trip detector returns `AGGREGATE`
-- Emits one `CREDIT` per `(date, currency, asset_class, account)`
-- Amount = sum of `NetCash` for that bucket
-- No asset creation, no sync overhead
+Test collapse observed: 12,541 raw Trades rows → 114 output rows (June 2026).
 
-### `scripts/import/ibkr_flex_to_wf_trades.py`
+### `scripts/import/ibkr_flex_fetch.py` — NOT YET BUILT
 
-- Filters trades where round-trip detector returns `FULL`
-- Per-trade BUY/SELL rows
-- Multi-leg spread grouping:
-  `notes = "spread_id=<OrderID>|strategy=<inferred_shape>"`
-- Assignment expansion: `Assignment` row → option close at $0 + underlying
-  BUY/SELL at strike
-- Corporate action row → warn log entry, skip import (user handles in-app)
-- Cash transactions from `CashTransactions` section →
-  DEPOSIT/WITHDRAWAL/INTEREST/FEE/DIVIDEND
-- Uses `TradeID` as `sourceRecordId` for idempotent re-runs
-
-### `scripts/import/ibkr_flex_fetch.py`
-
-- Runs the Flex Web Service dance
+- Runs the Flex Web Service two-step dance
 - Writes raw CSV to `~/.wealthfolio/ibkr/<date>.csv`
-- Optionally invokes both converter scripts and merges output CSV
-- Suitable for cron: `0 6 * * 1 ibkr_flex_fetch.py --run-converters`
+- Optionally invokes `ibkr_flex_to_wf.py` and appends output to a running CSV
+- Suitable for cron: `0 6 * * 1 ibkr_flex_fetch.py --run-converter`
 
 ## Open questions (parking lot)
 
@@ -213,12 +211,12 @@ Period: rolling last N days for cadence; whole YTD for first backfill.
 
 ## Next concrete step
 
-Ship futures Phase 1 (per `docs/futures_support_plan.md` checklist above), then:
-
-1. Set up Flex Query with the sections/fields listed here.
-2. Pull a small sample (last 3 trading days) — send to iterate on shared parser.
-3. Draft `ibkr_shared.py` (parser + round-trip detector + account map).
-4. Draft `ibkr_daily_aggregate.py`.
-5. Trial-import into a fresh dev DB (`DATABASE_URL=/tmp/wf_ibkr_trial.db`).
-6. Draft `ibkr_flex_to_wf_trades.py`.
-7. Add Flex Web Service fetcher + cron docs.
+- [x] Ship futures Phase 1
+- [x] Set up Flex Query with Trades + OptionEAE + CashTransactions + MtM Prices
+- [x] Pull small samples (May 2026, June 2026)
+- [x] Draft `ibkr_flex_to_wf.py` (parser + aggregator + per-trade + cash)
+- [ ] Trial-import into fresh dev DB (`DATABASE_URL=/tmp/wf_ibkr_trial.db`);
+      diff NLV against IBKR statement
+- [ ] Iterate on discrepancies surfaced by trial import
+- [ ] Add FUT expiry handling (see `docs/future_work.md`)
+- [ ] Add Flex Web Service fetcher (`ibkr_flex_fetch.py`) + cron docs

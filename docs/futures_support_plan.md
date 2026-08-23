@@ -1,5 +1,8 @@
 # Futures Support — Design Sketch
 
+**Status (2026-08-23)**: Phase 1 shipped. Phases 2–4 and open questions below
+remain future work.
+
 ## Goal
 
 First-class support for futures contracts: correct valuation (contract
