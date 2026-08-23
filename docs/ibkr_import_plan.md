@@ -13,14 +13,16 @@ into Wealthfolio without drowning the app in per-trade contract clutter.
 
 1. **Native futures Phase 1** (see `docs/futures_support_plan.md`) — blocker for
    anything else, because long-term futures/FOPs would otherwise land as manual
-   pseudo-assets.
+   pseudo-assets. ✓ shipped
 2. **IBKR daily-aggregate importer** — collapses ~99 % of the trade volume
-   (round-trip day trades) into daily P&L rows.
+   (round-trip day trades) into daily P&L rows. ✓ shipped in
+   `ibkr_flex_to_wf.py`
 3. **IBKR full-trades importer** — persistent positions get proper BUY/SELL with
-   cost basis.
-4. **Automation via Flex Web Service** — recurring import triggered by a
-   cron/loop.
-5. **FOP support** — separate design pass after futures Phase 1 lands.
+   cost basis. ✓ shipped (same script)
+4. **FOP support** — separate design pass after futures Phase 1 lands.
+5. **Automation via Flex Web Service** — recurring import triggered by a
+   cron/loop. Deferred until manual workflow is stable across a few real monthly
+   imports.
 
 ## Design constraints (from user answers)
 
@@ -215,8 +217,16 @@ Test collapse observed: 12,541 raw Trades rows → 114 output rows (June 2026).
 - [x] Set up Flex Query with Trades + OptionEAE + CashTransactions + MtM Prices
 - [x] Pull small samples (May 2026, June 2026)
 - [x] Draft `ibkr_flex_to_wf.py` (parser + aggregator + per-trade + cash)
-- [ ] Trial-import into fresh dev DB (`DATABASE_URL=/tmp/wf_ibkr_trial.db`);
-      diff NLV against IBKR statement
-- [ ] Iterate on discrepancies surfaced by trial import
-- [ ] Add FUT expiry handling (see `docs/future_work.md`)
-- [ ] Add Flex Web Service fetcher (`ibkr_flex_fetch.py`) + cron docs
+- [x] Trial-import into fresh dev DB (`DATABASE_URL=/tmp/wf_ibkr_trial.db`);
+      diff NLV against IBKR statement — reconciled 06/09/2026 IBKR-Main to
+      within $81 of stated -$90,219 loss
+- [x] Iterate on discrepancies surfaced by trial import — see commit `bdccbbfc8`
+      (cash-settlement dedup, fee gross-up, daily fee aggregation) and
+      `46ccba6ee` (signed CREDIT support in core)
+- [x] Document import workflow — see `docs/ibkr_import_workflow.md`
+- [ ] Add FOP (futures options) support — separate design pass
+- [ ] Add FUT expiry handling (see `docs/future_work.md`) — non-urgent
+      workaround: close futures manually before expiry
+- [ ] Add Flex Web Service fetcher (`ibkr_flex_fetch.py`) + cron docs — last
+      item; wait until manual workflow is stable across a few real monthly
+      imports
