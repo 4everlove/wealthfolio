@@ -85,6 +85,12 @@ function getBaseDefaults(
     accountId: activity?.accountId ?? (accounts.length === 1 ? accounts[0].value : ""),
     activityDate: activity?.date ? new Date(activity.date) : new Date(),
     comment: activity?.comment ?? null,
+    // Preserve the current asset identity on edit so the backend keeps
+    // pointing at the same asset instead of re-inferring EQUITY (default)
+    // and creating a duplicate — hits FUTURES/METAL/etc. that infer_asset_kind
+    // doesn't recognize.
+    existingAssetId: activity?.assetId,
+    symbolInstrumentType: activity?.instrumentType,
   };
 }
 

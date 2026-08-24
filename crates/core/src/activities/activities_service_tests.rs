@@ -12276,6 +12276,76 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn test_infer_asset_kind_futures_symbol() {
+        // Regression: editing a FUTURES activity without an explicit
+        // instrument_type used to fall through to EQUITY and create a ghost
+        // asset. CME futures symbols must be recognized before the equity
+        // default kicks in.
+        let account_service = Arc::new(MockAccountService::new());
+        let asset_service = Arc::new(MockAssetService::new());
+        let fx_service = Arc::new(MockFxService::new());
+        let activity_repository = Arc::new(MockActivityRepository::new());
+        account_service.add_account(create_test_account("acc-1", "USD"));
+
+        let asset = create_test_asset_with_instrument(
+            "mesu9-uuid",
+            "MESU9",
+            None,
+            Some(InstrumentType::Futures),
+            "USD",
+        );
+        asset_service.add_asset(asset);
+
+        let quote_service = Arc::new(MockQuoteService);
+        let activity_service = ActivityService::new(
+            activity_repository,
+            account_service,
+            asset_service,
+            fx_service,
+            quote_service,
+        );
+
+        let new_activity = NewActivity {
+            id: Some("activity-fut-1".to_string()),
+            account_id: "acc-1".to_string(),
+            asset: Some(AssetResolutionInput {
+                symbol: Some("MESU9".to_string()),
+                ..Default::default()
+            }),
+            activity_type: "BUY".to_string(),
+            subtype: None,
+            activity_date: "2019-09-05".to_string(),
+            quantity: Some(dec!(1)),
+            unit_price: Some(dec!(2964.5)),
+            currency: "USD".to_string(),
+            fee: Some(dec!(0.47)),
+            tax: None,
+            amount: None,
+            status: None,
+            notes: None,
+            fx_rate: None,
+            metadata: None,
+            needs_review: None,
+            source_system: None,
+            source_record_id: None,
+            source_group_id: None,
+            idempotency_key: None,
+            import_run_id: None,
+        };
+
+        let created = activity_service
+            .create_activity(new_activity)
+            .await
+            .expect("futures symbol should route to existing FUTURES asset");
+
+        assert_eq!(
+            created.asset_id,
+            Some("mesu9-uuid".to_string()),
+            "CME futures symbol should match existing FUTURES asset, not create a ghost EQUITY one"
+        );
+    }
+
     // ── Transfer pair sync ──────────────────────────────────────────────────────
 
     #[tokio::test]

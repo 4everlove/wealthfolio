@@ -1691,6 +1691,14 @@ impl ActivityService {
             return (AssetKind::Investment, Some(InstrumentType::Option));
         }
 
+        // 3b. CME futures symbol heuristic (e.g. ESH26, MESU25, MESU9, GCG26,
+        // CLZ26, 6EM26). Recognized so edits/imports without an explicit
+        // instrument type don't fall through to EQUITY and create a ghost
+        // asset alongside an existing FUTURES one with the same symbol.
+        if crate::utils::futures_symbol::parse_futures_symbol(&upper_symbol).is_ok() {
+            return (AssetKind::Investment, Some(InstrumentType::Futures));
+        }
+
         // 4. If exchange MIC is provided, it's an equity
         if exchange_mic.is_some() {
             return (AssetKind::Investment, Some(InstrumentType::Equity));
