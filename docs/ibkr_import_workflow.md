@@ -69,8 +69,15 @@ stable location (e.g. `~/Downloads/ibkr_<month>.csv`).
 python3 scripts/import/ibkr_flex_to_wf.py \
   ~/Downloads/ibkr_2026-06.csv \
   /tmp/wf_2026-06.csv \
-  --account-map ~/.wealthfolio/ibkr_accounts.yml
+  --account-map ~/.wealthfolio/ibkr_accounts.yml \
+  --source-tz America/New_York
 ```
+
+- `--source-tz` is optional. When set (IANA name), BUY/SELL rows include a
+  DST-aware UTC offset so Wealthfolio stores the correct instant. Without it,
+  emitted datetimes are naive and interpreted as local by Wealthfolio.
+- The Flex Query needs the `DateTime` column enabled on Trades for time to
+  actually appear; otherwise falls back to date-only.
 
 Output to stderr summarizes parsed sections and row counts. Expect a large
 collapse — one test file went from 12,541 raw rows → 99 output rows because 0DTE

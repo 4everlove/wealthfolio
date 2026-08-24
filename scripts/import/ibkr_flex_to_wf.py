@@ -38,39 +38,50 @@ import hashlib
 import sys
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+# Optional source timezone for parsed DateTime. When set via --source-tz, each
+# emitted ISO datetime carries the correct UTC offset (DST-aware).
+_SOURCE_TZ: ZoneInfo | None = None
 
 
 
 # ---------- Section detection ----------
 
+_TRADES_BASE = (
+    "ClientAccountID",
+    "CurrencyPrimary",
+    "AssetClass",
+    "Symbol",
+    "Description",
+    "UnderlyingSymbol",
+    "Multiplier",
+    "Strike",
+    "Expiry",
+    "Put/Call",
+    "TradeDate",
+    "TransactionType",
+    "Quantity",
+    "TradePrice",
+    "IBCommission",
+    "IBCommissionCurrency",
+    "NetCash",
+    "Notes/Codes",
+    "OrigOrderID",
+    "Buy/Sell",
+    "OrderTime",
+    "TradeID",
+)
+# DateTime column added in a later Flex Query revision; optional for back-compat.
+# Contains "YYYYMMDD;HHMMSS" reflecting actual execution (e.g. Sunday-evening CME
+# trades) rather than IBKR's TradeDate settlement convention.
+_TRADES_WITH_DATETIME = _TRADES_BASE + ("DateTime",)
+
 SECTION_HEADERS = {
-    "trades": (
-        "ClientAccountID",
-        "CurrencyPrimary",
-        "AssetClass",
-        "Symbol",
-        "Description",
-        "UnderlyingSymbol",
-        "Multiplier",
-        "Strike",
-        "Expiry",
-        "Put/Call",
-        "TradeDate",
-        "TransactionType",
-        "Quantity",
-        "TradePrice",
-        "IBCommission",
-        "IBCommissionCurrency",
-        "NetCash",
-        "Notes/Codes",
-        "OrigOrderID",
-        "Buy/Sell",
-        "OrderTime",
-        "TradeID",
-    ),
+    "trades": _TRADES_WITH_DATETIME,
     "option_eae": (
         "ClientAccountID",
         "CurrencyPrimary",
@@ -119,6 +130,10 @@ def parse_sections(csv_path: Path) -> dict[str, list[dict]]:
     current_section: str | None = None
     current_header: tuple[str, ...] | None = None
 
+    # Old Flex Query variants may omit the DateTime column on Trades. Accept
+    # either shape and let downstream code fall back to TradeDate when absent.
+    trades_variants = {_TRADES_BASE: _TRADES_BASE, _TRADES_WITH_DATETIME: _TRADES_WITH_DATETIME}
+
     with csv_path.open(newline="", encoding="utf-8") as f:
         reader = csv.reader(f)
         for row in reader:
@@ -130,6 +145,11 @@ def parse_sections(csv_path: Path) -> dict[str, list[dict]]:
                 if row_tuple == header:
                     matched = name
                     break
+            if matched is None and row_tuple in trades_variants:
+                matched = "trades"
+                current_section = matched
+                current_header = trades_variants[row_tuple]
+                continue
             if matched is not None:
                 current_section = matched
                 current_header = SECTION_HEADERS[matched]
@@ -192,6 +212,44 @@ def bucket_for(asset_class: str, underlying: str) -> str:
     if asset_class == "STK":
         return "STK"
     return "OTHER"
+
+
+def execution_date(row: dict) -> str:
+    """Actual execution date (YYYYMMDD) from Trades row.
+
+    Prefers the DateTime column (contains YYYYMMDD;HHMMSS) so overnight CME
+    futures trades that IBKR reports with TradeDate set to the T+1 settlement
+    convention still bucket on the calendar day they actually executed.
+    Falls back to TradeDate when DateTime is absent (older Flex Query variants).
+    """
+    dt = (row.get("DateTime") or "").strip()
+    if dt:
+        return dt.split(";", 1)[0]
+    return row["TradeDate"]
+
+
+def execution_iso(row: dict) -> str:
+    """ISO 8601 datetime string for Wealthfolio's activity date.
+
+    Uses full YYYY-MM-DDTHH:MM:SS when DateTime is present, else date only.
+    When --source-tz is set the emitted string carries a UTC offset computed
+    for that specific instant (DST-aware); otherwise emitted naive.
+    """
+    dt = (row.get("DateTime") or "").strip()
+    if dt and ";" in dt:
+        ymd, hms = dt.split(";", 1)
+        if len(hms) == 6:
+            naive = datetime(
+                int(ymd[:4]), int(ymd[4:6]), int(ymd[6:8]),
+                int(hms[:2]), int(hms[2:4]), int(hms[4:6]),
+            )
+            if _SOURCE_TZ is not None:
+                aware = naive.replace(tzinfo=_SOURCE_TZ)
+                # isoformat() emits e.g. "2019-09-04T21:53:25-04:00"
+                return aware.isoformat()
+            return naive.isoformat(timespec="seconds")
+    d = execution_date(row)
+    return f"{d[:4]}-{d[4:6]}-{d[6:8]}"
 
 
 def signed_qty(row: dict) -> Decimal:
@@ -276,12 +334,13 @@ def convert_trades(
     per_trade_rows: list[dict] = []
 
     for (acct, symbol), rows in per_asset.items():
-        rows.sort(key=lambda r: (r["TradeDate"], r.get("OrderTime", "")))
+        rows.sort(key=lambda r: (execution_date(r), r.get("OrderTime", "")))
         running_qty = Decimal(0)
-        # Walk day by day.
+        # Walk day by day, keyed on execution date (not IBKR's TradeDate
+        # settlement convention), so overnight round-trips bucket correctly.
         by_day: dict[str, list[dict]] = defaultdict(list)
         for r in rows:
-            by_day[r["TradeDate"]].append(r)
+            by_day[execution_date(r)].append(r)
 
         days_sorted = sorted(by_day.keys())
         for d in days_sorted:
@@ -335,17 +394,20 @@ def convert_trades(
         trade_date = datetime.strptime(dstr, "%Y%m%d").date()
         occ = compose_occ_symbol(underlying, expiry, put_call, strike_str)
         wf_acct = account_map.get(acct, acct)
+        # Emit as CREDIT (signed): ADJUSTMENT without OPTION_EXPIRY subtype is a
+        # no-op in Wealthfolio's holdings calculator and would leak the cash.
         per_trade_rows.append(wf_row(
             date=trade_date.isoformat(),
             symbol="",
             instrumentType="",
             quantity="1",
-            activityType="ADJUSTMENT",
+            activityType="CREDIT",
             unitPrice=fmt_amount(proceeds),
             currency=currency,
             fee="0",
             tax="0",
             amount=fmt_amount(proceeds),
+            subtype="IBKR_CASH_SETTLEMENT",
             accountId=wf_acct,
             notes=f"IBKR cash settlement: {occ}",
             sourceRecordId=synth_id("ibkr_eae", acct, occ, dstr),
@@ -404,7 +466,11 @@ def _emit_trade_row(
     warnings: list[str],
 ) -> list[dict]:
     ac = row["AssetClass"]
-    d = datetime.strptime(row["TradeDate"], "%Y%m%d").date()
+    # Use full execution datetime when DateTime is present so overnight trades
+    # land on the correct calendar day AND preserve HH:MM:SS in Wealthfolio.
+    # Zero-price expiry BookTrades have DateTime blank → falls back to date.
+    d_iso = execution_iso(row)
+    d = datetime.strptime(execution_date(row), "%Y%m%d").date()
     wf_acct = account_map.get(acct, acct)
     currency = row["CurrencyPrimary"]
     symbol = normalize_trades_symbol(row["Symbol"], ac)
@@ -434,7 +500,8 @@ def _emit_trade_row(
             sourceRecordId=synth_id("ibkr_trade", trade_id),
         )]
         # Fold paired OptionEAE Cash Settlement (ITM cash-settled index options)
-        # into a companion ADJUSTMENT cash row.
+        # into a companion CREDIT cash row. ADJUSTMENT without OPTION_EXPIRY
+        # subtype is a no-op in the holdings calculator and would leak the cash.
         settle_key = _settle_key_from_trade(row)
         proceeds = cash_settlements.get(settle_key)
         if proceeds is not None and proceeds != 0:
@@ -444,11 +511,12 @@ def _emit_trade_row(
                 symbol="",
                 instrumentType="",
                 quantity="1",
-                activityType="ADJUSTMENT",
+                activityType="CREDIT",
                 unitPrice=fmt_amount(proceeds),
                 currency=currency,
                 fee="0", tax="0",
                 amount=fmt_amount(proceeds),
+                subtype="IBKR_CASH_SETTLEMENT",
                 accountId=wf_acct,
                 notes=f"IBKR cash settlement: {symbol}",
                 sourceRecordId=synth_id("ibkr_eae", acct, symbol, row['TradeDate']),
@@ -472,8 +540,10 @@ def _emit_trade_row(
     # Leave amount blank for BUY/SELL; Wealthfolio computes qty × price × multiplier.
     # IBKR NetCash on FUT rows is variation margin, not notional — using it would
     # mismatch WF's cost-basis semantics.
+    # Use ISO datetime (d_iso) to preserve HH:MM:SS; OPTION_EXPIRY and aggregate
+    # rows above stay date-only since those events are end-of-day by nature.
     return [wf_row(
-        date=d.isoformat(),
+        date=d_iso,
         symbol=symbol,
         instrumentType=instrument_type,
         quantity=fmt_amount(qty),
@@ -632,7 +702,23 @@ def main() -> None:
     ap.add_argument("input_csv", type=Path)
     ap.add_argument("output_csv", type=Path)
     ap.add_argument("--account-map", type=Path, default=Path.home() / ".wealthfolio" / "ibkr_accounts.yml")
+    ap.add_argument(
+        "--source-tz",
+        default=None,
+        help="IANA timezone of IBKR DateTime column (e.g. 'America/New_York'). "
+             "When set, emitted BUY/SELL rows carry a DST-aware UTC offset. "
+             "Default: naive datetime (Wealthfolio interprets as local).",
+    )
     args = ap.parse_args()
+
+    global _SOURCE_TZ
+    if args.source_tz:
+        try:
+            _SOURCE_TZ = ZoneInfo(args.source_tz)
+        except ZoneInfoNotFoundError:
+            print(f"Unknown --source-tz '{args.source_tz}'. Use an IANA name like 'America/New_York'.", file=sys.stderr)
+            sys.exit(2)
+        print(f"Emitting datetimes with timezone: {args.source_tz}", file=sys.stderr)
 
     sections = parse_sections(args.input_csv)
     print(f"Parsed sections: {{ {', '.join(f'{k}: {len(v)}' for k, v in sections.items())} }}", file=sys.stderr)
