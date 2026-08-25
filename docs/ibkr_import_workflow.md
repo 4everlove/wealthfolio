@@ -11,12 +11,13 @@ IBKR Client Portal → Reports → Flex Queries → Create new Activity Flex Que
 
 **Sections to include** (all four required by the converter):
 
-| Section                        | Required fields                                                                                                                                                                                                                                                                    |
-| ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Trades**                     | `ClientAccountID, CurrencyPrimary, AssetClass, Symbol, Description, UnderlyingSymbol, Multiplier, Strike, Expiry, Put/Call, TradeDate, TransactionType, Quantity, TradePrice, IBCommission, IBCommissionCurrency, NetCash, Notes/Codes, OrigOrderID, Buy/Sell, OrderTime, TradeID` |
-| **OptionEAE**                  | `ClientAccountID, CurrencyPrimary, UnderlyingSymbol, Multiplier, Strike, Expiry, Put/Call, Date, Transaction Type, Quantity, Trade Price, Close Price, Proceeds, Comm/Tax, TradeID`                                                                                                |
-| **Cash Transactions**          | `ClientAccountID, CurrencyPrimary, Description, Date/Time, Amount, Type`                                                                                                                                                                                                           |
-| **Mark-to-Market Performance** | (any subset; converter ignores this section but IBKR requires it to be non-empty for the query to save)                                                                                                                                                                            |
+| Section                        | Required fields                                                                                                                                                                                                                                                                                   |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Trades**                     | `ClientAccountID, CurrencyPrimary, AssetClass, Symbol, Description, UnderlyingSymbol, Multiplier, Strike, Expiry, Put/Call, TradeDate, TransactionType, Quantity, TradePrice, IBCommission, IBCommissionCurrency, NetCash, Notes/Codes, OrigOrderID, Buy/Sell, OrderTime, TradeID, DateTime`      |
+| **OptionEAE**                  | `ClientAccountID, CurrencyPrimary, UnderlyingSymbol, Multiplier, Strike, Expiry, Put/Call, Date, Transaction Type, Quantity, Trade Price, Close Price, Proceeds, Comm/Tax, TradeID`                                                                                                               |
+| **Cash Transactions**          | `ClientAccountID, CurrencyPrimary, Description, Date/Time, Amount, Type`                                                                                                                                                                                                                          |
+| **OpenPositions**              | `ClientAccountID, AssetClass, Symbol, UnderlyingSymbol, Multiplier, Strike, Expiry, Put/Call, MarkPrice, OpenPrice, CostBasisPrice, CostBasisMoney, FifoPnlUnrealized, Side, OpenDateTime, CurrencyPrimary, ReportDate, Quantity` — required to seed the _next_ period's import via `--seed-from` |
+| **Mark-to-Market Performance** | (any subset; converter ignores this section but IBKR requires it to be non-empty for the query to save)                                                                                                                                                                                           |
 
 **Format**: CSV, no header/trailer rows.
 
@@ -179,13 +180,132 @@ Not blockers, but be aware:
 
 ## Recurring imports
 
-For monthly imports:
+### Why seeding matters
 
-1. Set the Flex Query period to "Last N Days" (60+ recommended to catch trades
-   that opened before but closed in the current period).
-2. Pull → run script → import.
-3. Re-import safety (`sourceRecordId`) means overlap with a previous window just
-   no-ops the duplicate rows.
+The converter walks each `(account, asset)` position chronologically from the
+start of the file. Without a seed, the walk assumes flat-zero at time zero,
+which misclassifies any position opened before the window (e.g. a SELL of a
+pre-existing long looks like opening a short) and breaks daily-aggregation
+correctness for stocks/options/futures held across the window boundary.
 
-Once Flex Web Service automation is built (`ibkr_flex_fetch.py`, not yet shipped
-— see `ibkr_import_plan.md`), this becomes a cron job.
+Seeding fixes this: `--seed-from <prior_file.csv>` reads OpenPositions from the
+earlier file and emits one `TRANSFER_IN` per position on that snapshot's
+`ReportDate` before processing the current window's trades.
+
+### Preview OpenPositions before seeding
+
+Quick sanity check on any Flex CSV to confirm the OpenPositions section is
+present and looks right:
+
+```bash
+python3 scripts/import/ibkr_flex_to_wf.py --show-positions ~/Downloads/wealthfolio_2020.csv
+```
+
+Prints a table of every row in the OpenPositions section: account, asset class,
+symbol, side, quantity, mark price, cost basis, and unrealized P&L. Useful for
+previewing what would seed the next period, or comparing to Wealthfolio's
+positions at the validation checkpoint.
+
+### Chain each period from the prior period's OpenPositions
+
+**Annual pattern** (backfills, or if you pull yearly):
+
+```bash
+# Year 2020 (seed from end-of-2019 snapshot)
+python3 scripts/import/ibkr_flex_to_wf.py \
+  ~/Downloads/wealthfolio_2020.csv /tmp/wf_2020.csv \
+  --seed-from ~/Downloads/wealthfolio_2019.csv \
+  --source-tz America/New_York
+
+# Year 2021 (seed from end-of-2020 snapshot)
+python3 scripts/import/ibkr_flex_to_wf.py \
+  ~/Downloads/wealthfolio_2021.csv /tmp/wf_2021.csv \
+  --seed-from ~/Downloads/wealthfolio_2020.csv \
+  --source-tz America/New_York
+```
+
+**Monthly pattern** (ongoing / Flex Web Service):
+
+```bash
+# Feb 2026 (seed from end-of-Jan snapshot)
+python3 scripts/import/ibkr_flex_to_wf.py \
+  ~/.wealthfolio/ibkr/2026-02.csv /tmp/wf_2026-02.csv \
+  --seed-from ~/.wealthfolio/ibkr/2026-01.csv \
+  --source-tz America/New_York
+```
+
+Every pull should include the OpenPositions section with `ReportDate` so the
+file can seed the _next_ period. Save each raw CSV persistently — you'll need it
+as the seed for the following period.
+
+### First-period bootstrapping
+
+For your earliest period (nothing before it), the account cash balance also
+needs a seed. Two options:
+
+1. **Genuine account inception**: if the first period includes the initial
+   wire/ACH deposit that opened the account, no manual step needed — the
+   CashTransactions row handles it.
+2. **Partial history**: manually add a `DEPOSIT` row to the output CSV on the
+   seed date, matching the account's starting cash balance from IBKR's
+   statement.
+
+### Validation checkpoint after each import
+
+After importing period N, compare Wealthfolio's positions on the last day
+against `wealthfolio_N.csv`'s OpenPositions section. If they diverge:
+
+- Missing asset in Wealthfolio → a short position wasn't seeded (see
+  short-position caveat below); or a trade in the window was misclassified
+- Extra asset in Wealthfolio (phantom) → likely a short-close was misinterpreted
+  as opening a long (same root cause)
+- Wrong quantity → a partial fill got deduped, or an OPTION_EXPIRY row's
+  quantity didn't match IBKR's Exercise/Assignment count
+
+Fix any divergence _before_ moving to period N+1, because that period's seed
+comes from the current period's IBKR snapshot (which is authoritative), and
+persistent Wealthfolio errors won't self-heal.
+
+### Short-position caveat
+
+Seed emission skips short positions with a warning (Wealthfolio's `TRANSFER_IN`
+doesn't accept negative quantity yet). Impact:
+
+- Persistent shorts crossing a seed boundary are missing from Wealthfolio until
+  the seed handler is enhanced.
+- When such a short eventually closes, the closing BUY looks like opening a new
+  long → phantom long lot appears.
+
+**Manual workaround** for rare cases: after the converter warns about a skipped
+short seed, hand-add a `SELL` row (with `POSITION_OPEN` subtype and a paired
+ADJUSTMENT zeroing the proceeds) to the output CSV before import.
+
+Or if your account rarely holds short positions across periods, ignore the
+warning and manually delete any phantom long lots that appear.
+
+### Flex Web Service (automated pulls)
+
+Not yet shipped (`ibkr_flex_fetch.py`, see `ibkr_import_plan.md`). When built,
+the fetcher will need to:
+
+1. Pull the current period → save to `~/.wealthfolio/ibkr/<YYYY-MM>.csv`
+2. Look up the previous period's file (same folder)
+3. Invoke the converter with `--seed-from <prior>` automatically
+4. Import the resulting Wealthfolio CSV
+
+**Cadence note**: schedule the cron for at least the 2nd of each month if your
+Flex Query period is "Last Month" — otherwise you might miss end-of-month
+settlement bookings that IBKR posts after 5pm ET on the last business day.
+
+### Idempotency across all patterns
+
+Every emitted row's `sourceRecordId` is deterministic:
+
+- Trades → hash of `TradeID`
+- Aggregates → hash of `(account, date, currency, bucket)`
+- Seed rows → hash of `(account, symbol, ReportDate)`
+- Cash txns → hash of `(account, date, description, amount)`
+
+So re-importing the same file (or overlapping windows) is safe — Wealthfolio
+dedupes by `sourceRecordId`. You can rebuild the entire chain from scratch
+without duplicating rows.

@@ -81,10 +81,12 @@ remain open.
   for on a single test file.
 - **CashTransactions** — deposits, withdrawals, interest, dividends, fees
 - **CorporateActions** — warn-only pass (optional; not required for v1)
-- **PriorPeriodPositions** — optional if importing from account inception; only
-  needed when importing a partial window and you want to know pre-existing
-  positions
-- **OpenPositions** — sanity check only; not consumed by importer
+- **OpenPositions** — **strongly recommended for recurring imports**. Consumed
+  by `--seed-from` to seed each period's position walk from the prior period's
+  end-of-period snapshot. Without it, positions crossing a period boundary are
+  misclassified (SELL of a pre-existing long looks like opening a short, etc.).
+- **PriorPeriodPositions** — superseded by OpenPositions for our purposes;
+  IBKR's field selection is more limited than OpenPositions.
 
 ### Fields per section
 
@@ -123,13 +125,19 @@ Observed `Type` values so far: `Dividends`, `Broker Interest Received`,
 `Other Fees`. Deposits/Withdrawals not yet seen in test samples — verify they
 emit as `Deposits & Withdrawals` when they occur.
 
-**PriorPeriodPositions** (optional):
+**OpenPositions** (strongly recommended for recurring imports):
 
 ```
-AccountId, Symbol, Underlying, AssetClass, Multiplier, Expiry,
-Strike, Put/Call, Quantity, MarkPrice, CostBasisPrice, CostBasisMoney,
-CurrencyPrimary
+ClientAccountID, AssetClass, Symbol, UnderlyingSymbol, Multiplier, Strike,
+Expiry, Put/Call, MarkPrice, OpenPrice, CostBasisPrice, CostBasisMoney,
+FifoPnlUnrealized, Side, OpenDateTime, CurrencyPrimary, ReportDate, Quantity
 ```
+
+`ReportDate` is required — that's the date each `TRANSFER_IN` seed row is
+booked. `Quantity` is preferred; without it the converter derives from
+`CostBasisMoney / (CostBasisPrice × Multiplier)`. Short positions (`Side=Short`)
+are skipped with a warning — Wealthfolio's TRANSFER_IN doesn't accept negative
+quantity yet.
 
 Format: **CSV** with header row (simpler to parse than XML; equivalent for our
 needs).
@@ -224,7 +232,12 @@ Test collapse observed: 12,541 raw Trades rows → 114 output rows (June 2026).
       (cash-settlement dedup, fee gross-up, daily fee aggregation) and
       `46ccba6ee` (signed CREDIT support in core)
 - [x] Document import workflow — see `docs/ibkr_import_workflow.md`
-- [ ] Add FOP (futures options) support — separate design pass
+- [x] Add FOP (futures options) 0DTE aggregation support (see commit
+      `d45d9eb61`); multi-day FOPs still need pseudo-asset design
+- [x] OpenPositions-based seeding via `--seed-from` for correct cross-period
+      position walks
+- [ ] Short-position support in seed (currently skipped with warning; manual
+      workaround documented)
 - [ ] Add FUT expiry handling (see `docs/future_work.md`) — non-urgent
       workaround: close futures manually before expiry
 - [ ] Add Flex Web Service fetcher (`ibkr_flex_fetch.py`) + cron docs — last

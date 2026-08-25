@@ -119,7 +119,22 @@ SECTION_HEADERS = {
         "Amount",
         "Type",
     ),
+    # OpenPositions: field set varies across Flex Query configs. Detected
+    # by signature (starts with ClientAccountID + AssetClass + Symbol +
+    # UnderlyingSymbol) rather than exact-match tuple.
+    "open_positions": None,
 }
+
+
+def _is_open_positions_header(row: list[str]) -> bool:
+    return (
+        len(row) >= 8
+        and row[0] == "ClientAccountID"
+        and row[1] == "AssetClass"
+        and row[2] == "Symbol"
+        and row[3] == "UnderlyingSymbol"
+        and "CostBasisMoney" in row
+    )
 
 INDEX_UNDERLYINGS = {"SPX", "SPXW", "XSP", "NDX", "RUT", "VIX", "RUTW", "NDXP"}
 
@@ -142,13 +157,18 @@ def parse_sections(csv_path: Path) -> dict[str, list[dict]]:
             row_tuple = tuple(row)
             matched = None
             for name, header in SECTION_HEADERS.items():
-                if row_tuple == header:
+                if header is not None and row_tuple == header:
                     matched = name
                     break
             if matched is None and row_tuple in trades_variants:
                 matched = "trades"
                 current_section = matched
                 current_header = trades_variants[row_tuple]
+                continue
+            if matched is None and _is_open_positions_header(row):
+                matched = "open_positions"
+                current_section = matched
+                current_header = row_tuple  # capture the actual field set
                 continue
             if matched is not None:
                 current_section = matched
@@ -650,6 +670,194 @@ def convert_cash_txns(cash_rows: list[dict], account_map: dict[str, str]) -> lis
     return output
 
 
+# ---------- OpenPositions seeding ----------
+
+def convert_open_positions(
+    rows: list[dict],
+    account_map: dict[str, str],
+    warnings: list[str],
+) -> list[dict]:
+    """Emit TRANSFER_IN rows from OpenPositions so per-day position walks are
+    seeded correctly. Without this, the walk assumes flat at time zero and
+    misclassifies any activity on positions opened before the window.
+
+    Seed date is derived from each row's ReportDate field (YYYYMMDD).
+    Long positions become TRANSFER_IN. Short positions are not supported yet
+    (Wealthfolio's TRANSFER_IN doesn't accept negative quantity) and are
+    warned + skipped."""
+    output: list[dict] = []
+    for r in rows:
+        acct = r.get("ClientAccountID") or ""
+        if not acct:
+            continue
+        report_date_raw = (r.get("ReportDate") or "").strip()
+        if not report_date_raw:
+            warnings.append(
+                f"OpenPositions row for {r.get('Symbol')} missing ReportDate; skipped. "
+                "Enable ReportDate in the Flex Query OpenPositions field selection."
+            )
+            continue
+        try:
+            seed_date = datetime.strptime(report_date_raw, "%Y%m%d").date().isoformat()
+        except ValueError:
+            warnings.append(
+                f"OpenPositions row for {r.get('Symbol')}: bad ReportDate '{report_date_raw}'"
+            )
+            continue
+        asset_class = r.get("AssetClass") or ""
+        symbol = r.get("Symbol") or ""
+        underlying = r.get("UnderlyingSymbol") or ""
+        currency = r.get("CurrencyPrimary") or "USD"
+        side = (r.get("Side") or "Long").upper()
+        try:
+            multiplier = Decimal(r.get("Multiplier") or "1")
+        except Exception:
+            multiplier = Decimal(1)
+        try:
+            cost_money = Decimal(r.get("CostBasisMoney") or "0")
+        except Exception:
+            cost_money = Decimal(0)
+        try:
+            cost_price = Decimal(r.get("CostBasisPrice") or "0")
+        except Exception:
+            cost_price = Decimal(0)
+
+        # Prefer explicit Quantity if the field is present; otherwise derive
+        # from CostBasisMoney / (CostBasisPrice * Multiplier).
+        qty_raw = r.get("Quantity")
+        try:
+            qty = abs(Decimal(qty_raw)) if qty_raw else None
+        except Exception:
+            qty = None
+        if qty is None:
+            if cost_price == 0 or multiplier == 0:
+                warnings.append(
+                    f"OpenPositions: cannot derive quantity for {symbol} — "
+                    "no Quantity field and CostBasisPrice/Multiplier is zero"
+                )
+                continue
+            qty = abs(cost_money / (cost_price * multiplier))
+        qty = qty.quantize(Decimal("0.000001"))
+
+        if side == "SHORT":
+            warnings.append(
+                f"OpenPositions: short seed for {symbol} skipped (not yet supported); "
+                "affects any subsequent cover-buy accounting"
+            )
+            continue
+
+        instrument_type = {
+            "STK": "EQUITY",
+            "OPT": "OPTION",
+            "FUT": "FUTURES",
+            "FOP": "OPTION",  # closest match until pseudo-asset design lands
+        }.get(asset_class)
+        if instrument_type is None:
+            warnings.append(
+                f"OpenPositions: unsupported AssetClass={asset_class} for {symbol}; skipped"
+            )
+            continue
+
+        # Compose OCC when Symbol lacks it (rare — usually IBKR's Symbol already
+        # is OCC-like for OPT).
+        if asset_class == "OPT" and " " not in symbol and underlying:
+            put_call = r.get("Put/Call") or ""
+            strike = r.get("Strike") or ""
+            expiry = r.get("Expiry") or ""
+            if put_call and strike and expiry:
+                symbol = compose_occ_symbol(underlying, expiry, put_call, strike)
+
+        wf_acct = account_map.get(acct, acct)
+        # unit_price for TRANSFER_IN is the per-unit cost basis. For assets
+        # with a contract multiplier > 1 Wealthfolio expects the per-share
+        # price (multiplier applied downstream). CostBasisPrice from IBKR
+        # already matches that convention.
+        output.append(wf_row(
+            date=seed_date,
+            symbol=symbol,
+            instrumentType=instrument_type,
+            quantity=fmt_amount(qty),
+            activityType="TRANSFER_IN",
+            unitPrice=fmt_amount(cost_price),
+            currency=currency,
+            fee="0",
+            tax="0",
+            amount=fmt_amount(cost_money),
+            accountId=wf_acct,
+            notes=f"IBKR OpenPositions seed as of {seed_date}",
+            sourceRecordId=synth_id("ibkr_seed", acct, symbol, seed_date),
+        ))
+    return output
+
+
+# ---------- Position preview ----------
+
+def show_open_positions(path: Path) -> None:
+    """Print a formatted table of the OpenPositions section from `path`."""
+    if not path.exists():
+        print(f"File not found: {path}", file=sys.stderr)
+        sys.exit(2)
+    sections = parse_sections(path)
+    rows = sections.get("open_positions") or []
+    if not rows:
+        print(f"No OpenPositions section found in {path}", file=sys.stderr)
+        return
+
+    def fmt_qty(row: dict) -> str:
+        raw = row.get("Quantity")
+        if raw:
+            try:
+                return f"{Decimal(raw):,.4f}".rstrip("0").rstrip(".")
+            except Exception:
+                return raw
+        # Derive from cost fields
+        try:
+            cost_money = Decimal(row.get("CostBasisMoney") or "0")
+            cost_price = Decimal(row.get("CostBasisPrice") or "0")
+            mult = Decimal(row.get("Multiplier") or "1")
+            if cost_price == 0 or mult == 0:
+                return "?"
+            return f"{cost_money / (cost_price * mult):,.4f}".rstrip("0").rstrip(".")
+        except Exception:
+            return "?"
+
+    def fmt_money(v: str | None) -> str:
+        if not v:
+            return "-"
+        try:
+            return f"{Decimal(v):,.2f}"
+        except Exception:
+            return v
+
+    display_rows = []
+    for r in rows:
+        display_rows.append({
+            "account": r.get("ClientAccountID") or "",
+            "as_of": r.get("ReportDate") or "",
+            "class": r.get("AssetClass") or "",
+            "symbol": r.get("Symbol") or "",
+            "side": r.get("Side") or "",
+            "qty": fmt_qty(r),
+            "mark": fmt_money(r.get("MarkPrice")),
+            "cost_px": fmt_money(r.get("CostBasisPrice")),
+            "cost_$": fmt_money(r.get("CostBasisMoney")),
+            "unrl_pnl": fmt_money(r.get("FifoPnlUnrealized")),
+            "ccy": r.get("CurrencyPrimary") or "",
+        })
+    display_rows.sort(key=lambda x: (x["account"], x["class"], x["symbol"]))
+
+    headers = ["account", "as_of", "class", "symbol", "side", "qty",
+               "mark", "cost_px", "cost_$", "unrl_pnl", "ccy"]
+    widths = {h: max(len(h), max((len(r[h]) for r in display_rows), default=0)) for h in headers}
+    fmt = "  ".join(f"{{:<{widths[h]}}}" for h in headers)
+
+    print(fmt.format(*headers))
+    print("  ".join("-" * widths[h] for h in headers))
+    for r in display_rows:
+        print(fmt.format(*(r[h] for h in headers)))
+    print(f"\n{len(display_rows)} position(s) from {path}")
+
+
 # ---------- Cash settlement extraction ----------
 
 def collect_cash_settlements(eae_rows: list[dict], warnings: list[str]) -> dict:
@@ -699,8 +907,8 @@ def load_account_map(path: Path | None) -> dict[str, str]:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("input_csv", type=Path)
-    ap.add_argument("output_csv", type=Path)
+    ap.add_argument("input_csv", type=Path, nargs="?", help="Flex CSV to convert (omit if using --show-positions)")
+    ap.add_argument("output_csv", type=Path, nargs="?", help="Output CSV path (omit if using --show-positions)")
     ap.add_argument("--account-map", type=Path, default=Path.home() / ".wealthfolio" / "ibkr_accounts.yml")
     ap.add_argument(
         "--source-tz",
@@ -709,7 +917,35 @@ def main() -> None:
              "When set, emitted BUY/SELL rows carry a DST-aware UTC offset. "
              "Default: naive datetime (Wealthfolio interprets as local).",
     )
+    ap.add_argument(
+        "--seed-from",
+        type=Path,
+        default=None,
+        help="Path to a separate Flex CSV whose OpenPositions section seeds "
+             "the account. Typical usage: pass the PRIOR period's export "
+             "here — its end-of-period OpenPositions == start-of-period for "
+             "the current window. Seed date is taken from each OpenPositions "
+             "row's ReportDate field (required). Enables correct per-day "
+             "position walks (and thus correct aggregation) when importing "
+             "a partial window.",
+    )
+    ap.add_argument(
+        "--show-positions",
+        type=Path,
+        default=None,
+        metavar="FILE",
+        help="Print a formatted table of the OpenPositions section from FILE "
+             "and exit. Useful for previewing a seed source or comparing "
+             "period-end state to Wealthfolio.",
+    )
     args = ap.parse_args()
+
+    if args.show_positions:
+        show_open_positions(args.show_positions)
+        return
+
+    if args.input_csv is None or args.output_csv is None:
+        ap.error("input_csv and output_csv are required unless --show-positions is used")
 
     global _SOURCE_TZ
     if args.source_tz:
@@ -733,8 +969,21 @@ def main() -> None:
     cash_settlements = collect_cash_settlements(sections["option_eae"], warnings)
     trade_rows = convert_trades(sections["trades"], cash_settlements, account_map, warnings)
     cash_rows = convert_cash_txns(sections["cash_txn"], account_map)
+    seed_rows: list[dict] = []
+    if args.seed_from:
+        if not args.seed_from.exists():
+            print(f"--seed-from file not found: {args.seed_from}", file=sys.stderr)
+            sys.exit(2)
+        seed_sections = parse_sections(args.seed_from)
+        seed_positions = seed_sections.get("open_positions", []) or []
+        print(
+            f"Seed source: {args.seed_from} ({len(seed_positions)} OpenPositions rows)",
+            file=sys.stderr,
+        )
+        seed_rows = convert_open_positions(seed_positions, account_map, warnings)
+        print(f"Seeded {len(seed_rows)} positions", file=sys.stderr)
 
-    all_rows = trade_rows + cash_rows
+    all_rows = seed_rows + trade_rows + cash_rows
     all_rows.sort(key=lambda r: (r["date"], r["accountId"], r["symbol"]))
 
     with args.output_csv.open("w", newline="") as f:
