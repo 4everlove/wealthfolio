@@ -35,7 +35,11 @@ from __future__ import annotations
 import argparse
 import csv
 import hashlib
+import json
 import sys
+import time
+import urllib.error
+import urllib.request
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
@@ -790,6 +794,107 @@ def convert_open_positions(
     return output
 
 
+# ---------- Symbol preflight ----------
+
+_YAHOO_CHART = "https://query1.finance.yahoo.com/v8/finance/chart/"
+_YAHOO_HEADERS = {"User-Agent": "Mozilla/5.0 (ibkr-flex-preflight)"}
+
+
+def _yahoo_symbol_ok(symbol: str, timeout: float = 5.0) -> tuple[bool, str | None]:
+    """Return (resolves, note). `note` is the resolved Yahoo symbol when the
+    endpoint's response differs from the requested one — a strong signal of
+    a rename (e.g. SQ → XYZ) or a fuzzy fallback."""
+    url = f"{_YAHOO_CHART}{urllib.request.quote(symbol)}?range=5d&interval=1d"
+    req = urllib.request.Request(url, headers=_YAHOO_HEADERS)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        if e.code in (404,):
+            return (False, None)
+        return (False, f"http {e.code}")
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError) as e:
+        return (False, f"error: {type(e).__name__}")
+
+    err = (body.get("chart") or {}).get("error")
+    if err:
+        return (False, err.get("code") or "unknown")
+
+    result = (body.get("chart") or {}).get("result") or []
+    if not result:
+        return (False, "empty result")
+    meta = result[0].get("meta") or {}
+    resolved = meta.get("symbol") or ""
+    if resolved and resolved.upper() != symbol.upper():
+        return (True, f"resolved as {resolved}")
+    return (True, None)
+
+
+def _collect_stock_symbols(sections: dict[str, list[dict]]) -> set[str]:
+    """Unique stock symbols the converter will produce (Trades + OpenPositions).
+
+    Only STK / non-option non-futures assets — option and futures symbols
+    aren't Yahoo-lookup-compatible in their raw form."""
+    symbols: set[str] = set()
+    for r in sections.get("trades") or []:
+        if r.get("AssetClass") == "STK":
+            sym = (r.get("Symbol") or "").strip()
+            if sym:
+                symbols.add(sym)
+    for r in sections.get("open_positions") or []:
+        if r.get("AssetClass") == "STK":
+            sym = (r.get("Symbol") or "").strip()
+            if sym:
+                symbols.add(sym)
+    return symbols
+
+
+def run_symbol_preflight(
+    trades_sections: dict[str, list[dict]],
+    seed_sections: dict[str, list[dict]] | None,
+    warnings: list[str],
+    sleep_ms: int = 100,
+) -> None:
+    """Ping Yahoo for each unique stock symbol and warn on unresolved ones.
+
+    Renamed/delisted tickers (e.g. SQ → XYZ) are a common source of silent
+    ghost-asset creation because Wealthfolio's enrichment falls back to a
+    fuzzy search that can pick unrelated tickers with the same string
+    fragment (e.g. VSQTF instead of SQ)."""
+    symbols = _collect_stock_symbols(trades_sections)
+    if seed_sections:
+        symbols |= _collect_stock_symbols(seed_sections)
+    if not symbols:
+        print("Symbol preflight: no stock symbols to check.", file=sys.stderr)
+        return
+    print(f"Symbol preflight: checking {len(symbols)} unique stock symbols on Yahoo…", file=sys.stderr)
+    unresolved = 0
+    renamed = 0
+    for i, sym in enumerate(sorted(symbols)):
+        ok, note = _yahoo_symbol_ok(sym)
+        if not ok:
+            unresolved += 1
+            msg = f"Preflight: '{sym}' does not resolve on Yahoo"
+            if note:
+                msg += f" ({note})"
+            msg += ". Wealthfolio may create a ghost asset via fuzzy fallback."
+            print(f"  ✗ {msg}", file=sys.stderr)
+            warnings.append(msg)
+        elif note:  # renamed / different resolution
+            renamed += 1
+            msg = f"Preflight: '{sym}' {note} — likely a rename or delist. Verify before import."
+            print(f"  ⚠ {msg}", file=sys.stderr)
+            warnings.append(msg)
+        if sleep_ms > 0 and i < len(symbols) - 1:
+            time.sleep(sleep_ms / 1000)
+    ok_count = len(symbols) - unresolved - renamed
+    print(
+        f"Symbol preflight: {ok_count} clean, {renamed} renamed/reassigned, "
+        f"{unresolved} unresolved.",
+        file=sys.stderr,
+    )
+
+
 # ---------- Position preview ----------
 
 def show_open_positions(path: Path) -> None:
@@ -938,6 +1043,15 @@ def main() -> None:
              "and exit. Useful for previewing a seed source or comparing "
              "period-end state to Wealthfolio.",
     )
+    ap.add_argument(
+        "--preflight-symbols",
+        action="store_true",
+        help="Before writing the output, ping Yahoo for each unique stock "
+             "symbol in Trades + seed OpenPositions. Warns on unresolved or "
+             "renamed tickers (e.g. SQ → XYZ) that would otherwise trigger "
+             "Wealthfolio's fuzzy-search fallback and create a ghost asset. "
+             "Adds ~100ms per unique symbol; skip for tight loops.",
+    )
     args = ap.parse_args()
 
     if args.show_positions:
@@ -969,12 +1083,14 @@ def main() -> None:
     cash_settlements = collect_cash_settlements(sections["option_eae"], warnings)
     trade_rows = convert_trades(sections["trades"], cash_settlements, account_map, warnings)
     cash_rows = convert_cash_txns(sections["cash_txn"], account_map)
+    seed_sections_for_preflight: dict[str, list[dict]] | None = None
     seed_rows: list[dict] = []
     if args.seed_from:
         if not args.seed_from.exists():
             print(f"--seed-from file not found: {args.seed_from}", file=sys.stderr)
             sys.exit(2)
         seed_sections = parse_sections(args.seed_from)
+        seed_sections_for_preflight = seed_sections
         seed_positions = seed_sections.get("open_positions", []) or []
         print(
             f"Seed source: {args.seed_from} ({len(seed_positions)} OpenPositions rows)",
@@ -982,6 +1098,9 @@ def main() -> None:
         )
         seed_rows = convert_open_positions(seed_positions, account_map, warnings)
         print(f"Seeded {len(seed_rows)} positions", file=sys.stderr)
+
+    if args.preflight_symbols:
+        run_symbol_preflight(sections, seed_sections_for_preflight, warnings)
 
     all_rows = seed_rows + trade_rows + cash_rows
     all_rows.sort(key=lambda r: (r["date"], r["accountId"], r["symbol"]))

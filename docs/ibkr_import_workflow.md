@@ -192,6 +192,28 @@ Seeding fixes this: `--seed-from <prior_file.csv>` reads OpenPositions from the
 earlier file and emits one `TRANSFER_IN` per position on that snapshot's
 `ReportDate` before processing the current window's trades.
 
+### Preflight symbols against Yahoo
+
+Renamed / delisted tickers (e.g. `SQ` → `XYZ`, `WORK` → delisted after Slack was
+acquired) silently map to unrelated tickers via Wealthfolio's fuzzy-search
+fallback (Yahoo has no verbatim result → the resolver picks whatever partial
+match came back). Flag them before import:
+
+```bash
+python3 scripts/import/ibkr_flex_to_wf.py \
+  ~/Downloads/wealthfolio_2020.csv /tmp/wf_2020.csv \
+  --seed-from ~/Downloads/wealthfolio_2019.csv \
+  --preflight-symbols
+```
+
+Warnings list every unique stock symbol that doesn't resolve verbatim on Yahoo,
+plus renames where Yahoo returns a different symbol than requested. Fix by
+editing the raw CSV (rename the ticker) or manually creating the correct asset
+in Wealthfolio first, then re-run without the flag.
+
+Adds ~100ms per unique symbol; skip for tight recurring loops once your symbol
+set is clean.
+
 ### Preview OpenPositions before seeding
 
 Quick sanity check on any Flex CSV to confirm the OpenPositions section is
