@@ -114,6 +114,9 @@ impl SymbolResolver for ResolverChain {
             // Futures currency lives on the FuturesSpec, not on InstrumentId.
             // Callers already carry it in QuoteContext.
             InstrumentId::Futures { .. } => None,
+            // Same for futures options — currency comes from the underlying
+            // futures spec via QuoteContext.
+            InstrumentId::FuturesOption { .. } => None,
         }
     }
 }

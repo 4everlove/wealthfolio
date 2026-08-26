@@ -47,7 +47,7 @@ impl AssetResolutionInput {
         // row through a search that 404s anyway (Yahoo has no per-contract
         // coverage; other providers rate-limit on unknown symbols).
         let requires_quote_ccy =
-            !matches!(instrument_type, InstrumentType::Option | InstrumentType::Futures);
+            !matches!(instrument_type, InstrumentType::Option | InstrumentType::Futures | InstrumentType::FuturesOption);
         if requires_quote_ccy && !reviewed_quote_ccy_is_valid(self.quote_ccy.as_deref()) {
             return false;
         }
@@ -69,6 +69,7 @@ impl AssetResolutionInput {
             InstrumentType::Crypto
             | InstrumentType::Fx
             | InstrumentType::Option
+            | InstrumentType::FuturesOption
             | InstrumentType::Metal
             | InstrumentType::Bond
             | InstrumentType::Futures => true,

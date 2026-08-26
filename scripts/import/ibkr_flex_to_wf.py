@@ -276,6 +276,20 @@ def execution_iso(row: dict) -> str:
     return f"{d[:4]}-{d[4:6]}-{d[6:8]}"
 
 
+def futures_root_from_symbol(symbol: str) -> str:
+    """Best-effort root extraction from a CME futures symbol.
+
+    Handles common shapes: ESM6, MESU9, MESH27, 6EM26 → ES, MES, MES, 6E.
+    Strips a trailing month code (F/G/H/J/K/M/N/Q/U/V/X/Z) + 1–2 digit year.
+    Falls back to the symbol as-is when the pattern doesn't match."""
+    s = symbol.strip().upper()
+    if not s:
+        return s
+    import re
+    m = re.match(r"^(.*?)([FGHJKMNQUVXZ])(\d{1,2})$", s)
+    return m.group(1) if m else s
+
+
 def signed_qty(row: dict) -> Decimal:
     """Signed quantity from Trades row: positive for BUY, negative for SELL."""
     qty = Decimal(row["Quantity"])
@@ -302,7 +316,7 @@ def is_zero_price_expiry(row: dict) -> bool:
 WF_HEADER = [
     "date", "symbol", "instrumentType", "quantity", "activityType",
     "unitPrice", "currency", "fee", "tax", "amount", "fxRate", "subtype",
-    "accountId", "notes", "sourceRecordId",
+    "quoteMode", "accountId", "notes", "sourceRecordId",
 ]
 
 
@@ -502,13 +516,36 @@ def _emit_trade_row(
     buy_sell = row["Buy/Sell"]
     trade_id = row.get("TradeID") or ""
 
-    instrument_type = {"STK": "EQUITY", "OPT": "OPTION", "FUT": "FUTURES"}.get(ac, "")
+    instrument_type = {
+        "STK": "EQUITY",
+        "OPT": "OPTION",
+        "FUT": "FUTURES",
+        # FOP: emitted as FUTURES_OPTION (native type). Multiplier and
+        # underlying's contract month resolved by Wealthfolio at asset
+        # creation from the underlying's CONTRACT_SPECS entry.
+        "FOP": "FUTURES_OPTION",
+    }.get(ac, "")
     if not instrument_type:
         warnings.append(f"Skipped unknown AssetClass={ac} symbol={symbol}")
         return []
 
-    # Zero-price expiry / exercise / assignment on OPT → ADJUSTMENT(OPTION_EXPIRY)
-    if ac == "OPT" and is_zero_price_expiry(row):
+    # For FOP, compose an OCC-format symbol from the underlying's futures
+    # root (strip month/year suffix) + Expiry + P/C + Strike. The
+    # FuturesOption metadata (multiplier, tick, exchange) is derived server-
+    # side from the underlying root's CONTRACT_SPECS lookup.
+    if ac == "FOP":
+        underlying_root = futures_root_from_symbol(row.get("UnderlyingSymbol") or "")
+        put_call = row.get("Put/Call") or ""
+        strike = row.get("Strike") or ""
+        expiry = row.get("Expiry") or ""
+        if underlying_root and put_call and strike and expiry:
+            try:
+                symbol = compose_occ_symbol(underlying_root, expiry, put_call, strike)
+            except Exception:
+                pass  # keep IBKR's proprietary symbol as fallback
+
+    # Zero-price expiry / exercise / assignment on OPT/FOP → ADJUSTMENT(OPTION_EXPIRY)
+    if ac in ("OPT", "FOP") and is_zero_price_expiry(row):
         out = [wf_row(
             date=d.isoformat(),
             symbol=symbol,
@@ -561,6 +598,10 @@ def _emit_trade_row(
     except Exception:
         commission = Decimal(0)
 
+    # FOP: no market data provider covers futures options; mark MANUAL so
+    # Wealthfolio doesn't attempt quote sync (falls back to cost-basis MV).
+    quote_mode = "MANUAL" if ac == "FOP" else ""
+
     # Leave amount blank for BUY/SELL; Wealthfolio computes qty × price × multiplier.
     # IBKR NetCash on FUT rows is variation margin, not notional — using it would
     # mismatch WF's cost-basis semantics.
@@ -577,6 +618,7 @@ def _emit_trade_row(
         fee=fmt_amount(commission),
         tax="0",
         amount="",
+        quoteMode=quote_mode,
         accountId=wf_acct,
         notes=f"IBKR {row.get('Notes/Codes') or ''}".strip(),
         sourceRecordId=synth_id("ibkr_trade", trade_id),

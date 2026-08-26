@@ -171,12 +171,15 @@ Not blockers, but be aware:
    `ADJUSTMENT(OPTION_EXPIRY)` rows that reference positions Wealthfolio doesn't
    know about. Rust handler logs a warning and skips — no data corruption. Cash
    impact from paired stock assignment / cash settlement still books correctly.
-6. **Multi-day FOPs** — futures options (`FOP` asset class, IBKR symbols like
-   `E1DK6 C7355`) are only supported when they round-trip within a day (0DTE FOP
-   aggregation works). Multi-day FOP holds would emit an "Unknown AssetClass"
-   warning and skip. IBKR doesn't offer OCC symbols for FOPs and Wealthfolio has
-   no native FUTURES_OPTION type; proper support needs pseudo-asset design. Not
-   urgent if your FOP flow is 0DTE only.
+6. **Multi-day FOPs** (futures options, IBKR symbols like `E1DK6 C7355`) —
+   emitted as `instrumentType=FUTURES_OPTION` (native Wealthfolio type) with an
+   OCC-composed symbol built from the futures root + Expiry + Put/Call + Strike
+   (e.g. `ESH1` underlying → `ES    210104P03615000`). The asset's multiplier
+   (50 for ES, 5 for MES, etc.) is inherited from the futures `CONTRACT_SPECS`
+   lookup at asset creation, so cost basis and displayed unit price both match
+   IBKR's raw values. `quoteMode` is set to `MANUAL` since no market-data
+   provider covers FOPs — mid-hold MV falls back to cost basis. 0DTE FOPs
+   continue to aggregate via the `FOP` bucket.
 
 ## Recurring imports
 

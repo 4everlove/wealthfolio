@@ -21,6 +21,11 @@ const INSTRUMENT_TYPE_ALIASES: Record<string, string> = {
   FUTURES: "FUTURES",
   FUTURE: "FUTURES",
   FUT: "FUTURES",
+  FUTURES_OPTION: "FUTURES_OPTION",
+  FUTURESOPTION: "FUTURES_OPTION",
+  FUTURE_OPTION: "FUTURES_OPTION",
+  FUT_OPT: "FUTURES_OPTION",
+  FOP: "FUTURES_OPTION",
 };
 
 function normalizeToken(raw: string): string {

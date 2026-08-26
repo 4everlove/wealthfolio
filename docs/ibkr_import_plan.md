@@ -19,7 +19,8 @@ into Wealthfolio without drowning the app in per-trade contract clutter.
    `ibkr_flex_to_wf.py`
 3. **IBKR full-trades importer** — persistent positions get proper BUY/SELL with
    cost basis. ✓ shipped (same script)
-4. **FOP support** — separate design pass after futures Phase 1 lands.
+4. **FOP support** — native `InstrumentType::FuturesOption` with OCC-composed
+   symbols and CONTRACT_SPECS-derived multipliers. ✓ shipped
 5. **Automation via Flex Web Service** — recurring import triggered by a
    cron/loop. Deferred until manual workflow is stable across a few real monthly
    imports.
@@ -204,8 +205,11 @@ Test collapse observed: 12,541 raw Trades rows → 114 output rows (June 2026).
 - **Multi-day spread lifecycle**: opened Monday, closed Friday → each leg is
   full-import. How should Wealthfolio display grouped legs? For now, `OrderID`
   in notes; future enhancement could be a "strategy" pseudo-asset.
-- **FOP symbology**: not covered by futures Phase 1. Interim: MANUAL-priced
-  pseudo-asset. Design pass needed.
+- **FOP symbology**: RESOLVED — native `InstrumentType::FuturesOption` shipped.
+  OCC-composed symbols use the futures root as underlying
+  (`ES    210104P03615000`). Multiplier inherited from `CONTRACT_SPECS` lookup
+  at asset creation. `quote_mode=MANUAL` since no provider covers FOP quotes
+  yet.
 - **Flex Web Service secret storage**: token in
   `~/.wealthfolio/ibkr/credentials.toml` with 0600 perms. Or macOS Keychain
   integration.
@@ -233,7 +237,10 @@ Test collapse observed: 12,541 raw Trades rows → 114 output rows (June 2026).
       `46ccba6ee` (signed CREDIT support in core)
 - [x] Document import workflow — see `docs/ibkr_import_workflow.md`
 - [x] Add FOP (futures options) 0DTE aggregation support (see commit
-      `d45d9eb61`); multi-day FOPs still need pseudo-asset design
+      `d45d9eb61`)
+- [x] Native `InstrumentType::FuturesOption` — multi-day FOPs now supported with
+      correct per-asset multiplier inherited from underlying futures'
+      `CONTRACT_SPECS`; `quote_mode=MANUAL` since no provider covers FOP quotes
 - [x] OpenPositions-based seeding via `--seed-from` for correct cross-period
       position walks
 - [ ] Short-position support in seed (currently skipped with warning; manual

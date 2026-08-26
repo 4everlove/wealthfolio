@@ -85,6 +85,11 @@ export function mapQuoteTypeToInstrumentType(quoteType?: string): string | undef
     case "FUTURE":
     case "FUTURES":
       return "FUTURES";
+    case "FOP":
+    case "FUTURES_OPTION":
+    case "FUTURESOPTION":
+    case "FUTURE_OPTION":
+      return "FUTURES_OPTION";
     default:
       return undefined;
   }

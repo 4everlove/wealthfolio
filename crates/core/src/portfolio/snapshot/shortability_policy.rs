@@ -10,7 +10,10 @@ pub struct ShortabilityPolicy;
 
 impl ShortabilityPolicy {
     pub fn allows_negative_lots(asset: &Asset) -> bool {
-        asset.is_option() || asset.is_futures() || asset.is_equity_like()
+        asset.is_option()
+            || asset.is_futures_option()
+            || asset.is_futures()
+            || asset.is_equity_like()
     }
 
     pub fn requires_explicit_short_intent(asset: &Asset) -> bool {

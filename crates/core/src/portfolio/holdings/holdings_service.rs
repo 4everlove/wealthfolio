@@ -157,7 +157,7 @@ fn is_expired_option(
     }
 
     let expiration = metadata
-        .and_then(|m| m.get("option"))
+        .and_then(|m| m.get("option").or_else(|| m.get("futuresOption")))
         .and_then(|o| o.get("expiration"))
         .and_then(|v| v.as_str())
         .and_then(|s| NaiveDate::parse_from_str(s, "%Y-%m-%d").ok())
@@ -172,8 +172,12 @@ fn is_expired_option(
 }
 
 fn is_expired_option_asset(asset: &Asset, today: NaiveDate) -> bool {
+    let is_option_like = matches!(
+        asset.instrument_type.as_ref(),
+        Some(InstrumentType::Option) | Some(InstrumentType::FuturesOption)
+    );
     is_expired_option(
-        asset.instrument_type.as_ref() == Some(&InstrumentType::Option),
+        is_option_like,
         asset.metadata.as_ref(),
         &[
             asset.instrument_symbol.as_deref().unwrap_or_default(),

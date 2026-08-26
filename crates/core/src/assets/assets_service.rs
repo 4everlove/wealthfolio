@@ -46,9 +46,11 @@ fn is_expired_option_symbol(
     let Some(sym) = symbol else { return false };
     let today = chrono::Utc::now().date_naive();
     match instrument_type {
-        Some(&InstrumentType::Option) => crate::utils::occ_symbol::parse_occ_symbol(sym)
-            .ok()
-            .is_some_and(|parsed| parsed.expiration < today),
+        Some(&InstrumentType::Option) | Some(&InstrumentType::FuturesOption) => {
+            crate::utils::occ_symbol::parse_occ_symbol(sym)
+                .ok()
+                .is_some_and(|parsed| parsed.expiration < today)
+        }
         Some(&InstrumentType::Futures) => crate::utils::futures_symbol::parse_futures_symbol(sym)
             .ok()
             .is_some_and(|parsed| parsed.expiration < today),
@@ -68,6 +70,8 @@ fn parse_instrument_type_from_provider(asset_type: &str) -> Option<InstrumentTyp
         "CURRENCY" | "FOREX" | "FX" => Some(InstrumentType::Fx),
         "OPTION" => Some(InstrumentType::Option),
         "COMMODITY" => Some(InstrumentType::Metal),
+        "FUTURE" | "FUTURES" => Some(InstrumentType::Futures),
+        "FUTURES_OPTION" | "FUTURESOPTION" | "FOP" => Some(InstrumentType::FuturesOption),
         _ => None,
     }
 }
@@ -820,7 +824,12 @@ impl AssetService {
     ) -> Option<ProviderInstrument> {
         let symbol = Arc::from(provider_symbol);
         match instrument_type {
-            Some(InstrumentType::Equity | InstrumentType::Option | InstrumentType::Futures)
+            Some(
+                InstrumentType::Equity
+                | InstrumentType::Option
+                | InstrumentType::FuturesOption
+                | InstrumentType::Futures,
+            )
             | None => Some(ProviderInstrument::EquitySymbol { symbol }),
             Some(InstrumentType::Crypto) => Some(ProviderInstrument::CryptoSymbol { symbol }),
             Some(InstrumentType::Fx) => Some(ProviderInstrument::FxSymbol { symbol }),
@@ -863,6 +872,9 @@ impl AssetService {
             }),
             InstrumentType::Futures => Some(MarketInstrumentId::Futures {
                 ticker: Arc::from(symbol),
+            }),
+            InstrumentType::FuturesOption => Some(MarketInstrumentId::FuturesOption {
+                occ_symbol: Arc::from(symbol),
             }),
         }
     }

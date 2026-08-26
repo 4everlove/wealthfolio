@@ -46,13 +46,14 @@ pub enum AssetKind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum InstrumentType {
-    Equity,  // Stocks, ETFs, funds
-    Crypto,  // Cryptocurrencies
-    Fx,      // Currency exchange rates
-    Option,  // Options contracts
-    Metal,   // Precious metal spot prices (XAU, XAG)
-    Bond,    // Fixed-income instruments (bonds, T-bills, notes)
-    Futures, // Futures contracts (equity index, energy, metals, rates, FX, crypto)
+    Equity,        // Stocks, ETFs, funds
+    Crypto,        // Cryptocurrencies
+    Fx,            // Currency exchange rates
+    Option,        // Options contracts (on equities / indices)
+    Metal,         // Precious metal spot prices (XAU, XAG)
+    Bond,          // Fixed-income instruments (bonds, T-bills, notes)
+    Futures,       // Futures contracts (equity index, energy, metals, rates, FX, crypto)
+    FuturesOption, // Options on futures (FOP) — different multiplier convention from equity options
 }
 
 /// How the asset is priced/quoted
@@ -110,6 +111,7 @@ impl InstrumentType {
             InstrumentType::Metal => "METAL",
             InstrumentType::Bond => "BOND",
             InstrumentType::Futures => "FUTURES",
+            InstrumentType::FuturesOption => "FUTURES_OPTION",
         }
     }
 
@@ -123,6 +125,7 @@ impl InstrumentType {
             "METAL" => Some(InstrumentType::Metal),
             "BOND" => Some(InstrumentType::Bond),
             "FUTURES" => Some(InstrumentType::Futures),
+            "FUTURES_OPTION" => Some(InstrumentType::FuturesOption),
             _ => None,
         }
     }
@@ -140,6 +143,9 @@ impl InstrumentType {
                 Some(InstrumentType::Bond)
             }
             "FUTURE" | "FUTURES" | "FUT" => Some(InstrumentType::Futures),
+            "FUTURES_OPTION" | "FUTURESOPTION" | "FUT_OPT" | "FOP" | "FUTURE_OPTION" => {
+                Some(InstrumentType::FuturesOption)
+            }
             _ => None,
         }
     }
@@ -195,7 +201,40 @@ pub struct FuturesSpec {
     pub estimated_expiration: bool,
 }
 
-/// Builds structured asset metadata (OptionSpec, BondSpec) for the given instrument type.
+/// Futures-option contract specification stored in Asset.metadata["futuresOption"].
+///
+/// A futures option (FOP) is an option whose underlying is a futures contract,
+/// not a stock or index. The `multiplier` mirrors the underlying futures'
+/// $-per-point (50 for ES, 5 for MES) — distinct from the equity-option
+/// convention of 100. `underlying_root` is the CME futures root; the specific
+/// contract month is recorded separately because a single FOP series may
+/// deliver into different underlying contracts across expiry cycles.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FuturesOptionSpec {
+    /// CME-style futures root (e.g. "ES", "MES", "CL").
+    pub underlying_root: String,
+    /// Option expiration date.
+    pub expiration: chrono::NaiveDate,
+    /// CALL or PUT.
+    pub right: String,
+    /// Strike price in the underlying's quoted units.
+    pub strike: Decimal,
+    /// $-per-point (inherited from the underlying futures spec).
+    pub multiplier: Decimal,
+    /// Minimum price increment for the option premium.
+    pub tick_size: Decimal,
+    /// $ value per option tick (multiplier × tick_size for most contracts).
+    pub tick_value: Decimal,
+    /// Exchange MIC (XCME, XCEC, etc.) where the option trades.
+    pub exchange_mic: Option<String>,
+    /// OCC-composed symbol using the futures root as the 6-char root
+    /// (e.g. `ES    260507P03615000`).
+    pub occ_symbol: Option<String>,
+}
+
+/// Builds structured asset metadata (OptionSpec, BondSpec, FuturesSpec,
+/// FuturesOptionSpec) for the given instrument type.
 ///
 /// Returns `Some(Value)` when the instrument type is Option or Bond and metadata
 /// can be constructed from the symbol. Returns `None` for other types or unparseable symbols.
@@ -253,6 +292,39 @@ pub fn build_asset_metadata(
                 estimated_expiration: parsed.estimated_expiration,
             };
             Some(serde_json::json!({ "futures": spec }))
+        }
+        InstrumentType::FuturesOption => {
+            // FOP symbols are OCC-encoded with the futures ROOT as the underlying
+            // (e.g. `ES    260507P03615000`). Parse to extract strike/expiry/right,
+            // then look up the futures multiplier/tick spec from CONTRACT_SPECS.
+            let parsed = crate::utils::occ_symbol::parse_occ_symbol(symbol).ok()?;
+            let root = parsed.underlying.trim().to_uppercase();
+            let (multiplier, tick_size, tick_value, exchange_mic) =
+                match crate::utils::futures_symbol::lookup_spec(&root) {
+                    Some(spec) => (
+                        spec.multiplier,
+                        spec.tick_size,
+                        spec.tick_value,
+                        if spec.exchange_mic.is_empty() {
+                            None
+                        } else {
+                            Some(spec.exchange_mic.to_string())
+                        },
+                    ),
+                    None => (Decimal::from(100), Decimal::ZERO, Decimal::ZERO, None),
+                };
+            let spec = FuturesOptionSpec {
+                underlying_root: root,
+                expiration: parsed.expiration,
+                right: parsed.option_type.as_str().to_string(),
+                strike: parsed.strike_price,
+                multiplier,
+                tick_size,
+                tick_value,
+                exchange_mic,
+                occ_symbol: Some(parsed.to_occ_symbol()),
+            };
+            Some(serde_json::json!({ "futuresOption": spec }))
         }
         _ => None,
     }
@@ -461,13 +533,23 @@ impl Asset {
         self.instrument_type == Some(InstrumentType::Futures)
     }
 
+    /// Returns true if this asset is an option on a futures contract (FOP).
+    pub fn is_futures_option(&self) -> bool {
+        self.instrument_type == Some(InstrumentType::FuturesOption)
+    }
+
     /// Returns the contract multiplier for this asset.
     ///
     /// For options, this is the number of shares per contract (typically 100).
     /// For futures, this is the $-per-point value (50 for ES, 1000 for CL, etc.).
+    /// For futures options, this mirrors the underlying futures' multiplier
+    /// (50 for ES options, 5 for MES options, etc.) — distinct from the
+    /// equity-option default of 100.
     /// Other contract instruments can provide an explicit multiplier in asset metadata.
     pub fn contract_multiplier(&self) -> Decimal {
         if let Some(spec) = self.option_spec() {
+            spec.multiplier
+        } else if let Some(spec) = self.futures_option_spec() {
             spec.multiplier
         } else if let Some(spec) = self.futures_spec() {
             spec.multiplier
@@ -511,6 +593,17 @@ impl Asset {
         self.metadata
             .as_ref()
             .and_then(|m| m.get("futures"))
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+    }
+
+    /// Get futures-option metadata if this is an FOP (instrument_type = FUTURES_OPTION).
+    pub fn futures_option_spec(&self) -> Option<FuturesOptionSpec> {
+        if !self.is_futures_option() {
+            return None;
+        }
+        self.metadata
+            .as_ref()
+            .and_then(|m| m.get("futuresOption"))
             .and_then(|v| serde_json::from_value(v.clone()).ok())
     }
 
@@ -604,6 +697,12 @@ impl Asset {
                 let ticker = self.instrument_symbol.as_ref()?;
                 Some(InstrumentId::Futures {
                     ticker: Arc::from(ticker.as_str()),
+                })
+            }
+            InstrumentType::FuturesOption => {
+                let symbol = self.instrument_symbol.as_ref()?;
+                Some(InstrumentId::FuturesOption {
+                    occ_symbol: Arc::from(symbol.as_str()),
                 })
             }
         }
@@ -1114,6 +1213,7 @@ pub fn canonicalize_market_identity(
     match instrument_type {
         Some(InstrumentType::Equity)
         | Some(InstrumentType::Option)
+        | Some(InstrumentType::FuturesOption)
         | Some(InstrumentType::Metal) => {
             if let Some(raw) = instrument_symbol.as_deref() {
                 // The known venue decides whether a trailing `.X` is an exchange
@@ -1576,6 +1676,59 @@ mod tests {
         assert_eq!(spec.root, "XYZ");
         assert_eq!(spec.multiplier, Decimal::ONE);
         assert!(spec.estimated_expiration);
+    }
+
+    #[test]
+    fn test_build_asset_metadata_futures_option_es() {
+        // ES E-mini S&P option, put strike 3615, expiry 2021-01-04.
+        // OCC symbol uses the futures root "ES" padded to 6 chars.
+        let meta = build_asset_metadata(
+            Some(&InstrumentType::FuturesOption),
+            "ES    210104P03615000",
+        )
+        .expect("valid FOP OCC should parse");
+        let spec: FuturesOptionSpec =
+            serde_json::from_value(meta.get("futuresOption").cloned().unwrap()).unwrap();
+        assert_eq!(spec.underlying_root, "ES");
+        assert_eq!(spec.right, "PUT");
+        assert_eq!(spec.strike, dec!(3615));
+        // Multiplier inherited from ES futures CONTRACT_SPECS.
+        assert_eq!(spec.multiplier, dec!(50));
+        assert_eq!(spec.tick_size, dec!(0.25));
+        assert_eq!(spec.exchange_mic.as_deref(), Some("XCME"));
+        assert_eq!(spec.expiration, chrono::NaiveDate::from_ymd_opt(2021, 1, 4).unwrap());
+    }
+
+    #[test]
+    fn test_build_asset_metadata_futures_option_mes_uses_mini_multiplier() {
+        // MES micro should carry mult=5, not the ES 50 or the equity-option 100.
+        let meta = build_asset_metadata(
+            Some(&InstrumentType::FuturesOption),
+            "MES   210104C04000000",
+        )
+        .expect("valid FOP OCC should parse");
+        let spec: FuturesOptionSpec =
+            serde_json::from_value(meta.get("futuresOption").cloned().unwrap()).unwrap();
+        assert_eq!(spec.underlying_root, "MES");
+        assert_eq!(spec.multiplier, dec!(5));
+    }
+
+    #[test]
+    fn test_futures_option_contract_multiplier_via_asset_helper() {
+        let mut asset = Asset {
+            id: "fop-test".to_string(),
+            kind: AssetKind::Investment,
+            instrument_type: Some(InstrumentType::FuturesOption),
+            instrument_symbol: Some("ES    210104P03615000".to_string()),
+            quote_ccy: "USD".to_string(),
+            quote_mode: QuoteMode::Manual,
+            ..Default::default()
+        };
+        asset.metadata = build_asset_metadata(
+            asset.instrument_type.as_ref(),
+            asset.instrument_symbol.as_deref().unwrap(),
+        );
+        assert_eq!(asset.contract_multiplier(), dec!(50));
     }
 
     #[test]

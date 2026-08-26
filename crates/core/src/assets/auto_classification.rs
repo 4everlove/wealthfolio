@@ -272,6 +272,9 @@ fn map_instrument_type_to_taxonomy_category(
         InstrumentType::Fx => None,
         // Taxonomy migration 2026-01-01-000002 defines FUTURE under DERIVATIVE.
         InstrumentType::Futures => Some("FUTURE"),
+        // FOPs classified under OPTION for now until a dedicated
+        // FUTURES_OPTION taxonomy row is added.
+        InstrumentType::FuturesOption => Some("OPTION"),
     }
 }
 
@@ -288,6 +291,8 @@ fn map_instrument_type_to_asset_class(instrument_type: &InstrumentType) -> Optio
         // Most retail futures are equity-index (ES, NQ, RTY). Commodity/rate
         // reclassification can happen later via provider profile enrichment.
         InstrumentType::Futures => Some("EQUITY"),
+        // FOP typically on equity-index (ES, NQ) — same default as OPTION.
+        InstrumentType::FuturesOption => Some("EQUITY"),
     }
 }
 

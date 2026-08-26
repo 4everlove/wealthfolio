@@ -70,6 +70,10 @@ impl Coverage {
 
             // Futures: No geographic filtering yet (CME-family only for v1).
             InstrumentId::Futures { .. } => true,
+
+            // Futures options (FOP): typically MANUAL-quote; no provider claims
+            // coverage. Return false so the resolver defers to manual pricing.
+            InstrumentId::FuturesOption { .. } => false,
         }
     }
 

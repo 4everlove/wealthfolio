@@ -858,6 +858,7 @@ where
             Some(InstrumentType::Bond) => "BOND",
             Some(InstrumentType::Fx) => "FOREX",
             Some(InstrumentType::Futures) => "FUTURES",
+            Some(InstrumentType::FuturesOption) => "FUTURES_OPTION",
             None => "OTHER",
         };
 

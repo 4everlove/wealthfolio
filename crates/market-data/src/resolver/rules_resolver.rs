@@ -304,6 +304,7 @@ impl Resolver for RulesResolver {
                 InstrumentId::Bond { isin } => isin.clone(),
                 InstrumentId::Option { occ_symbol } => occ_symbol.clone(),
                 InstrumentId::Futures { ticker } => ticker.clone(),
+                InstrumentId::FuturesOption { occ_symbol } => occ_symbol.clone(),
             };
             return Some(Ok(ResolvedInstrument {
                 instrument: ProviderInstrument::EquitySymbol { symbol },
@@ -342,6 +343,10 @@ impl Resolver for RulesResolver {
                 self.resolve_futures(ticker, provider)?,
                 ResolutionSource::Rules,
             ),
+
+            // Futures options (FOP) have no public rules resolver yet — the
+            // asset is MANUAL-quoted. Return None so the chain stops here.
+            InstrumentId::FuturesOption { .. } => return None,
         };
 
         Some(Ok(ResolvedInstrument { instrument, source }))
