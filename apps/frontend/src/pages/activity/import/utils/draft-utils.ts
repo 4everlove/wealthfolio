@@ -712,6 +712,9 @@ export function createDraftActivities(
     const rawInstrumentType = ignoresAssetFields
       ? undefined
       : getColumnValue(row, ImportFormat.INSTRUMENT_TYPE);
+    const rawQuoteMode = ignoresAssetFields
+      ? undefined
+      : getColumnValue(row, ImportFormat.QUOTE_MODE);
 
     // Parse and normalize values
     const activityDate = parseDateValue(rawDate, dateFormat);
@@ -762,6 +765,10 @@ export function createDraftActivities(
     const normalizedCsvInstrumentType = normalizeInstrumentType(rawInstrumentType);
     const resolvedInstrumentType =
       normalizedCsvInstrumentType || prefixInstrumentType || mappedInstrumentType;
+    // Quote mode: explicit CSV column > symbol mapping meta. Uppercase to match
+    // Wealthfolio's enum (MARKET/MANUAL).
+    const normalizedCsvQuoteMode = rawQuoteMode?.trim().toUpperCase() || undefined;
+    const resolvedQuoteMode = normalizedCsvQuoteMode || mappedQuoteMode;
     const quantity = parseNumericValue(rawQuantity, decimalSeparator, thousandsSeparator);
     // unitPrice for CREDIT mirrors the signed amount (aggregate broker imports
     // emit unitPrice=amount for display). Preserve sign there; strip elsewhere
@@ -866,7 +873,7 @@ export function createDraftActivities(
       symbolName: mappedSymbolName,
       quoteCcy: mappedQuoteCcy,
       instrumentType: resolvedInstrumentType,
-      quoteMode: mappedQuoteMode,
+      quoteMode: resolvedQuoteMode,
       providerId: mappedProviderId,
       providerSymbol: mappedProviderSymbol,
       assetCandidateKey:
@@ -875,7 +882,7 @@ export function createDraftActivities(
               accountId,
               symbol,
               instrumentType: resolvedInstrumentType,
-              quoteMode: mappedQuoteMode,
+              quoteMode: resolvedQuoteMode,
               quoteCcy: mappedQuoteCcy || assetResolutionCurrency,
               exchangeMic: mappedExchangeMic,
               isin: rawIsin?.trim() || undefined,

@@ -233,29 +233,39 @@ positions at the validation checkpoint.
 
 ### Chain each period from the prior period's OpenPositions
 
-**Annual pattern** (backfills, or if you pull yearly):
+**Annual pattern** (backfills, or if you pull yearly). Note the
+`--seed-walk-only` flag on every year after the first: seed rows only need to be
+emitted once per DB (the first import establishes positions via `TRANSFER_IN`;
+subsequent imports would double-count if seed rows were re-emitted). Every
+import still benefits from `--seed-from` internally — it seeds the
+round-trip-detection walker so managed-position day-trades (e.g. sell 100 + buy
+100 on a persistent long) aren't misclassified as pure day-trades and aggregated
+in error.
 
 ```bash
-# Year 2020 (seed from end-of-2019 snapshot)
+# Year 2020 — FIRST import for this DB: emit seed TRANSFER_IN rows
 python3 scripts/import/ibkr_flex_to_wf.py \
   ~/Downloads/wealthfolio_2020.csv /tmp/wf_2020.csv \
   --seed-from ~/Downloads/wealthfolio_2019.csv \
   --source-tz America/New_York
 
-# Year 2021 (seed from end-of-2020 snapshot)
+# Year 2021 — DB already has 2020 state; walk-only mode
 python3 scripts/import/ibkr_flex_to_wf.py \
   ~/Downloads/wealthfolio_2021.csv /tmp/wf_2021.csv \
   --seed-from ~/Downloads/wealthfolio_2020.csv \
+  --seed-walk-only \
   --source-tz America/New_York
 ```
 
-**Monthly pattern** (ongoing / Flex Web Service):
+**Monthly pattern** (ongoing / Flex Web Service). After the first month has
+seeded the DB, every monthly re-run uses `--seed-walk-only`:
 
 ```bash
-# Feb 2026 (seed from end-of-Jan snapshot)
+# Feb 2026 (DB already contains Jan state from prior import)
 python3 scripts/import/ibkr_flex_to_wf.py \
   ~/.wealthfolio/ibkr/2026-02.csv /tmp/wf_2026-02.csv \
   --seed-from ~/.wealthfolio/ibkr/2026-01.csv \
+  --seed-walk-only \
   --source-tz America/New_York
 ```
 

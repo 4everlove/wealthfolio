@@ -342,14 +342,22 @@ def convert_trades(
     cash_settlements: dict[tuple[str, str, str, str, str, str, str], Decimal],
     account_map: dict[str, str],
     warnings: list[str],
+    initial_positions: dict[tuple[str, str], Decimal] | None = None,
 ) -> list[dict]:
     """Produce Wealthfolio rows from Trades + folded-in cash settlements.
 
     cash_settlements: keyed by (account, currency, underlying, expiry, put_call,
     strike_str, date) → Proceeds sum. Consumed as we emit per-trade rows or
     folded into daily aggregates for round-tripped assets.
+
+    initial_positions: seed for the per-asset position walk. Without a seed,
+    the walk starts at zero and can misclassify a "managed existing position"
+    day-trade (e.g. sell 100 + buy 100 same day, but the account had a
+    persistent +100 long all along) as a round-trip → aggregated in error.
+    Keyed by (account_id, IBKR symbol).
     """
     output: list[dict] = []
+    initial_positions = initial_positions or {}
 
     # Bucket trades by (account, symbol) so we can walk chronologically and
     # find round-trip days per asset.
@@ -373,7 +381,12 @@ def convert_trades(
 
     for (acct, symbol), rows in per_asset.items():
         rows.sort(key=lambda r: (execution_date(r), r.get("OrderTime", "")))
-        running_qty = Decimal(0)
+        # Seed the walk from OpenPositions so persistent-position round-trips
+        # aren't misclassified as day-trades. Note: IBKR's OpenPositions
+        # Symbol column uses the OCC-format for options (with padded root)
+        # but the Trades section uses IBKR's proprietary format for FOPs
+        # (e.g. `E1DK6 C7355`). Match on the Symbol as it appears in Trades.
+        running_qty = initial_positions.get((acct, symbol), Decimal(0))
         # Walk day by day, keyed on execution date (not IBKR's TradeDate
         # settlement convention), so overnight round-trips bucket correctly.
         by_day: dict[str, list[dict]] = defaultdict(list)
@@ -544,18 +557,23 @@ def _emit_trade_row(
             except Exception:
                 pass  # keep IBKR's proprietary symbol as fallback
 
-    # Zero-price expiry / exercise / assignment on OPT/FOP → ADJUSTMENT(OPTION_EXPIRY)
+    # Zero-price expiry / exercise / assignment on OPT/FOP → ADJUSTMENT(OPTION_EXPIRY).
+    # instrumentType must match the underlying asset type (OPTION vs
+    # FUTURES_OPTION); using a hardcoded OPTION for FOP would create a
+    # duplicate asset and leave the real position open forever.
     if ac in ("OPT", "FOP") and is_zero_price_expiry(row):
+        expiry_quote_mode = "MANUAL" if ac == "FOP" else ""
         out = [wf_row(
             date=d.isoformat(),
             symbol=symbol,
-            instrumentType="OPTION",
+            instrumentType=instrument_type,
             quantity=fmt_amount(qty),
             activityType="ADJUSTMENT",
             unitPrice="0",
             currency=currency,
             fee="0", tax="0", amount="0",
             subtype="OPTION_EXPIRY",
+            quoteMode=expiry_quote_mode,
             accountId=wf_acct,
             notes=f"IBKR {row.get('Notes/Codes') or ''} book close",
             sourceRecordId=synth_id("ibkr_trade", trade_id),
@@ -717,6 +735,51 @@ def convert_cash_txns(cash_rows: list[dict], account_map: dict[str, str]) -> lis
 
 
 # ---------- OpenPositions seeding ----------
+
+def build_initial_positions(
+    rows: list[dict],
+) -> dict[tuple[str, str], Decimal]:
+    """Compute signed starting quantity per (account, symbol) from OpenPositions.
+
+    Used to seed convert_trades' position walker so managed-position
+    round-trips (e.g. sell 100 + buy 100 same day on an existing +100 long)
+    don't get misclassified as day-trade round-trips.
+
+    Symbol matching intentionally uses the raw OpenPositions Symbol string so
+    it aligns with the Trades section's Symbol column verbatim (both OCC-
+    format for OPT, futures ticker for FUT, OCC-with-padded-root for FOP)."""
+    initial: dict[tuple[str, str], Decimal] = {}
+    for r in rows:
+        acct = r.get("ClientAccountID") or ""
+        symbol = r.get("Symbol") or ""
+        if not acct or not symbol:
+            continue
+        side = (r.get("Side") or "Long").upper()
+        try:
+            multiplier = Decimal(r.get("Multiplier") or "1")
+        except Exception:
+            multiplier = Decimal(1)
+        try:
+            cost_money = Decimal(r.get("CostBasisMoney") or "0")
+        except Exception:
+            cost_money = Decimal(0)
+        try:
+            cost_price = Decimal(r.get("CostBasisPrice") or "0")
+        except Exception:
+            cost_price = Decimal(0)
+        qty_raw = r.get("Quantity")
+        try:
+            qty = abs(Decimal(qty_raw)) if qty_raw else None
+        except Exception:
+            qty = None
+        if qty is None:
+            if cost_price == 0 or multiplier == 0:
+                continue
+            qty = abs(cost_money / (cost_price * multiplier))
+        signed = -qty if side == "SHORT" else qty
+        initial[(acct, symbol)] = initial.get((acct, symbol), Decimal(0)) + signed
+    return initial
+
 
 def convert_open_positions(
     rows: list[dict],
@@ -1077,6 +1140,16 @@ def main() -> None:
              "a partial window.",
     )
     ap.add_argument(
+        "--seed-walk-only",
+        action="store_true",
+        help="Use --seed-from's OpenPositions for internal walk classification "
+             "(so managed-position round-trips don't get misclassified as day "
+             "trades) but DO NOT emit TRANSFER_IN rows to the output CSV. "
+             "Use this flag on every import AFTER your first — the DB "
+             "already has the seed positions from a prior import's "
+             "activities, so emitting them again would double-count.",
+    )
+    ap.add_argument(
         "--show-positions",
         type=Path,
         default=None,
@@ -1123,10 +1196,9 @@ def main() -> None:
 
     warnings: list[str] = []
     cash_settlements = collect_cash_settlements(sections["option_eae"], warnings)
-    trade_rows = convert_trades(sections["trades"], cash_settlements, account_map, warnings)
-    cash_rows = convert_cash_txns(sections["cash_txn"], account_map)
     seed_sections_for_preflight: dict[str, list[dict]] | None = None
     seed_rows: list[dict] = []
+    initial_positions: dict[tuple[str, str], Decimal] = {}
     if args.seed_from:
         if not args.seed_from.exists():
             print(f"--seed-from file not found: {args.seed_from}", file=sys.stderr)
@@ -1138,8 +1210,21 @@ def main() -> None:
             f"Seed source: {args.seed_from} ({len(seed_positions)} OpenPositions rows)",
             file=sys.stderr,
         )
-        seed_rows = convert_open_positions(seed_positions, account_map, warnings)
-        print(f"Seeded {len(seed_rows)} positions", file=sys.stderr)
+        initial_positions = build_initial_positions(seed_positions)
+        if args.seed_walk_only:
+            print(
+                f"Seeded walk-only ({len(initial_positions)} position slots); "
+                "no TRANSFER_IN rows emitted.",
+                file=sys.stderr,
+            )
+        else:
+            seed_rows = convert_open_positions(seed_positions, account_map, warnings)
+            print(f"Seeded {len(seed_rows)} positions", file=sys.stderr)
+
+    trade_rows = convert_trades(
+        sections["trades"], cash_settlements, account_map, warnings, initial_positions
+    )
+    cash_rows = convert_cash_txns(sections["cash_txn"], account_map)
 
     if args.preflight_symbols:
         run_symbol_preflight(sections, seed_sections_for_preflight, warnings)
