@@ -6,6 +6,9 @@ Expected Flex sections in the CSV (in any order, each preceded by its header row
   2. OptionEAE        — Option Exercise/Assignment/Expiration + Cash Settlement rows
   3. MtM Prices       — daily marks (ignored)
   4. CashTransactions — dividends, interest, fees, deposits, withdrawals
+  5. Transfers        — ACATS/ATON in for cash and securities (optional but
+                        recommended; without it, ACATS-in cash must be posted
+                        manually to explain apparent negative cash balances)
 
 Behavior:
   - Round-trip predicate: for each (account, asset), if position was 0 at
@@ -127,6 +130,10 @@ SECTION_HEADERS = {
     # by signature (starts with ClientAccountID + AssetClass + Symbol +
     # UnderlyingSymbol) rather than exact-match tuple.
     "open_positions": None,
+    # Transfers: ACATS/ATON in/out for cash and securities. Detected by
+    # presence of TransferCompany + CashTransfer + TransactionID columns
+    # (the last two must be enabled in the Flex Query).
+    "transfers": None,
 }
 
 
@@ -138,6 +145,15 @@ def _is_open_positions_header(row: list[str]) -> bool:
         and row[2] == "Symbol"
         and row[3] == "UnderlyingSymbol"
         and "CostBasisMoney" in row
+    )
+
+
+def _is_transfers_header(row: list[str]) -> bool:
+    return (
+        row
+        and row[0] == "ClientAccountID"
+        and "TransferCompany" in row
+        and "CashTransfer" in row
     )
 
 INDEX_UNDERLYINGS = {"SPX", "SPXW", "XSP", "NDX", "RUT", "VIX", "RUTW", "NDXP"}
@@ -171,6 +187,11 @@ def parse_sections(csv_path: Path) -> dict[str, list[dict]]:
                 continue
             if matched is None and _is_open_positions_header(row):
                 matched = "open_positions"
+                current_section = matched
+                current_header = row_tuple  # capture the actual field set
+                continue
+            if matched is None and _is_transfers_header(row):
+                matched = "transfers"
                 current_section = matched
                 current_header = row_tuple  # capture the actual field set
                 continue
@@ -899,6 +920,139 @@ def convert_open_positions(
     return output
 
 
+# ---------- Transfers (ACATS) ----------
+
+def convert_transfers(
+    rows: list[dict],
+    account_map: dict[str, str],
+    warnings: list[str],
+) -> list[dict]:
+    """Emit DEPOSIT/TRANSFER_IN rows from the Transfers section (ACATS/ATON).
+
+    IBKR reports each position transfer as a *pair* of rows sharing
+    (ClientAccountID, Symbol, Date):
+      - a "summary" row with TransactionID + PositionAmount + CashTransfer
+      - one or more "lot" rows with TransferPrice + CostBasis + OpenDateTime
+    Cash transfers use AssetClass=CASH and are a single summary row.
+
+    Only inbound transfers are emitted (CashTransfer>0 for cash,
+    CostBasis>0 with TransferPrice>0 for securities). Outbound is
+    warned + skipped."""
+    output: list[dict] = []
+
+    # Group by (acct, symbol, date) so we can pair summary + lot rows.
+    grouped: dict[tuple[str, str, str], list[dict]] = defaultdict(list)
+    for r in rows:
+        acct = r.get("ClientAccountID") or ""
+        if not acct:
+            continue
+        key = (acct, r.get("Symbol") or "", r.get("Date") or "")
+        grouped[key].append(r)
+
+    for (acct, symbol, date_raw), group in grouped.items():
+        wf_acct = account_map.get(acct, acct)
+        try:
+            date_iso = datetime.strptime(date_raw, "%Y%m%d").date().isoformat()
+        except ValueError:
+            warnings.append(f"Transfers: bad Date '{date_raw}' for {acct}/{symbol}; skipped")
+            continue
+
+        # Cash: single row per event, AssetClass=CASH, Symbol='--'.
+        cash_rows = [r for r in group if (r.get("AssetClass") or "").upper() == "CASH"]
+        if cash_rows:
+            for r in cash_rows:
+                try:
+                    amount = Decimal(r.get("CashTransfer") or "0")
+                except Exception:
+                    amount = Decimal(0)
+                if amount == 0:
+                    continue
+                if amount < 0:
+                    warnings.append(
+                        f"Transfers: outbound cash ACATS on {date_iso} ({amount}) skipped "
+                        f"(TRANSFER_OUT not supported)"
+                    )
+                    continue
+                txn_id = (r.get("TransactionID") or "").strip()
+                currency = r.get("CurrencyPrimary") or "USD"
+                xfer_type = r.get("Type") or "ACATS"
+                output.append(wf_row(
+                    date=date_iso,
+                    symbol="",
+                    instrumentType="",
+                    quantity="1",
+                    activityType="DEPOSIT",
+                    unitPrice=fmt_amount(amount),
+                    currency=currency,
+                    fee="0",
+                    tax="0",
+                    amount=fmt_amount(amount),
+                    accountId=wf_acct,
+                    notes=f"IBKR {xfer_type} cash transfer",
+                    sourceRecordId=synth_id("ibkr_acats", acct, txn_id or f"cash:{date_iso}"),
+                ))
+            continue
+
+        # Positions: summary row has TransactionID; lot rows have TransferPrice+CostBasis.
+        summary = next(
+            (r for r in group if (r.get("TransactionID") or "").strip()),
+            None,
+        )
+        txn_id = (summary.get("TransactionID") if summary else "") or ""
+        currency = (summary.get("CurrencyPrimary") if summary else None) or "USD"
+        xfer_type = (summary.get("Type") if summary else None) or "ACATS"
+        asset_class = (
+            (summary.get("AssetClass") if summary else "")
+            or next((r.get("AssetClass") or "" for r in group if r.get("AssetClass")), "")
+        ).upper()
+
+        instrument_type = {
+            "STK": "EQUITY",
+            "OPT": "OPTION",
+            "FUT": "FUTURES",
+            "FOP": "FUTURES_OPTION",
+        }.get(asset_class)
+        if instrument_type is None:
+            warnings.append(
+                f"Transfers: unsupported AssetClass={asset_class} for {symbol} on {date_iso}; skipped"
+            )
+            continue
+
+        for r in group:
+            try:
+                price = Decimal(r.get("TransferPrice") or "0")
+                basis = Decimal(r.get("CostBasis") or "0")
+            except Exception:
+                continue
+            if price <= 0 or basis <= 0:
+                continue  # summary row or empty lot
+            qty = (basis / price).quantize(Decimal("0.000001"))
+            open_dt = (r.get("OpenDateTime") or "").strip()
+            note = f"IBKR {xfer_type} security transfer"
+            if open_dt:
+                try:
+                    open_iso = datetime.strptime(open_dt[:8], "%Y%m%d").date().isoformat()
+                    note += f", originally acquired {open_iso}"
+                except ValueError:
+                    pass
+            output.append(wf_row(
+                date=date_iso,
+                symbol=symbol,
+                instrumentType=instrument_type,
+                quantity=fmt_amount(qty),
+                activityType="TRANSFER_IN",
+                unitPrice=fmt_amount(price),
+                currency=currency,
+                fee="0",
+                tax="0",
+                amount=fmt_amount(basis),
+                accountId=wf_acct,
+                notes=note,
+                sourceRecordId=synth_id("ibkr_acats", acct, txn_id or symbol, open_dt, fmt_amount(basis)),
+            ))
+    return output
+
+
 # ---------- Symbol preflight ----------
 
 _YAHOO_CHART = "https://query1.finance.yahoo.com/v8/finance/chart/"
@@ -1225,11 +1379,14 @@ def main() -> None:
         sections["trades"], cash_settlements, account_map, warnings, initial_positions
     )
     cash_rows = convert_cash_txns(sections["cash_txn"], account_map)
+    transfer_rows = convert_transfers(sections["transfers"], account_map, warnings)
+    if transfer_rows:
+        print(f"Transfers: {len(transfer_rows)} ACATS row(s)", file=sys.stderr)
 
     if args.preflight_symbols:
         run_symbol_preflight(sections, seed_sections_for_preflight, warnings)
 
-    all_rows = seed_rows + trade_rows + cash_rows
+    all_rows = seed_rows + trade_rows + cash_rows + transfer_rows
     all_rows.sort(key=lambda r: (r["date"], r["accountId"], r["symbol"]))
 
     with args.output_csv.open("w", newline="") as f:
