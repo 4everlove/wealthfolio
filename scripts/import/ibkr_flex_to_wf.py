@@ -9,6 +9,9 @@ Expected Flex sections in the CSV (in any order, each preceded by its header row
   5. Transfers        — ACATS/ATON in for cash and securities (optional but
                         recommended; without it, ACATS-in cash must be posted
                         manually to explain apparent negative cash balances)
+  6. CorporateActions — equity forward/reverse splits emitted as SPLIT rows.
+                        Options splits, spinoffs, mergers, ticker changes are
+                        warned + skipped (they need manual close/open pairs).
 
 Behavior:
   - Round-trip predicate: for each (account, asset), if position was 0 at
@@ -39,6 +42,7 @@ import argparse
 import csv
 import hashlib
 import json
+import re
 import sys
 import time
 import urllib.error
@@ -134,6 +138,10 @@ SECTION_HEADERS = {
     # presence of TransferCompany + CashTransfer + TransactionID columns
     # (the last two must be enabled in the Flex Query).
     "transfers": None,
+    # CorporateActions: splits, spinoffs, mergers, ticker changes. Detected
+    # by presence of ActionID + Type + Value (distinct from Trades'
+    # TransactionType/TradeID and Transfers' TransferCompany).
+    "corporate_actions": None,
 }
 
 
@@ -154,6 +162,16 @@ def _is_transfers_header(row: list[str]) -> bool:
         and row[0] == "ClientAccountID"
         and "TransferCompany" in row
         and "CashTransfer" in row
+    )
+
+
+def _is_corporate_actions_header(row: list[str]) -> bool:
+    return (
+        row
+        and row[0] == "ClientAccountID"
+        and "ActionID" in row
+        and "Value" in row
+        and "Report Date" in row
     )
 
 INDEX_UNDERLYINGS = {"SPX", "SPXW", "XSP", "NDX", "RUT", "VIX", "RUTW", "NDXP"}
@@ -192,6 +210,11 @@ def parse_sections(csv_path: Path) -> dict[str, list[dict]]:
                 continue
             if matched is None and _is_transfers_header(row):
                 matched = "transfers"
+                current_section = matched
+                current_header = row_tuple  # capture the actual field set
+                continue
+            if matched is None and _is_corporate_actions_header(row):
+                matched = "corporate_actions"
                 current_section = matched
                 current_header = row_tuple  # capture the actual field set
                 continue
@@ -1053,6 +1076,107 @@ def convert_transfers(
     return output
 
 
+# ---------- Corporate actions ----------
+
+_SPLIT_DESC_RE = re.compile(r"SPLIT\s+([\d.]+)\s+FOR\s+([\d.]+)", re.IGNORECASE)
+
+
+def _parse_split_ratio(description: str) -> Decimal | None:
+    """Extract split ratio from IBKR description like 'SPLIT 4 FOR 1'.
+
+    Returns Decimal(new_count / old_count). 4-for-1 forward → 4. 1-for-4
+    reverse → 0.25."""
+    m = _SPLIT_DESC_RE.search(description or "")
+    if not m:
+        return None
+    try:
+        new_n = Decimal(m.group(1))
+        old_n = Decimal(m.group(2))
+        if old_n == 0:
+            return None
+        return new_n / old_n
+    except Exception:
+        return None
+
+
+def convert_corporate_actions(
+    rows: list[dict],
+    account_map: dict[str, str],
+    warnings: list[str],
+) -> list[dict]:
+    """Emit SPLIT rows for equity forward/reverse splits.
+
+    Options splits (symbol + strike adjust), spinoffs, mergers, and ticker
+    changes are warned and skipped — those need manual close-old/open-new
+    entries because they change the underlying asset identity or create
+    new positions with allocated basis."""
+    output: list[dict] = []
+    for r in rows:
+        acct = r.get("ClientAccountID") or ""
+        # IBKR emits a summary row per action with ClientAccountID='-'; skip it.
+        if not acct or acct == "-":
+            continue
+        wf_acct = account_map.get(acct, acct)
+        typ = (r.get("Type") or "").upper()
+        asset_class = (r.get("AssetClass") or "").upper()
+        symbol = r.get("Symbol") or ""
+        currency = r.get("CurrencyPrimary") or "USD"
+        action_id = (r.get("ActionID") or "").strip()
+        txn_id = (r.get("TransactionID") or "").strip()
+        description = r.get("Description") or ""
+        date_raw = (r.get("Date/Time") or r.get("Report Date") or "").strip()
+        # IBKR Date/Time can be YYYYMMDD or YYYYMMDD;HHMMSS
+        date_iso = ""
+        for fmt in ("%Y%m%d;%H%M%S", "%Y%m%d"):
+            try:
+                date_iso = datetime.strptime(date_raw[:15] if ";" in date_raw else date_raw[:8], fmt).date().isoformat()
+                break
+            except ValueError:
+                continue
+        if not date_iso:
+            warnings.append(f"CorporateAction: unparseable Date/Time '{date_raw}' for {symbol}; skipped")
+            continue
+
+        if typ in ("FS", "RS"):
+            if asset_class != "STK":
+                warnings.append(
+                    f"CorporateAction split on {asset_class} {symbol} ({description}) "
+                    "skipped — options/futures splits change contract identity, add manual CSV"
+                )
+                continue
+            ratio = _parse_split_ratio(description)
+            if ratio is None or ratio <= 0:
+                warnings.append(
+                    f"CorporateAction: cannot parse split ratio from '{description}' for {symbol}; skipped"
+                )
+                continue
+            # WF SPLIT convention: amount field stores the ratio (matches existing
+            # AAPL 2020-08-31 row which stores amount=4 for a 4-for-1 forward).
+            output.append(wf_row(
+                date=date_iso,
+                symbol=symbol,
+                instrumentType="EQUITY",
+                quantity="",
+                activityType="SPLIT",
+                unitPrice="",
+                currency=currency,
+                fee="0",
+                tax="0",
+                amount=fmt_amount(ratio),
+                accountId=wf_acct,
+                notes=f"IBKR {typ} {description[:80]}",
+                sourceRecordId=synth_id("ibkr_ca", acct, action_id or txn_id or symbol, date_iso),
+            ))
+            continue
+
+        # Spinoffs, mergers, ticker changes, stock dividends: warn only.
+        warnings.append(
+            f"CorporateAction {typ} on {symbol} ({description[:80]}) skipped — "
+            "unsupported action type; handle with manual CSV entries"
+        )
+    return output
+
+
 # ---------- Symbol preflight ----------
 
 _YAHOO_CHART = "https://query1.finance.yahoo.com/v8/finance/chart/"
@@ -1382,11 +1506,14 @@ def main() -> None:
     transfer_rows = convert_transfers(sections["transfers"], account_map, warnings)
     if transfer_rows:
         print(f"Transfers: {len(transfer_rows)} ACATS row(s)", file=sys.stderr)
+    ca_rows = convert_corporate_actions(sections["corporate_actions"], account_map, warnings)
+    if ca_rows:
+        print(f"CorporateActions: {len(ca_rows)} split row(s)", file=sys.stderr)
 
     if args.preflight_symbols:
         run_symbol_preflight(sections, seed_sections_for_preflight, warnings)
 
-    all_rows = seed_rows + trade_rows + cash_rows + transfer_rows
+    all_rows = seed_rows + trade_rows + cash_rows + transfer_rows + ca_rows
     all_rows.sort(key=lambda r: (r["date"], r["accountId"], r["symbol"]))
 
     with args.output_csv.open("w", newline="") as f:
