@@ -962,9 +962,10 @@ def convert_transfers(
       - one or more "lot" rows with TransferPrice + CostBasis + OpenDateTime
     Cash transfers use AssetClass=CASH and are a single summary row.
 
-    Only inbound transfers are emitted (CashTransfer>0 for cash,
-    CostBasis>0 with TransferPrice>0 for securities). Outbound is
-    warned + skipped."""
+    Cash: DEPOSIT for positive CashTransfer, WITHDRAWAL for negative.
+    Securities: only inbound (CostBasis>0 with TransferPrice>0). Outbound
+    security transfers are warned + skipped (WF TRANSFER_OUT semantics
+    aren't validated for options/short positions yet)."""
     output: list[dict] = []
 
     # Group by (acct, symbol, date) so we can pair summary + lot rows.
@@ -985,6 +986,8 @@ def convert_transfers(
             continue
 
         # Cash: single row per event, AssetClass=CASH, Symbol='--'.
+        # Positive CashTransfer → DEPOSIT (ACATS in). Negative → WITHDRAWAL
+        # (ACATS out); WF WITHDRAWAL uses a positive amount.
         cash_rows = [r for r in group if (r.get("AssetClass") or "").upper() == "CASH"]
         if cash_rows:
             for r in cash_rows:
@@ -994,28 +997,24 @@ def convert_transfers(
                     amount = Decimal(0)
                 if amount == 0:
                     continue
-                if amount < 0:
-                    warnings.append(
-                        f"Transfers: outbound cash ACATS on {date_iso} ({amount}) skipped "
-                        f"(TRANSFER_OUT not supported)"
-                    )
-                    continue
                 txn_id = (r.get("TransactionID") or "").strip()
                 currency = r.get("CurrencyPrimary") or "USD"
                 xfer_type = r.get("Type") or "ACATS"
+                is_in = amount > 0
+                magnitude = amount if is_in else -amount
                 output.append(wf_row(
                     date=date_iso,
                     symbol="",
                     instrumentType="",
                     quantity="1",
-                    activityType="DEPOSIT",
-                    unitPrice=fmt_amount(amount),
+                    activityType="DEPOSIT" if is_in else "WITHDRAWAL",
+                    unitPrice=fmt_amount(magnitude),
                     currency=currency,
                     fee="0",
                     tax="0",
-                    amount=fmt_amount(amount),
+                    amount=fmt_amount(magnitude),
                     accountId=wf_acct,
-                    notes=f"IBKR {xfer_type} cash transfer",
+                    notes=f"IBKR {xfer_type} cash {'transfer' if is_in else 'withdrawal'}",
                     sourceRecordId=synth_id("ibkr_acats", acct, txn_id or f"cash:{date_iso}"),
                 ))
             continue
