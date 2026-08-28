@@ -901,6 +901,15 @@ impl SnapshotRepository {
 
         let mut records: Vec<NewSnapshotPositionRecord> = Vec::with_capacity(positions.len());
         for pos in positions.values() {
+            // Skip closed positions. The holdings calculator carries qty=0
+            // entries forward in its HashMap forever; persisting them bloats
+            // snapshot_positions with millions of dead rows (97%+ of the
+            // table in long-lived accounts). Every read path already filters
+            // by quantity != 0 (holdings_service::list_holdings,
+            // current_account_valuation, etc.).
+            if pos.quantity.is_zero() {
+                continue;
+            }
             if !existing_asset_ids.contains(pos.asset_id.as_str()) {
                 warn!(
                     "Dropping snapshot position for missing asset {} (snapshot {})",

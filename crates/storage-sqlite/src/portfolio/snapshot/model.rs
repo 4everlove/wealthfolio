@@ -5,7 +5,7 @@ use diesel::prelude::*;
 use diesel::sql_types::{Integer, Nullable, Text};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::str::FromStr;
 
 use wealthfolio_core::constants::DECIMAL_PRECISION;
@@ -116,12 +116,23 @@ impl TryFrom<AccountStateSnapshotDB> for AccountStateSnapshot {
 // Conversion from Domain model to DB model
 impl From<AccountStateSnapshot> for AccountStateSnapshotDB {
     fn from(domain: AccountStateSnapshot) -> Self {
+        // Drop zero-quantity positions before serialization. The holdings
+        // calculator carries closed positions forward as qty=0 entries in its
+        // HashMap and every read path already filters them; preserving them
+        // in the JSON blob bloats holdings_snapshots unbounded (~1 GB in
+        // long-lived accounts). See also write_snapshot_positions() which
+        // applies the same filter to the normalized snapshot_positions table.
+        let live_positions: HashMap<String, Position> = domain
+            .positions
+            .into_iter()
+            .filter(|(_, p)| !p.quantity.is_zero())
+            .collect();
         Self {
             id: domain.id.clone(),
             account_id: domain.account_id,
             snapshot_date: domain.snapshot_date.format("%Y-%m-%d").to_string(),
             currency: domain.currency,
-            positions: serde_json::to_string(&domain.positions)
+            positions: serde_json::to_string(&live_positions)
                 .unwrap_or_else(|_| "{}".to_string()),
             cash_balances: serde_json::to_string(&domain.cash_balances)
                 .unwrap_or_else(|_| "{}".to_string()),
