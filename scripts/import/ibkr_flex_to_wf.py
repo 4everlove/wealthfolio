@@ -607,8 +607,12 @@ def _emit_trade_row(
     # duplicate asset and leave the real position open forever.
     if ac in ("OPT", "FOP") and is_zero_price_expiry(row):
         expiry_quote_mode = "MANUAL" if ac == "FOP" else ""
+        # Use BookTrade DateTime (16:20 ET for SPXW; expiry-day close for others)
+        # so the ADJUSTMENT lands AFTER intraday fills on the same day. Emitting
+        # at midnight (d.isoformat()) fired before intraday buys and left ghost
+        # positions on days that had both an expiry and other same-day trades.
         out = [wf_row(
-            date=d.isoformat(),
+            date=d_iso,
             symbol=symbol,
             instrumentType=instrument_type,
             quantity=fmt_amount(qty),
@@ -630,7 +634,7 @@ def _emit_trade_row(
         if proceeds is not None and proceeds != 0:
             agg_settle_keys.add(settle_key)
             out.append(wf_row(
-                date=d.isoformat(),
+                date=d_iso,
                 symbol="",
                 instrumentType="",
                 quantity="1",
