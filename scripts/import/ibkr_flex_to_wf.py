@@ -518,7 +518,12 @@ def convert_trades(
             # carryover cost basis is released by the ADJUSTMENT and the
             # intraday-opened lots' cost basis is folded into the CREDIT
             # amount. Total P&L matches IBKR.
-            if end_qty == 0 and day_rows:
+            # Only aggregate day-flat rounds for OPT/FOP. Stocks and
+            # outright futures should always emit per-trade so WF gets
+            # real prices (validation rejects SELL/BUY at unit_price=0).
+            first_ac = day_rows[0]["AssetClass"] if day_rows else ""
+            can_aggregate = first_ac in ("OPT", "FOP")
+            if end_qty == 0 and day_rows and can_aggregate:
                 first = day_rows[0]
                 ac = first["AssetClass"]
                 und = first["UnderlyingSymbol"]
