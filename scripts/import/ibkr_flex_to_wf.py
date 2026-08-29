@@ -865,8 +865,11 @@ def convert_cash_txns(cash_rows: list[dict], account_map: dict[str, str]) -> lis
             activity_type = "FEE"
             amount = abs(amount)
         elif typ == "Other Fees":
-            # Sum into daily aggregate; emitted after the loop.
-            fee_agg[(acct, d, currency)] += abs(amount)
+            # Sum SIGNED into daily aggregate; emitted after the loop as
+            # FEE (net outflow) or CREDIT (net refund). Using abs() would
+            # treat refunds of prior-month fees as new fees and double-
+            # count them.
+            fee_agg[(acct, d, currency)] += amount
             fee_agg_count[(acct, d, currency)] += 1
             continue
         elif typ in ("Deposits & Withdrawals", "Deposits/Withdrawals", "Deposits", "Withdrawals"):
@@ -893,20 +896,33 @@ def convert_cash_txns(cash_rows: list[dict], account_map: dict[str, str]) -> lis
         ))
 
     for (acct, d, currency), total in fee_agg.items():
+        if total == 0:
+            continue
         wf_acct = account_map.get(acct, acct)
         count = fee_agg_count[(acct, d, currency)]
+        # Positive net total is a net refund of prior-month fees; emit as
+        # CREDIT (cash in). Negative net total is a net fee; emit as FEE
+        # with a positive magnitude.
+        if total < 0:
+            activity_type = "FEE"
+            magnitude = -total
+            note = f"IBKR daily fees ({count} items)"
+        else:
+            activity_type = "CREDIT"
+            magnitude = total
+            note = f"IBKR daily fee refund ({count} items)"
         output.append(wf_row(
             date=d.isoformat(),
             symbol="",
             instrumentType="",
             quantity="1",
-            activityType="FEE",
-            unitPrice=fmt_amount(total),
+            activityType=activity_type,
+            unitPrice=fmt_amount(magnitude),
             currency=currency,
             fee="0", tax="0",
-            amount=fmt_amount(total),
+            amount=fmt_amount(magnitude),
             accountId=wf_acct,
-            notes=f"IBKR daily fees ({count} items)",
+            notes=note,
             sourceRecordId=synth_id("ibkr_fee_agg", acct, d, currency),
         ))
     return output
