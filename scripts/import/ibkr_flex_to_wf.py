@@ -442,17 +442,41 @@ def convert_trades(
             start_qty = running_qty
             day_rows = by_day[d]
             end_qty = start_qty + sum(signed_qty(r) for r in day_rows)
-            round_tripped = start_qty == 0 and end_qty == 0
-            if round_tripped:
-                # Aggregate into daily bucket.
-                first = day_rows[0]
+
+            # Split intraday trades from BookTrade Ep (expiry/assignment) rows.
+            # The Ep row is always separate because it represents a real close
+            # against a carryover; we never want to hide it inside a CREDIT.
+            non_ep_rows = [r for r in day_rows if not is_zero_price_expiry(r)]
+            ep_rows = [r for r in day_rows if is_zero_price_expiry(r)]
+            non_ep_qty_sum = sum(signed_qty(r) for r in non_ep_rows)
+
+            # New: intraday scalping on top of a carryover collapses when the
+            # non-Ep trades net to zero. Keeps overnight-open, Ep, and any
+            # carryover-management activity as individual rows (via the Ep
+            # emit path), while dozens of intraday BUY/SELL pairs collapse
+            # into one CREDIT. Per-lot realized P&L is approximated (Ep
+            # attributes cost basis to the carryover), but total cash and
+            # position walks are exact.
+            split_aggregate = bool(non_ep_rows) and non_ep_qty_sum == 0
+            # Legacy: full-day round-trip starting from flat. Kept for the
+            # 0DTE-opened-and-expired-worthless case where non-Ep sums to the
+            # position that Ep then closes.
+            full_round_trip = (
+                not split_aggregate
+                and start_qty == 0
+                and end_qty == 0
+            )
+
+            if split_aggregate or full_round_trip:
+                rows_to_aggregate = non_ep_rows if split_aggregate else day_rows
+                first = rows_to_aggregate[0]
                 ac = first["AssetClass"]
                 und = first["UnderlyingSymbol"]
                 bucket = bucket_for(ac, und)
                 currency = first["CurrencyPrimary"]
                 trade_date = datetime.strptime(d, "%Y%m%d").date()
                 key = (acct, trade_date, currency, bucket)
-                for r in day_rows:
+                for r in rows_to_aggregate:
                     try:
                         agg_cash[key] += Decimal(r["NetCash"] or "0")
                     except Exception:
@@ -461,12 +485,13 @@ def convert_trades(
                         agg_commission_ref[key] += abs(Decimal(r["IBCommission"] or "0"))
                     except Exception:
                         pass
-                # Fold matching OptionEAE Cash Settlement into the bucket ONCE
-                # per unique settle key (a single 0DTE typically has many opening
-                # rows that all map to the same settlement).
-                if ac == "OPT":
+                # Cash Settlement handling. Full-round-trip aggregates
+                # everything including the Ep so the CashSettlement lands
+                # here; split-aggregate lets each Ep pair its own settlement
+                # via _emit_trade_row below.
+                if full_round_trip and ac == "OPT":
                     seen_in_day: set = set()
-                    for r in day_rows:
+                    for r in rows_to_aggregate:
                         settle_key = _settle_key_from_trade(r)
                         if settle_key in seen_in_day:
                             continue
@@ -474,6 +499,13 @@ def convert_trades(
                         if settle_key in cash_settlements and settle_key not in agg_settle_keys:
                             agg_cash[key] += cash_settlements[settle_key]
                             agg_settle_keys.add(settle_key)
+                # In split-aggregate mode, emit the Ep rows individually
+                # (they carry the position-close and any paired ITM cash
+                # settlement via _emit_trade_row).
+                if split_aggregate:
+                    for r in ep_rows:
+                        for row_out in _emit_trade_row(r, acct, account_map, cash_settlements, agg_settle_keys, warnings):
+                            per_trade_rows.append(row_out)
             else:
                 # Emit per-trade rows.
                 for r in day_rows:
