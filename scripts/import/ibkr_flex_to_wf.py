@@ -355,6 +355,63 @@ def is_zero_price_expiry(row: dict) -> bool:
     return (row.get("Notes/Codes") or "").upper() in {"A", "EP", "EX"}
 
 
+def consolidate_fills(rows: list[dict]) -> list[dict]:
+    """Merge child fills of the same parent order into a single row.
+
+    IBKR reports every partial fill of an order as a separate Trades row
+    (same DateTime, same TradePrice, same account+symbol+side). This
+    inflates row counts on days that would otherwise emit per-trade.
+    Merge them: sum Quantity, IBCommission, and NetCash. Keep the first
+    row's identity fields (TradeID, OrderTime, Notes/Codes).
+
+    Only merges rows that share ALL of (account, symbol, TransactionType,
+    Buy/Sell, DateTime, TradePrice). BookTrade Ep rows (price=0) never
+    merge with regular fills because TradePrice differs."""
+    from collections import defaultdict
+    groups: dict[tuple, list[dict]] = defaultdict(list)
+    for r in rows:
+        key = (
+            r.get("ClientAccountID") or "",
+            r.get("Symbol") or "",
+            r.get("TransactionType") or "",
+            r.get("Buy/Sell") or "",
+            r.get("DateTime") or r.get("TradeDate") or "",
+            r.get("TradePrice") or "",
+        )
+        groups[key].append(r)
+
+    out: list[dict] = []
+    for key, fills in groups.items():
+        if len(fills) == 1:
+            out.append(fills[0])
+            continue
+        # Merge — pick first row as template (keeps TradeID, OrderTime, etc.)
+        merged = dict(fills[0])
+        qty_sum = Decimal(0)
+        comm_sum = Decimal(0)
+        cash_sum = Decimal(0)
+        for f in fills:
+            try:
+                qty_sum += Decimal(f.get("Quantity") or "0")
+            except Exception:
+                pass
+            try:
+                comm_sum += Decimal(f.get("IBCommission") or "0")
+            except Exception:
+                pass
+            try:
+                cash_sum += Decimal(f.get("NetCash") or "0")
+            except Exception:
+                pass
+        merged["Quantity"] = str(qty_sum)
+        merged["IBCommission"] = str(comm_sum)
+        merged["NetCash"] = str(cash_sum)
+        out.append(merged)
+    # Preserve original ordering by earliest TradeID within groups
+    out.sort(key=lambda r: (r.get("DateTime") or r.get("TradeDate") or "", r.get("TradeID") or ""))
+    return out
+
+
 # ---------- Wealthfolio row emitter ----------
 
 WF_HEADER = [
@@ -402,6 +459,12 @@ def convert_trades(
     """
     output: list[dict] = []
     initial_positions = initial_positions or {}
+
+    # Consolidate multi-fill child orders before bucketing. IBKR reports
+    # every partial fill separately even though they share DateTime, price,
+    # account, symbol, and side — which inflates per-trade emit output on
+    # non-aggregating days.
+    trades = consolidate_fills(trades)
 
     # Bucket trades by (account, symbol) so we can walk chronologically and
     # find round-trip days per asset.
