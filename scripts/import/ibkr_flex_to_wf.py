@@ -816,7 +816,11 @@ def _emit_trade_row(
         amount="",
         quoteMode=quote_mode,
         accountId=wf_acct,
-        notes=f"IBKR {row.get('Notes/Codes') or ''}".strip(),
+        # Include TradeID in notes so WF's idempotency key (which uses only
+        # date+notes, not full timestamp or sourceRecordId) differs between
+        # multi-fill orders on the same day at the same price. Without this,
+        # WF silently drops all but one fill.
+        notes=f"IBKR {row.get('Notes/Codes') or ''} #{trade_id}".strip(),
         sourceRecordId=synth_id("ibkr_trade", trade_id),
     )]
 
