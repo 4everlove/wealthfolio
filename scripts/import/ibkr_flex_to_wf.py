@@ -450,25 +450,38 @@ def convert_trades(
             ep_rows = [r for r in day_rows if is_zero_price_expiry(r)]
             non_ep_qty_sum = sum(signed_qty(r) for r in non_ep_rows)
 
-            # New: intraday scalping on top of a carryover collapses when the
-            # non-Ep trades net to zero. Keeps overnight-open, Ep, and any
-            # carryover-management activity as individual rows (via the Ep
-            # emit path), while dozens of intraday BUY/SELL pairs collapse
-            # into one CREDIT. Per-lot realized P&L is approximated (Ep
-            # attributes cost basis to the carryover), but total cash and
-            # position walks are exact.
+            # Aggregation rules (first match wins):
+            #   1. split_aggregate: intraday trades net to zero, so the
+            #      carryover survives to the Ep row for close. Aggregates
+            #      intraday into a CREDIT, emits Ep individually.
+            #   2. synth_close: day ends flat via intraday trades, no Ep
+            #      because the position was manually closed before expiry.
+            #      Aggregates intraday into a CREDIT plus a synthetic
+            #      ADJUSTMENT(OPTION_EXPIRY) that closes the carryover at $0.
+            #   3. full_round_trip: legacy path, start=0 and end=0 including
+            #      Ep — 0DTE opened and expired worthless.
+            # Position walks are exact in all three; per-lot realized P&L is
+            # approximated (the release attributes to the carryover cost
+            # basis, not FIFO), but total cash and total P&L match IBKR.
             split_aggregate = bool(non_ep_rows) and non_ep_qty_sum == 0
-            # Legacy: full-day round-trip starting from flat. Kept for the
-            # 0DTE-opened-and-expired-worthless case where non-Ep sums to the
-            # position that Ep then closes.
+            synth_close = (
+                not split_aggregate
+                and not ep_rows
+                and bool(non_ep_rows)
+                and start_qty != 0
+                and end_qty == 0
+            )
             full_round_trip = (
                 not split_aggregate
+                and not synth_close
                 and start_qty == 0
                 and end_qty == 0
             )
 
-            if split_aggregate or full_round_trip:
-                rows_to_aggregate = non_ep_rows if split_aggregate else day_rows
+            if split_aggregate or synth_close or full_round_trip:
+                rows_to_aggregate = (
+                    day_rows if full_round_trip else non_ep_rows
+                )
                 first = rows_to_aggregate[0]
                 ac = first["AssetClass"]
                 und = first["UnderlyingSymbol"]
@@ -488,7 +501,8 @@ def convert_trades(
                 # Cash Settlement handling. Full-round-trip aggregates
                 # everything including the Ep so the CashSettlement lands
                 # here; split-aggregate lets each Ep pair its own settlement
-                # via _emit_trade_row below.
+                # via _emit_trade_row below. synth_close has no Ep and no
+                # cash settlement (position was closed before expiry).
                 if full_round_trip and ac == "OPT":
                     seen_in_day: set = set()
                     for r in rows_to_aggregate:
@@ -499,13 +513,52 @@ def convert_trades(
                         if settle_key in cash_settlements and settle_key not in agg_settle_keys:
                             agg_cash[key] += cash_settlements[settle_key]
                             agg_settle_keys.add(settle_key)
-                # In split-aggregate mode, emit the Ep rows individually
-                # (they carry the position-close and any paired ITM cash
-                # settlement via _emit_trade_row).
                 if split_aggregate:
+                    # Emit real Ep rows (they close the carryover and pair
+                    # any ITM cash settlement).
                     for r in ep_rows:
                         for row_out in _emit_trade_row(r, acct, account_map, cash_settlements, agg_settle_keys, warnings):
                             per_trade_rows.append(row_out)
+                elif synth_close:
+                    # Synthesize an ADJUSTMENT(OPTION_EXPIRY) that closes the
+                    # carryover. WF's holdings engine treats OPTION_EXPIRY
+                    # qty as "close |qty| contracts in the direction that
+                    # reduces position magnitude", which matches the intraday
+                    # close behavior. The label is slightly misleading (the
+                    # option didn't literally expire mid-day) but the position
+                    # walk and cost-basis release are correct.
+                    symbol = normalize_trades_symbol(first["Symbol"], ac)
+                    if ac == "FOP":
+                        underlying_root = futures_root_from_symbol(first.get("UnderlyingSymbol") or "")
+                        put_call = first.get("Put/Call") or ""
+                        strike = first.get("Strike") or ""
+                        expiry = first.get("Expiry") or ""
+                        if underlying_root and put_call and strike and expiry:
+                            try:
+                                symbol = compose_occ_symbol(underlying_root, expiry, put_call, strike)
+                            except Exception:
+                                pass
+                    instrument_type = {
+                        "STK": "EQUITY", "OPT": "OPTION",
+                        "FUT": "FUTURES", "FOP": "FUTURES_OPTION",
+                    }.get(ac, "")
+                    close_qty = abs(start_qty)
+                    wf_acct = account_map.get(acct, acct)
+                    per_trade_rows.append(wf_row(
+                        date=trade_date.isoformat(),
+                        symbol=symbol,
+                        instrumentType=instrument_type,
+                        quantity=fmt_amount(close_qty),
+                        activityType="ADJUSTMENT",
+                        unitPrice="0",
+                        currency=currency,
+                        fee="0", tax="0", amount="0",
+                        subtype="OPTION_EXPIRY",
+                        quoteMode="MANUAL" if ac == "FOP" else "",
+                        accountId=wf_acct,
+                        notes=f"IBKR synthetic close (intraday round-trip of carryover, no expiry)",
+                        sourceRecordId=synth_id("ibkr_synth_close", acct, symbol, trade_date.isoformat(), str(close_qty)),
+                    ))
             else:
                 # Emit per-trade rows.
                 for r in day_rows:
