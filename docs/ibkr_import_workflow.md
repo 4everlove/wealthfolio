@@ -145,9 +145,12 @@ If numbers look right, switch `DATABASE_URL` back to your real DB and re-run.
 
 ### 6. Re-import safety
 
-Every emitted row has a `sourceRecordId` derived from `TradeID` (Trades) or a
-content hash (aggregates + cash txns). Re-importing the same window is
-idempotent — Wealthfolio dedupes by `(account, source_record_id)`.
+Re-importing the same window is idempotent. Wealthfolio's CSV importer drops
+`sourceRecordId` on entry and instead dedupes by a computed `idempotency_key` =
+SHA-256 of
+`(account, activity_type, date-only, asset_id, quantity, unit_price, amount, currency, notes, fee-if-nonzero)`.
+The converter appends `#<TradeID>` to notes on per-trade rows so byte-identical
+fills stay distinguishable.
 
 ## Known caveats
 
@@ -320,27 +323,80 @@ warning and manually delete any phantom long lots that appear.
 
 ### Flex Web Service (automated pulls)
 
-Not yet shipped (`ibkr_flex_fetch.py`, see `ibkr_import_plan.md`). When built,
-the fetcher will need to:
+`scripts/import/ibkr_flex_fetch.py` runs the IBKR Flex Web Service two-step
+(SendRequest → poll GetStatement), writes the raw CSV, and optionally chains
+directly into the converter.
 
-1. Pull the current period → save to `~/.wealthfolio/ibkr/<YYYY-MM>.csv`
-2. Look up the previous period's file (same folder)
-3. Invoke the converter with `--seed-from <prior>` automatically
-4. Import the resulting Wealthfolio CSV
+**One-time setup**
 
-**Cadence note**: schedule the cron for at least the 2nd of each month if your
-Flex Query period is "Last Month" — otherwise you might miss end-of-month
-settlement bookings that IBKR posts after 5pm ET on the last business day.
+1. IBKR Client Portal → Reports → Settings → Flex Web Service → generate a token
+   (long-lived; treat as a secret).
+2. Save the token to a 0600 file:
+   ```bash
+   mkdir -p ~/.wealthfolio/ibkr && chmod 700 ~/.wealthfolio/ibkr
+   echo 'YOUR_TOKEN' > ~/.wealthfolio/ibkr/token
+   chmod 600 ~/.wealthfolio/ibkr/token
+   ```
+3. Look up the **numeric Query ID** for your saved Flex Query — this is a number
+   shown in the Client Portal (e.g. `1614005`), not the query name.
+
+**Manual invocation**
+
+```bash
+python3 scripts/import/ibkr_flex_fetch.py \
+  --query-id 1614005 \
+  --run-converter \
+  --converter-out ~/Dropbox/Ledger/docs/Brokers/ibkr/wf_ibkr_latest.csv \
+  --seed-from ~/Dropbox/Ledger/docs/Brokers/ibkr/ibkr_2025.csv
+```
+
+`--seed-from` must point at a **raw IBKR flex CSV** (has an `OpenPositions`
+section), not a converted `wf_ibkr_*.csv`. Otherwise the walker starts from zero
+positions and mis-classifies any pre-existing holdings on the first day.
+
+**Cron (weekly YTD refresh, Monday pre-market)**
+
+Recommended: configure the Flex Query as YTD so every run re-emits the full
+year. WF's idempotency key dedupes existing rows; only new activity gets
+inserted.
+
+```
+0 6 * * 1 /usr/bin/python3 /Users/shaobinx/src/wealthfolio/scripts/import/ibkr_flex_fetch.py \
+  --query-id 1614005 --run-converter \
+  --converter-out ~/Dropbox/Ledger/docs/Brokers/ibkr/wf_ibkr_latest.csv \
+  --seed-from ~/Dropbox/Ledger/docs/Brokers/ibkr/ibkr_<prior_year>.csv
+```
+
+**Cadence guidance**
+
+- Run outside market hours so aggregated CREDIT rows for past days are stable
+  (mid-day partial aggregates would produce different `amount` fingerprints from
+  later full aggregates → duplicates).
+- At year rollover, swap `--seed-from` to the newly completed year's flex CSV.
+  No dynamic rewriting needed inside the fetcher.
 
 ### Idempotency across all patterns
 
-Every emitted row's `sourceRecordId` is deterministic:
+Wealthfolio's CSV importer discards the `sourceRecordId` column and instead
+dedupes by a computed `idempotency_key` = SHA-256 over
+`(account, activity_type, date-only, asset_id, quantity, unit_price, amount, currency, notes-whitespace-normalized, fee-if-nonzero)`.
 
-- Trades → hash of `TradeID`
-- Aggregates → hash of `(account, date, currency, bucket)`
-- Seed rows → hash of `(account, symbol, ReportDate)`
-- Cash txns → hash of `(account, date, description, amount)`
+The converter makes each emitted row's fingerprint stable and unique:
 
-So re-importing the same file (or overlapping windows) is safe — Wealthfolio
-dedupes by `sourceRecordId`. You can rebuild the entire chain from scratch
-without duplicating rows.
+- Trades → notes include `#<TradeID>` so byte-identical fills stay distinct
+- Aggregates → notes + `(date, currency, bucket)`-driven amount are
+  deterministic for a given day
+- Seed rows → `(account, symbol, ReportDate, qty, cost)` produce a stable
+  fingerprint
+- Cash txns → `(account, date, description, amount)` produce a stable
+  fingerprint
+
+Re-importing the same file (or overlapping windows) is safe — matching keys are
+silently dropped by the unique index. You can rebuild the entire chain from
+scratch without duplicating rows.
+
+**Gotcha:** the day-only date field means an intraday cron pass would compute a
+_partial_ daily-aggregate CREDIT with a different `amount` than the same day's
+_full_ aggregate on a later pass, producing two rows with different keys.
+Schedule the fetch outside market hours so past-day aggregates are frozen before
+the next run.

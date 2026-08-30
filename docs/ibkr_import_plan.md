@@ -191,12 +191,15 @@ splitting was not worth it.
 
 Test collapse observed: 12,541 raw Trades rows → 114 output rows (June 2026).
 
-### `scripts/import/ibkr_flex_fetch.py` — NOT YET BUILT
+### `scripts/import/ibkr_flex_fetch.py` — SHIPPED
 
-- Runs the Flex Web Service two-step dance
-- Writes raw CSV to `~/.wealthfolio/ibkr/<date>.csv`
-- Optionally invokes `ibkr_flex_to_wf.py` and appends output to a running CSV
-- Suitable for cron: `0 6 * * 1 ibkr_flex_fetch.py --run-converter`
+- Runs the Flex Web Service two-step dance (SendRequest → poll GetStatement)
+- Reads token from `~/.wealthfolio/ibkr/token` (0600) or `--token-env`
+- Writes raw CSV to `~/.wealthfolio/ibkr/flex_<query>_<UTC-date>.csv`
+- `--run-converter` chains directly into `ibkr_flex_to_wf.py`; `--seed-from` is
+  passed through with `--seed-walk-only`
+- Suitable for cron:
+  `0 6 * * 1 ibkr_flex_fetch.py --query-id <id> --run-converter --converter-out ...`
 
 ## Open questions (parking lot)
 
@@ -247,6 +250,4 @@ Test collapse observed: 12,541 raw Trades rows → 114 output rows (June 2026).
       workaround documented)
 - [ ] Add FUT expiry handling (see `docs/future_work.md`) — non-urgent
       workaround: close futures manually before expiry
-- [ ] Add Flex Web Service fetcher (`ibkr_flex_fetch.py`) + cron docs — last
-      item; wait until manual workflow is stable across a few real monthly
-      imports
+- [x] Add Flex Web Service fetcher (`ibkr_flex_fetch.py`) + cron docs
