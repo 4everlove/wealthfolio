@@ -93,6 +93,20 @@ def underlying_from_occ(occ: str) -> str:
     return occ[:6].strip()
 
 
+def short_contract(occ: str) -> str:
+    """Human-readable tail: 'WDC   260821C00557500' → '260821C557.5'."""
+    tail = occ[6:]  # e.g. '260821C00557500'
+    yymmdd = tail[:6]
+    cp = tail[6]
+    strike_str = tail[7:]  # 8 digits, strike * 1000
+    strike = Decimal(strike_str) / Decimal(1000)
+    # Trim trailing zeros only after decimal: 557.500 → 557.5, 360.000 → 360
+    s = format(strike, "f")
+    if "." in s:
+        s = s.rstrip("0").rstrip(".")
+    return f"{yymmdd}{cp}{s}"
+
+
 OPTION_ACTIONS = {"Buy to Open", "Sell to Open", "Buy to Close", "Sell to Close", "Expired"}
 
 
@@ -208,7 +222,7 @@ def convert(rows: list[dict], account_id: str, aggregate: bool = False) -> tuple
                 "subtype": "SCHWAB_LIFECYCLE",
                 "quoteMode": "",
                 "accountId": account_id,
-                "notes": f"Schwab {underlying} settlement ({len(contracts)} contract(s), {act_count} activities)",
+                "notes": f"Schwab {underlying} settlement: {', '.join(sorted(short_contract(c) for c in contracts))}",
                 "sourceRecordId": stable_id(account_id, day, underlying, "SCHWAB_LIFECYCLE"),
             })
 
