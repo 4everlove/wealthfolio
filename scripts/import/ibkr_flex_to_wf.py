@@ -836,6 +836,11 @@ def convert_cash_txns(cash_rows: list[dict], account_map: dict[str, str]) -> lis
     # 5-10 small market-data fee items that add no signal individually.
     fee_agg: dict[tuple[str, date, str], Decimal] = defaultdict(lambda: Decimal(0))
     fee_agg_count: dict[tuple[str, date, str], int] = defaultdict(int)
+    # Broker Interest Received/Paid aggregated to one row per (account, date,
+    # currency); IBKR posts a separate line per insured-deposit tier so days
+    # often have 5-15 small items that add no signal individually.
+    interest_agg: dict[tuple[str, date, str], Decimal] = defaultdict(lambda: Decimal(0))
+    interest_agg_count: dict[tuple[str, date, str], int] = defaultdict(int)
 
     for r in cash_rows:
         acct = r["ClientAccountID"]
@@ -866,13 +871,19 @@ def convert_cash_txns(cash_rows: list[dict], account_map: dict[str, str]) -> lis
             symbol = tick
             instrument_type = "EQUITY"
         elif typ == "Broker Interest Received":
-            activity_type = "INTEREST"
+            # Aggregate to one INTEREST row per (acct, day, currency); IBKR
+            # posts a separate line per insured-deposit tier, so days often
+            # have 5-15 tiny items that add no signal individually.
+            interest_agg[(acct, d, currency)] += amount
+            interest_agg_count[(acct, d, currency)] += 1
+            continue
         elif typ == "Broker Interest Paid":
-            # Route to FEE — Wealthfolio's INTEREST is always magnitude
-            # (STAKING_REWARD etc.), so a negative interest amount would be
-            # abs'd on import. FEE always subtracts cash, matching the intent.
-            activity_type = "FEE"
-            amount = abs(amount)
+            # Fold into the daily fee aggregate as a negative (matches Other
+            # Fees signed-sum convention: net negative → FEE, net positive
+            # would emit as CREDIT refund).
+            fee_agg[(acct, d, currency)] += -abs(amount)
+            fee_agg_count[(acct, d, currency)] += 1
+            continue
         elif typ == "Other Fees":
             # Sum SIGNED into daily aggregate; emitted after the loop as
             # FEE (net outflow) or CREDIT (net refund). Using abs() would
@@ -933,6 +944,26 @@ def convert_cash_txns(cash_rows: list[dict], account_map: dict[str, str]) -> lis
             accountId=wf_acct,
             notes=note,
             sourceRecordId=synth_id("ibkr_fee_agg", acct, d, currency),
+        ))
+
+    for (acct, d, currency), total in interest_agg.items():
+        if total == 0:
+            continue
+        wf_acct = account_map.get(acct, acct)
+        count = interest_agg_count[(acct, d, currency)]
+        output.append(wf_row(
+            date=d.isoformat(),
+            symbol="",
+            instrumentType="",
+            quantity="1",
+            activityType="INTEREST",
+            unitPrice=fmt_amount(total),
+            currency=currency,
+            fee="0", tax="0",
+            amount=fmt_amount(total),
+            accountId=wf_acct,
+            notes=f"IBKR daily interest ({count} items)",
+            sourceRecordId=synth_id("ibkr_interest_agg", acct, d, currency),
         ))
     return output
 
