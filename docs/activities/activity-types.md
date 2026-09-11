@@ -19,22 +19,22 @@ Wealthfolio uses a closed set of **14 canonical activity types**. Each activity
 
 ## Summary Table
 
-| Type             | Category | Cash Impact          | Holdings Impact   | Cost Basis         | Net Contribution        | Required Asset |
-| ---------------- | -------- | -------------------- | ----------------- | ------------------ | ----------------------- | -------------- |
-| **BUY**          | Trading  | -(qty × price + fee) | +quantity         | +cost              | No change               | Yes            |
-| **SELL**         | Trading  | +(qty × price - fee) | -quantity         | -cost (FIFO)       | No change               | Yes            |
-| **SPLIT**        | Trading  | No change            | Adjusted          | Per-share adjusted | No change               | Yes            |
-| **DEPOSIT**      | Cash     | +(amount - fee)      | N/A               | N/A                | +amount                 | No             |
-| **WITHDRAWAL**   | Cash     | -(amount + fee)      | N/A               | N/A                | -amount                 | No             |
-| **TRANSFER_IN**  | Transfer | +amount or +quantity | +quantity (asset) | Preserved/set      | +amount (account scope) | Optional       |
-| **TRANSFER_OUT** | Transfer | -amount or -quantity | -quantity (asset) | Removed (FIFO)     | -amount (account scope) | Optional       |
-| **DIVIDEND**     | Income   | +(amount - fee)      | No change         | No change          | No change               | Yes            |
-| **INTEREST**     | Income   | +(amount - fee)      | No change         | No change          | No change               | Optional       |
-| **CREDIT**       | Income   | +(amount - fee)      | No change         | No change          | Depends on subtype      | No             |
-| **FEE**          | Charge   | -amount              | No change         | No change          | No change               | Optional       |
-| **TAX**          | Charge   | -amount              | No change         | No change          | No change               | Optional       |
-| **ADJUSTMENT**   | Other    | Varies               | Varies            | Varies             | No change               | Yes (required) |
-| **UNKNOWN**      | Other    | No auto impact       | No auto impact    | No auto impact     | No change               | Optional       |
+| Type             | Category | Cash Impact          | Holdings Impact   | Cost Basis         | Net Contribution                 | Required Asset |
+| ---------------- | -------- | -------------------- | ----------------- | ------------------ | -------------------------------- | -------------- |
+| **BUY**          | Trading  | -(qty × price + fee) | +quantity         | +cost              | No change                        | Yes            |
+| **SELL**         | Trading  | +(qty × price - fee) | -quantity         | -cost (FIFO)       | No change                        | Yes            |
+| **SPLIT**        | Trading  | No change            | Adjusted          | Per-share adjusted | No change                        | Yes            |
+| **DEPOSIT**      | Cash     | +(amount - fee)      | N/A               | N/A                | +amount                          | No             |
+| **WITHDRAWAL**   | Cash     | -(amount + fee)      | N/A               | N/A                | -amount                          | No             |
+| **TRANSFER_IN**  | Transfer | +amount or +quantity | +quantity (asset) | Preserved/set      | +amount (ordinary account scope) | Optional       |
+| **TRANSFER_OUT** | Transfer | -amount or -quantity | -quantity (asset) | Removed (FIFO)     | -amount (ordinary account scope) | Optional       |
+| **DIVIDEND**     | Income   | +(amount - fee)      | No change         | No change          | No change                        | Yes            |
+| **INTEREST**     | Income   | +(amount - fee)      | No change         | No change          | No change                        | Optional       |
+| **CREDIT**       | Income   | +(amount - fee)      | No change         | No change          | Depends on subtype               | No             |
+| **FEE**          | Charge   | -amount              | No change         | No change          | No change                        | Optional       |
+| **TAX**          | Charge   | -amount              | No change         | No change          | No change                        | Optional       |
+| **ADJUSTMENT**   | Other    | Varies               | Varies            | Varies             | No change                        | Yes (required) |
+| **UNKNOWN**      | Other    | No auto impact       | No auto impact    | No auto impact     | No change                        | Optional       |
 
 ---
 
@@ -144,14 +144,28 @@ calculation.
 
 ### Transfer Activities
 
+Ordinary cash transfers update account-level net contribution: `TRANSFER_IN`
+increases it and `TRANSFER_OUT` decreases it. A complete, recognized internal
+cash FX conversion within the same account is a narrow exception:
+
+- Source-currency cash decreases by the transferred amount.
+- Destination-currency cash increases by the transferred amount.
+- Account-level `net_contribution` and `net_contribution_base` do not change.
+- No external portfolio flow or TWR cash-flow event is created.
+
+This exception uses Wealthfolio's qualified FX-pair recognition. Same-account
+transfers or transfers that merely share a group identifier are not
+automatically contribution-neutral.
+
 #### TRANSFER_IN
 
 **Purpose**: Move cash or assets into this account.
 
-| Scenario           | Cash Impact | Holdings Impact     | Net Contribution            |
-| ------------------ | ----------- | ------------------- | --------------------------- |
-| **Cash transfer**  | +amount     | N/A                 | +amount (account scope)     |
-| **Asset transfer** | -fee only   | +quantity (new lot) | +cost_basis (account scope) |
+| Scenario                            | Cash Impact         | Holdings Impact     | Net Contribution            |
+| ----------------------------------- | ------------------- | ------------------- | --------------------------- |
+| **Ordinary cash transfer**          | +amount             | N/A                 | +amount (account scope)     |
+| **Recognized same-account FX pair** | +destination amount | N/A                 | No change                   |
+| **Asset transfer**                  | -fee only           | +quantity (new lot) | +cost_basis (account scope) |
 
 **Required Fields**:
 
@@ -162,10 +176,10 @@ calculation.
 
 **Flow Behavior**:
 
-| Scope         | `is_external = false` (default)            | `is_external = true` |
-| ------------- | ------------------------------------------ | -------------------- |
-| **Account**   | +net_contribution                          | +net_contribution    |
-| **Portfolio** | No change (nets to zero with TRANSFER_OUT) | +net_contribution    |
+| Scope         | Ordinary internal transfer (`is_external = false`) | `is_external = true` |
+| ------------- | -------------------------------------------------- | -------------------- |
+| **Account**   | +net_contribution                                  | +net_contribution    |
+| **Portfolio** | No external flow when paired                       | +net_contribution    |
 
 **Use Cases**:
 
@@ -179,10 +193,11 @@ calculation.
 
 **Purpose**: Move cash or assets out of this account.
 
-| Scenario           | Cash Impact     | Holdings Impact  | Net Contribution            |
-| ------------------ | --------------- | ---------------- | --------------------------- |
-| **Cash transfer**  | -(amount + fee) | N/A              | -amount (account scope)     |
-| **Asset transfer** | -fee only       | -quantity (FIFO) | -cost_basis (account scope) |
+| Scenario                            | Cash Impact     | Holdings Impact  | Net Contribution            |
+| ----------------------------------- | --------------- | ---------------- | --------------------------- |
+| **Ordinary cash transfer**          | -(amount + fee) | N/A              | -amount (account scope)     |
+| **Recognized same-account FX pair** | -source amount  | N/A              | No change                   |
+| **Asset transfer**                  | -fee only       | -quantity (FIFO) | -cost_basis (account scope) |
 
 **Required Fields**:
 
@@ -191,7 +206,9 @@ calculation.
 
 **Optional Fields**: `fee`, `metadata.flow.is_external`
 
-**Flow Behavior**: Same as TRANSFER_IN but with opposite sign.
+**Flow Behavior**: Ordinary transfers use the opposite sign from TRANSFER_IN.
+Recognized same-account cash FX pairs use the contribution-neutral behavior
+described above.
 
 **Use Cases**:
 

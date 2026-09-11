@@ -12,6 +12,7 @@ vi.mock("@wealthfolio/ui/components/ui/data-table", () => ({
     columns,
     data,
     defaultColumnVisibility,
+    pinRowsToTop,
   }: {
     columns: {
       id?: string;
@@ -26,6 +27,7 @@ vi.mock("@wealthfolio/ui/components/ui/data-table", () => ({
     }[];
     data: Holding[];
     defaultColumnVisibility?: Record<string, boolean>;
+    pinRowsToTop?: (row: Holding) => boolean;
   }) => {
     const getValue = (id: string) =>
       data[0] == null
@@ -67,6 +69,7 @@ vi.mock("@wealthfolio/ui/components/ui/data-table", () => ({
         <div data-testid="exact-type-match">
           {matchesHoldingType("FUND_MUTUAL") ? "true" : "false"}
         </div>
+        <div data-testid="cash-pinning">{String(data[0] && pinRowsToTop?.(data[0]))}</div>
       </div>
     );
   },
@@ -203,5 +206,25 @@ describe("HoldingsTable columns", () => {
     expect(screen.getByTestId("holding-type-cell")).toHaveTextContent("Mutual Fund");
     expect(screen.getByTestId("parent-type-match")).toHaveTextContent("false");
     expect(screen.getByTestId("exact-type-match")).toHaveTextContent("true");
+  });
+
+  it("does not pin cash rows above an explicit column sort", () => {
+    const cashHolding: Holding = {
+      id: "cash-usd",
+      accountId: "account-1",
+      holdingType: HoldingType.CASH,
+      quantity: 100,
+      localCurrency: "USD",
+      baseCurrency: "USD",
+      marketValue: { local: 100, base: 100 },
+      weight: 0.1,
+      asOfDate: "2026-08-20",
+    };
+
+    render(
+      <HoldingsTable holdings={[cashHolding]} isLoading={false} visibilityFilters={["open"]} />,
+    );
+
+    expect(screen.getByTestId("cash-pinning")).toHaveTextContent("undefined");
   });
 });

@@ -17,6 +17,7 @@ import {
 } from "@/adapters";
 import { usePortfolioSyncOptional } from "@/context/portfolio-sync-context";
 import { useIsMobileViewport } from "@/hooks/use-platform";
+import { assetLogoRegistry } from "@/lib/asset-logo-registry";
 import {
   invalidateAfterAssetClassificationsChanged,
   shouldInvalidateAfterPortfolioUpdate,
@@ -262,6 +263,7 @@ const useGlobalEventListener = () => {
     };
 
     const handleDatabaseRestored = () => {
+      assetLogoRegistry.reset();
       queryClientRef.current.invalidateQueries();
       toast.success(translationRef.current("common:globalEvents.databaseRestored"), {
         description: translationRef.current("common:globalEvents.databaseRestoredDescription"),
