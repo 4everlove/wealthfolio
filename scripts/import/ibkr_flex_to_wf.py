@@ -643,30 +643,28 @@ def convert_trades(
             sourceRecordId=synth_id("ibkr_eae", acct, occ, dstr),
         ))
 
-    # Emit aggregated CREDIT rows with SIGNED amount + gross-of-fee. Wealthfolio
-    # handle_income computes net = amount - fee - tax, applied signed, so this
-    # works symmetrically for winning and losing days.
-    #   NetCash sum is fee-netted, so amount = NetCash + commission (grosses up).
+    # Emit aggregated CREDIT rows with SIGNED, NET amount (post-commission).
+    # Wealthfolio v3.8.0 treats `amount` as final net cash and no longer
+    # deducts the row's fee/tax at booking time. `agg_cash` is IBKR NetCash,
+    # which is already fee-netted, so emit it verbatim. Commission is kept
+    # on `fee` for reporting only (informational; not double-counted).
     for (acct, trade_date, currency, bucket), amt in agg_cash.items():
         wf_acct = account_map.get(acct, acct)
         commission = agg_commission_ref[(acct, trade_date, currency, bucket)]
-        # gross = net + fee; Wealthfolio computes net_amount = amount - fee.
-        # Works symmetrically for winning (positive amt) and losing (negative amt) days.
-        gross = amt + commission
         output.append(wf_row(
             date=trade_date.isoformat(),
             symbol="",
             instrumentType="",
             quantity="1",
             activityType="CREDIT",
-            unitPrice=fmt_amount(gross),
+            unitPrice=fmt_amount(amt),
             currency=currency,
             fee=fmt_amount(commission),
             tax="0",
-            amount=fmt_amount(gross),
+            amount=fmt_amount(amt),
             subtype="IBKR_DAILY",
             accountId=wf_acct,
-            notes=f"IBKR {bucket} daily P&L (gross of commission)",
+            notes=f"IBKR {bucket} daily P&L (net of commission)",
             sourceRecordId=synth_id("ibkr_agg", acct, trade_date, currency, bucket),
         ))
 
