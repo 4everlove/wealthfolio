@@ -496,6 +496,11 @@ mod tests {
         gross_amount: Decimal,
         fee: Decimal,
     ) -> Decimal {
+        // CREDIT preserves sign end-to-end (trading-loss aggregates). A
+        // negative gross with a positive fee widens the loss: net = -(|g|+f).
+        if matches!(activity_type, ActivityType::Credit) && gross_amount.is_sign_negative() {
+            return -(gross_amount.abs() + fee.abs());
+        }
         let gross_amount = gross_amount.abs();
         let fee = fee.abs();
         match activity_type {

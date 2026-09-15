@@ -56,7 +56,6 @@ describe("normalizeInstrumentType", () => {
   it("returns undefined for unrecognized types", () => {
     expect(normalizeInstrumentType("REAL_ESTATE")).toBeUndefined();
     expect(normalizeInstrumentType("UNKNOWN")).toBeUndefined();
-    expect(normalizeInstrumentType("FUTURES")).toBeUndefined();
   });
 });
 
@@ -108,8 +107,8 @@ describe("splitInstrumentPrefixedSymbol", () => {
   });
 
   it("treats unrecognized prefix as plain symbol", () => {
-    expect(splitInstrumentPrefixedSymbol("futures:CL2412")).toEqual({
-      symbol: "futures:CL2412",
+    expect(splitInstrumentPrefixedSymbol("realestate:PROP1")).toEqual({
+      symbol: "realestate:PROP1",
     });
   });
 

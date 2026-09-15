@@ -122,12 +122,16 @@ impl HoldingsCalculator {
         account_currency: &str,
     ) -> Result<()> {
         let activity_currency = &activity.currency;
-        // Use signed amount: negative values are legitimate for CREDIT (trading
-        // losses in daily-aggregate imports), INTEREST (margin interest paid),
-        // and DIVIDEND (return-of-capital reversal). The economics resolver
-        // would coerce the sign by type via .abs(), so bypass it here.
-        let gross_effect = activity.signed_amt();
-        let cash_effect = gross_effect - activity.fee_amt() - activity.tax_amt();
+        // v3.8.0 semantics: `amount` is the stored final net cash (post fee/tax).
+        // Bypass the resolver so negative CREDIT (trading losses in
+        // daily-aggregate imports) preserves its sign — the resolver's
+        // type-directed step would `.abs()` it. Gross is amount + charges,
+        // keeping the same sign for BONUS net-contribution accounting.
+        let cash_effect = activity.signed_amt();
+        // Gross = net + charges. Fee and tax reduce a positive income and
+        // widen a negative loss equally, so the algebraic relationship holds
+        // for both signs (e.g. net -102 with fee 2 → gross -100).
+        let gross_effect = cash_effect + activity.fee_amt() + activity.tax_amt();
 
         let (cash_currency, cash_effect) = cash_booking(activity, cash_effect);
         add_cash(state, &cash_currency, cash_effect);

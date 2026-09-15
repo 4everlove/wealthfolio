@@ -93,6 +93,25 @@ afterEach(() => {
   cleanup();
 });
 
+// Vitest 4's jsdom bootstrap does not forward the localStorage/sessionStorage
+// getters onto the global window shim, so `window.localStorage` reads as
+// undefined. Attach them from the underlying jsdom Window explicitly.
+if (typeof window !== "undefined" && (window as any).jsdom) {
+  const jsdomWindow = (window as any).jsdom.window as Window;
+  if (!(window as any).localStorage && jsdomWindow.localStorage) {
+    Object.defineProperty(window, "localStorage", {
+      configurable: true,
+      get: () => jsdomWindow.localStorage,
+    });
+  }
+  if (!(window as any).sessionStorage && jsdomWindow.sessionStorage) {
+    Object.defineProperty(window, "sessionStorage", {
+      configurable: true,
+      get: () => jsdomWindow.sessionStorage,
+    });
+  }
+}
+
 // Mock window.matchMedia
 if (typeof window !== "undefined") {
   Object.defineProperty(window, "matchMedia", {

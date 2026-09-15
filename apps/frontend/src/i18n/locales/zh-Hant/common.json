@@ -320,6 +320,7 @@
   },
   "globalEvents": {
     "syncingMarket": "正在同步市場資料…",
+    "syncingMarketProgress": "正在同步市場資料（{{total}}/{{synced}}/{{failed}}/{{skipped}}）…",
     "fetchingAssetMetadata": "正在取得資產資料…",
     "calculatingPortfolio": "正在計算投資組合…",
     "calculatingPortfolioPerformance": "正在計算投資組合績效…",
