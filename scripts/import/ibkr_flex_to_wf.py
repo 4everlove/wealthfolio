@@ -649,8 +649,12 @@ def convert_trades(
     # which is already fee-netted, so emit it verbatim. Commission is kept
     # on `fee` for reporting only (informational; not double-counted).
     for (acct, trade_date, currency, bucket), amt in agg_cash.items():
-        wf_acct = account_map.get(acct, acct)
         commission = agg_commission_ref[(acct, trade_date, currency, bucket)]
+        # Skip zero-P&L, zero-commission buckets. Empty aggregation slots pollute
+        # the activity log and confuse dedup (the app stores them as amt=1, not 0).
+        if amt == 0 and commission == 0:
+            continue
+        wf_acct = account_map.get(acct, acct)
         output.append(wf_row(
             date=trade_date.isoformat(),
             symbol="",
