@@ -11357,6 +11357,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_import_credit_preserves_negative_amount() {
+        let account_service = Arc::new(MockAccountService::new());
+        let asset_service = Arc::new(MockAssetService::new());
+        let fx_service = Arc::new(MockFxService::new());
+        let activity_repository = Arc::new(MockActivityRepository::new());
+
+        let account = create_test_account("acc-1", "USD");
+        account_service.add_account(account);
+
+        let quote_service = Arc::new(MockQuoteService);
+        let activity_service = ActivityService::new(
+            activity_repository.clone(),
+            account_service,
+            asset_service,
+            fx_service,
+            quote_service,
+        );
+
+        // Shape emitted by scripts/import/ibkr_flex_to_wf.py for a losing day.
+        let loss_row = ActivityImport {
+            id: None,
+            date: "2026-10-01".to_string(),
+            symbol: String::new(),
+            activity_type: "CREDIT".to_string(),
+            quantity: Some(dec!(1)),
+            unit_price: Some(dec!(-56719.77716)),
+            currency: "USD".to_string(),
+            fee: Some(dec!(1029.77716)),
+            tax: Some(dec!(0)),
+            amount: Some(dec!(-56719.77716)),
+            comment: Some("IBKR SPXW daily P&L (net of commission)".to_string()),
+            account_id: Some("acc-1".to_string()),
+            account_name: None,
+            symbol_name: None,
+            exchange_mic: None,
+            quote_ccy: None,
+            instrument_type: None,
+            quote_mode: None,
+            provider_id: None,
+            provider_symbol: None,
+            errors: None,
+            warnings: None,
+            duplicate_of_id: None,
+            duplicate_of_line_number: None,
+            is_draft: false,
+            is_valid: true,
+            line_number: Some(1),
+            fx_rate: None,
+            subtype: Some("IBKR_DAILY".to_string()),
+            asset_id: None,
+            isin: None,
+            force_import: false,
+            is_external: None,
+        };
+
+        let result = activity_service
+            .import_activities(vec![loss_row])
+            .await
+            .expect("credit import should succeed");
+
+        assert_eq!(result.summary.imported, 1);
+        let stored = activity_repository.activities.lock().unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].amount, Some(dec!(-56719.77716)));
+    }
+
+    #[tokio::test]
     async fn test_import_stamps_inserted_activities_with_import_run_id() {
         let account_service = Arc::new(MockAccountService::new());
         let asset_service = Arc::new(MockAssetService::new());

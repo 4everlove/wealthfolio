@@ -6783,9 +6783,12 @@ impl ActivityService {
             }
 
             // Normalize amounts to absolute values (direction is determined by activity type)
+            // CREDIT preserves amount sign; see preserves_amount_sign().
             activity.quantity = activity.quantity.map(|v| v.abs());
             activity.unit_price = activity.unit_price.map(|v| v.abs());
-            activity.amount = activity.amount.map(|v| v.abs());
+            activity.amount = activity
+                .amount
+                .map(|v| Self::normalize_amount_sign(&activity.activity_type, v));
             activity.fee = activity.fee.map(|v| v.abs());
             activity.tax = activity.tax.map(|v| v.abs());
 
