@@ -1,5 +1,5 @@
 // Activity Commands
-import { ImportType } from "@/lib/types";
+import { ImportType, QuoteMode } from "@/lib/types";
 import type {
   Activity,
   ActivityBulkMutationRequest,
@@ -24,6 +24,16 @@ import type {
 
 import { invoke, logger } from "./platform";
 
+// `search_activities` sends the asset's quote mode as `assetPricingMode`.
+type ActivityDetailsResponse = ActivityDetails & { assetPricingMode?: string | null };
+
+function withAssetQuoteMode(activity: ActivityDetailsResponse): ActivityDetails {
+  const mode = activity.assetPricingMode;
+  return mode === QuoteMode.MANUAL || mode === QuoteMode.MARKET
+    ? { ...activity, assetQuoteMode: mode }
+    : activity;
+}
+
 interface ActivityFilters {
   accountIds?: string | string[];
   activityTypes?: string | string[];
@@ -38,6 +48,11 @@ interface ActivityFilters {
 interface ActivitySort {
   id: string;
   desc?: boolean;
+}
+
+interface ActivitySearchOptions {
+  /** Ask for the cash balance after each row (one cash or credit-card account). */
+  includeCashBalances?: boolean;
 }
 
 function normalizeStringArray(input?: string | string[]): string[] | undefined {
@@ -81,6 +96,7 @@ export const searchActivities = async (
   filters: ActivityFilters,
   searchKeyword: string,
   sort?: ActivitySort,
+  options?: ActivitySearchOptions,
 ): Promise<ActivitySearchResponse> => {
   const accountIdFilter = normalizeStringArray(filters?.accountIds);
   const activityTypeFilter = normalizeStringArray(filters?.activityTypes);
@@ -96,7 +112,9 @@ export const searchActivities = async (
   const dateTo = filters?.dateTo;
 
   try {
-    return await invoke<ActivitySearchResponse>("search_activities", {
+    const response = await invoke<
+      Omit<ActivitySearchResponse, "data"> & { data: ActivityDetailsResponse[] }
+    >("search_activities", {
       page,
       pageSize,
       accountIdFilter,
@@ -108,7 +126,9 @@ export const searchActivities = async (
       dateTo,
       instrumentTypeFilter,
       activityIdFilter,
+      ...(options?.includeCashBalances ? { includeCashBalances: true } : {}),
     });
+    return { ...response, data: response.data.map(withAssetQuoteMode) };
   } catch (err) {
     logger.error("Error fetching activities.");
     throw err;
@@ -164,9 +184,9 @@ export const deleteActivity = async (activityId: string): Promise<Activity> => {
 
 export const getTransferPairForActivity = async (
   activityId: string,
-): Promise<InternalTransferPairResponse> => {
+): Promise<InternalTransferPairResponse | null> => {
   try {
-    return await invoke<InternalTransferPairResponse>("get_transfer_pair_for_activity", {
+    return await invoke<InternalTransferPairResponse | null>("get_transfer_pair_for_activity", {
       activityId,
     });
   } catch (err) {

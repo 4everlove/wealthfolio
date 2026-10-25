@@ -1,11 +1,13 @@
+import { profileFetch } from "@/features/profiles/session";
 // Web adapter core - Internal invoke function, COMMANDS map, and helpers
 // This module exports invoke, logger, and platform constants for shared modules
 
 import { notifyUnauthorized } from "@/lib/auth-token";
 import type { Logger } from "../types";
+import { invokeTimeoutMs } from "../invoke-timeout";
 
-/** True when running in the desktop (Tauri) environment */
-export const isDesktop = false;
+/** True in every Tauri build (desktop and mobile); use getPlatform() for the OS */
+export const isTauri = false;
 
 /** True when running in the web environment */
 export const isWeb = true;
@@ -14,19 +16,11 @@ export const API_PREFIX = "/api/v1";
 export const EVENTS_ENDPOINT = `${API_PREFIX}/events/stream`;
 export const AI_CHAT_STREAM_ENDPOINT = `${API_PREFIX}/ai/chat/stream`;
 
-const DEFAULT_INVOKE_TIMEOUT_MS = 300_000;
-
-// Commands that legitimately do batched network I/O over many symbols (Yahoo
-// Finance lookups during CSV import). Larger imports — especially Options —
-// can exceed the default 5-minute safety net. See issue #884.
-const INVOKE_TIMEOUT_OVERRIDES_MS: Record<string, number> = {
-  preview_import_assets: 600_000,
-  check_activities_import: 600_000,
-};
-
 type CommandMap = Record<string, { method: string; path: string }>;
 
 export const COMMANDS: CommandMap = {
+  cloud_backup_action: { method: "POST", path: "/cloud-backups/action" },
+  cloud_backup_capture: { method: "POST", path: "/cloud-backups/capture" },
   get_accounts: { method: "GET", path: "/accounts" },
   create_account: { method: "POST", path: "/accounts" },
   update_account: { method: "PUT", path: "/accounts" },
@@ -40,6 +34,10 @@ export const COMMANDS: CommandMap = {
   is_auto_update_check_enabled: { method: "GET", path: "/settings/auto-update-enabled" },
   get_app_info: { method: "GET", path: "/app/info" },
   check_update: { method: "GET", path: "/app/check-update" },
+  get_database_encryption_status: {
+    method: "GET",
+    path: "/utilities/database/encryption",
+  },
   backup_database: { method: "POST", path: "/utilities/database/backup" },
   list_database_backups: { method: "GET", path: "/utilities/database/backups" },
   delete_database_backup: { method: "DELETE", path: "/utilities/database/backups" },
@@ -165,6 +163,11 @@ export const COMMANDS: CommandMap = {
   check_quotes_import: { method: "POST", path: "/market-data/quotes/check" },
   import_quotes_csv: { method: "POST", path: "/market-data/quotes/import" },
   synch_quotes: { method: "POST", path: "/market-data/sync/history" },
+  reset_all_provider_history: {
+    method: "POST",
+    path: "/market-data/quotes/reset",
+  },
+  reset_provider_history: { method: "POST", path: "/market-data/quotes" },
   sync_market_data: { method: "POST", path: "/market-data/sync" },
   // Secrets
   set_secret: { method: "POST", path: "/secrets" },
@@ -274,17 +277,12 @@ export const COMMANDS: CommandMap = {
   set_addon_storage_item: { method: "PUT", path: "/addons/storage" },
   delete_addon_storage_item: { method: "DELETE", path: "/addons/storage" },
   // Device Sync - Device management
-  register_device: { method: "POST", path: "/sync/device/register" },
   get_device: { method: "GET", path: "/sync/device" },
   list_devices: { method: "GET", path: "/sync/devices" },
   update_device: { method: "PATCH", path: "/sync/device" },
   delete_device: { method: "DELETE", path: "/sync/device" },
   revoke_device: { method: "POST", path: "/sync/device" },
-  // Device Sync - Team keys (E2EE)
-  initialize_team_keys: { method: "POST", path: "/sync/keys/initialize" },
-  commit_initialize_team_keys: { method: "POST", path: "/sync/keys/initialize/commit" },
-  rotate_team_keys: { method: "POST", path: "/sync/keys/rotate" },
-  commit_rotate_team_keys: { method: "POST", path: "/sync/keys/rotate/commit" },
+  // Device Sync - Sync reset
   reset_team_sync: { method: "POST", path: "/sync/team/reset" },
   // Device Sync - Pairing (Issuer - Trusted Device)
   create_pairing: { method: "POST", path: "/sync/pairing" },
@@ -300,14 +298,13 @@ export const COMMANDS: CommandMap = {
     method: "POST",
     path: "/sync/pairing/complete-with-transfer",
   },
-  confirm_pairing_with_bootstrap: {
-    method: "POST",
-    path: "/sync/pairing/confirm-with-bootstrap",
-  },
-  begin_pairing_confirm: { method: "POST", path: "/sync/pairing/flow/begin" },
-  get_pairing_flow_state: { method: "POST", path: "/sync/pairing/flow/state" },
-  approve_pairing_overwrite: { method: "POST", path: "/sync/pairing/flow/approve-overwrite" },
-  cancel_pairing_flow: { method: "POST", path: "/sync/pairing/flow/cancel" },
+  // Device Sync - Restore operation (receiving device)
+  device_sync_begin_pairing_restore: { method: "POST", path: "/sync/pairing/begin-restore" },
+  device_sync_get_restore: { method: "GET", path: "/sync/restore" },
+  device_sync_start_restore: { method: "POST", path: "/sync/restore/start" },
+  device_sync_approve_restore: { method: "POST", path: "/sync/restore/approve" },
+  device_sync_retry_restore: { method: "POST", path: "/sync/restore/retry" },
+  device_sync_cancel_restore: { method: "POST", path: "/sync/restore/cancel" },
   // Wealthfolio Connect (Broker Sync)
   store_sync_session: { method: "POST", path: "/connect/session" },
   post_login_bootstrap: { method: "POST", path: "/connect/post-login-bootstrap" },
@@ -342,18 +339,6 @@ export const COMMANDS: CommandMap = {
   device_sync_pairing_source_status: {
     method: "GET",
     path: "/connect/device/pairing-source-status",
-  },
-  device_sync_bootstrap_overwrite_check: {
-    method: "GET",
-    path: "/connect/device/bootstrap-overwrite-check",
-  },
-  device_sync_reconcile_ready_state: {
-    method: "POST",
-    path: "/connect/device/reconcile-ready-state",
-  },
-  device_sync_bootstrap_snapshot_if_needed: {
-    method: "POST",
-    path: "/connect/device/bootstrap-snapshot",
   },
   device_sync_trigger_cycle: { method: "POST", path: "/connect/device/trigger-cycle" },
   device_sync_start_background_engine: {
@@ -414,6 +399,12 @@ export const COMMANDS: CommandMap = {
   link_liability: { method: "POST", path: "/alternative-assets" },
   unlink_liability: { method: "DELETE", path: "/alternative-assets" },
   update_alternative_asset_metadata: { method: "PUT", path: "/alternative-assets" },
+  calculate_loan: { method: "POST", path: "/loans/calculate" },
+  recalculate_loan: { method: "POST", path: "/loans/recalculate" },
+  preview_loan_terms: { method: "POST", path: "/loans/preview" },
+  apply_loan_action: { method: "POST", path: "/loans" },
+  get_loan_payments: { method: "GET", path: "/loans" },
+  link_loan_payment: { method: "POST", path: "/loans/payments" },
   get_alternative_holdings: { method: "GET", path: "/alternative-holdings" },
   // Agent Access (PATs + audit log)
   get_agent_access_status: { method: "GET", path: "/agent-access/status" },
@@ -468,6 +459,11 @@ export const invoke = async <T>(command: string, payload?: Record<string, unknow
   };
 
   switch (command) {
+    case "cloud_backup_action":
+    case "cloud_backup_capture": {
+      body = JSON.stringify(payload);
+      break;
+    }
     case "update_account": {
       const data = payload as { accountUpdate: { id: string } & Record<string, unknown> };
       url += `/${data.accountUpdate.id}`;
@@ -1056,19 +1052,22 @@ export const invoke = async <T>(command: string, payload?: Record<string, unknow
       break;
     }
     case "resolve_symbol_quote": {
-      const { symbol, exchangeMic, instrumentType, providerId, quoteCcy } = payload as {
-        symbol: string;
-        exchangeMic?: string;
-        instrumentType?: string;
-        providerId?: string;
-        quoteCcy?: string;
-      };
+      const { symbol, exchangeMic, instrumentType, providerId, quoteCcy, providerSymbol } =
+        payload as {
+          symbol: string;
+          exchangeMic?: string;
+          instrumentType?: string;
+          providerId?: string;
+          quoteCcy?: string;
+          providerSymbol?: string;
+        };
       const params = new URLSearchParams();
       params.set("symbol", symbol);
       if (exchangeMic) params.set("exchangeMic", exchangeMic);
       if (instrumentType) params.set("instrumentType", instrumentType);
       if (providerId) params.set("providerId", providerId);
       if (quoteCcy) params.set("quoteCcy", quoteCcy);
+      if (providerSymbol) params.set("providerSymbol", providerSymbol);
       url += `?${params.toString()}`;
       break;
     }
@@ -1128,6 +1127,11 @@ export const invoke = async <T>(command: string, payload?: Record<string, unknow
         overwriteExisting: boolean;
       };
       body = JSON.stringify({ quotes, overwriteExisting });
+      break;
+    }
+    case "reset_provider_history": {
+      const { assetId } = payload as { assetId: string };
+      url += `/${encodeURIComponent(assetId)}/reset`;
       break;
     }
     case "sync_market_data": {
@@ -1676,24 +1680,6 @@ export const invoke = async <T>(command: string, payload?: Record<string, unknow
       break;
     }
     // Device Sync commands - Device management
-    case "register_device": {
-      const { displayName, deviceNonce, instanceId } = payload as {
-        displayName: string;
-        deviceNonce?: string;
-        instanceId?: string;
-      };
-      // Detect platform from browser user agent
-      const userAgent = navigator.userAgent.toLowerCase();
-      let platform = "server"; // default fallback
-      if (userAgent.includes("mac")) platform = "macos";
-      else if (userAgent.includes("win")) platform = "windows";
-      else if (userAgent.includes("linux") && !userAgent.includes("android")) platform = "linux";
-      else if (userAgent.includes("android")) platform = "android";
-      else if (userAgent.includes("iphone") || userAgent.includes("ipad")) platform = "ios";
-
-      body = JSON.stringify({ displayName, platform, deviceNonce: deviceNonce ?? instanceId });
-      break;
-    }
     case "get_device": {
       const { deviceId } = (payload ?? {}) as { deviceId?: string };
       if (deviceId) {
@@ -1719,35 +1705,7 @@ export const invoke = async <T>(command: string, payload?: Record<string, unknow
       url += `/${encodeURIComponent(deviceId)}/revoke`;
       break;
     }
-    // Device Sync commands - Team keys (E2EE)
-    case "commit_initialize_team_keys": {
-      const { keyVersion, deviceKeyEnvelope, signature, challengeResponse, recoveryEnvelope } =
-        payload as {
-          keyVersion: number;
-          deviceKeyEnvelope: string;
-          signature: string;
-          challengeResponse?: string;
-          recoveryEnvelope?: string;
-        };
-      body = JSON.stringify({
-        keyVersion,
-        deviceKeyEnvelope,
-        signature,
-        challengeResponse,
-        recoveryEnvelope,
-      });
-      break;
-    }
-    case "commit_rotate_team_keys": {
-      const { newKeyVersion, envelopes, signature, challengeResponse } = payload as {
-        newKeyVersion: number;
-        envelopes: { deviceId: string; deviceKeyEnvelope: string }[];
-        signature: string;
-        challengeResponse?: string;
-      };
-      body = JSON.stringify({ newKeyVersion, envelopes, signature, challengeResponse });
-      break;
-    }
+    // Device Sync commands - Sync reset
     case "reset_team_sync": {
       const { reason } = (payload ?? {}) as { reason?: string };
       body = reason ? JSON.stringify({ reason }) : JSON.stringify({});
@@ -1816,32 +1774,24 @@ export const invoke = async <T>(command: string, payload?: Record<string, unknow
       body = JSON.stringify(payload);
       break;
     }
-    case "confirm_pairing_with_bootstrap": {
+    case "device_sync_begin_pairing_restore":
+    case "device_sync_start_restore":
+    case "device_sync_approve_restore":
+    case "device_sync_retry_restore":
+    case "device_sync_cancel_restore": {
       body = JSON.stringify(payload);
-      break;
-    }
-    case "begin_pairing_confirm":
-    case "get_pairing_flow_state":
-    case "approve_pairing_overwrite":
-    case "cancel_pairing_flow": {
-      body = JSON.stringify(payload);
-      break;
-    }
-    case "device_sync_reconcile_ready_state": {
-      body = JSON.stringify(payload ?? {});
       break;
     }
     // Wealthfolio Connect commands
     case "store_sync_session": {
-      const { refreshToken } = payload as {
+      const { refreshToken, confirmRebind } = payload as {
         refreshToken: string;
+        confirmRebind?: boolean;
       };
-      body = JSON.stringify({ refreshToken });
+      body = JSON.stringify({ refreshToken, confirmRebind });
       break;
     }
     case "list_devices":
-    case "initialize_team_keys":
-    case "rotate_team_keys":
     case "post_login_bootstrap":
     case "clear_sync_session":
     case "get_sync_session_status":
@@ -1914,6 +1864,28 @@ export const invoke = async <T>(command: string, payload?: Record<string, unknow
       break;
     }
     // Alternative Assets commands
+    case "get_loan_payments": {
+      const { assetId } = payload as { assetId: string };
+      url += `/${encodeURIComponent(assetId)}/payments`;
+      break;
+    }
+    case "link_loan_payment": {
+      const { activityId, link } = payload as { activityId: string; link: Record<string, unknown> };
+      url += `/${encodeURIComponent(activityId)}`;
+      body = JSON.stringify(link);
+      break;
+    }
+    case "apply_loan_action": {
+      const { assetId, action } = payload as { assetId: string; action: Record<string, unknown> };
+      url += `/${encodeURIComponent(assetId)}/actions`;
+      body = JSON.stringify(action);
+      break;
+    }
+    case "preview_loan_terms":
+      body = JSON.stringify(payload);
+      break;
+    case "recalculate_loan":
+    case "calculate_loan":
     case "create_alternative_asset": {
       const { request } = payload as { request: Record<string, unknown> };
       body = JSON.stringify(request);
@@ -1945,14 +1917,15 @@ export const invoke = async <T>(command: string, payload?: Record<string, unknow
       break;
     }
     case "update_alternative_asset_metadata": {
-      const { assetId, metadata, name, notes } = payload as {
+      const { assetId, metadata, name, notes, loan } = payload as {
         assetId: string;
         metadata: Record<string, string>;
         name?: string;
         notes?: string | null;
+        loan?: unknown;
       };
       url += `/${encodeURIComponent(assetId)}/metadata`;
-      body = JSON.stringify({ metadata, name, notes });
+      body = JSON.stringify({ metadata, name, notes, loan });
       break;
     }
     case "get_alternative_holdings":
@@ -2181,12 +2154,12 @@ export const invoke = async <T>(command: string, payload?: Record<string, unknow
     }
   }
 
-  const res = await fetch(url, {
+  const res = await profileFetch(url, {
     method,
     headers,
     body,
     credentials: "same-origin",
-    signal: AbortSignal.timeout(INVOKE_TIMEOUT_OVERRIDES_MS[command] ?? DEFAULT_INVOKE_TIMEOUT_MS),
+    signal: AbortSignal.timeout(invokeTimeoutMs(command)),
   });
 
   // 401 = app auth failure (JWT expired/invalid). Cloud auth failures return 403.
@@ -2210,7 +2183,11 @@ export const invoke = async <T>(command: string, payload?: Record<string, unknow
       void 0;
     }
     console.error(`[Invoke] Command "${command}" failed: ${msg}`);
-    throw new Error(msg);
+    // The server's 408 timeout leaves owned reset tasks running; 5xx responses
+    // can also follow a committed reset whose completion failed.
+    throw Object.assign(new Error(msg), {
+      outcomeUnknown: res.status === 408 || res.status >= 500,
+    });
   }
   // Handle responses with no body (204 No Content, 202 Accepted, or empty 200)
   if (res.status === 204 || res.status === 202) {

@@ -11,6 +11,9 @@
   ],
   "permissions": [
     "core:default",
+    "fs:allow-open",
+    "fs:allow-read",
+    "fs:allow-write",
     "fs:allow-read-file",
     "fs:allow-write-file",
     "fs:allow-read-dir",
@@ -21,20 +24,15 @@
     "fs:allow-remove",
     "fs:allow-rename",
     "fs:allow-exists",
-    {
-      "identifier": "fs:scope",
-      "allow": [
-        "$APPDATA/**"
-      ]
-    },
     "core:window:allow-start-dragging",
     "shell:allow-open",
     "dialog:allow-open",
     "dialog:allow-save",
-    "fs:default",
     "dialog:default",
     "shell:default",
     "deep-link:default",
+    "web-auth:default",
+    "web-auth:allow-authenticate",
     "core:app:allow-set-app-theme",
     "core:window:allow-set-theme",
     "core:window:allow-theme",
@@ -43,11 +41,20 @@
     "haptics:allow-notification-feedback",
     "haptics:allow-selection-feedback",
     "haptics:allow-vibrate",
-    "web-auth:default",
-    "web-auth:allow-authenticate",
     "barcode-scanner:allow-scan",
     "barcode-scanner:allow-cancel",
     "barcode-scanner:allow-check-permissions",
-    "barcode-scanner:allow-request-permissions"
+    "barcode-scanner:allow-request-permissions",
+    "fs:deny-default",
+    "fs:allow-fstat",
+    {
+      "identifier": "fs:scope",
+      "deny": [
+        "$APPDATA",
+        "$APPDATA/**",
+        "$APPLOCALDATA",
+        "$APPLOCALDATA/**"
+      ]
+    }
   ]
 }

@@ -1,9 +1,13 @@
+import { formatZonedDateKey } from "@/features/spending/lib/timezone";
+import { useSettingsContext } from "@/lib/settings-provider";
 import { AccountScopeSelector } from "@/components/account-filter-selector";
 import { BenchmarkSymbolSelector } from "@/components/benchmark-symbol-selector";
 import {
   ANNUALIZED_RETURN_INFO as annualizedReturnInfo,
   MAX_DRAWDOWN_INFO as maxDrawdownInfo,
+  MetricInfoPopoverBody,
   MetricLabelWithInfo,
+  metricWarningItems,
   MONEY_WEIGHTED_RETURN_INFO,
   PRICE_RETURN_INFO,
   SIMPLE_RETURN_INFO,
@@ -27,7 +31,7 @@ import {
 } from "@/lib/performance";
 import { getPerformanceDateRangeForRequest } from "@/lib/performance-date-range";
 import { DateRange, PerformanceResult, TrackedItem } from "@/lib/types";
-import { cn } from "@/lib/utils";
+import { cn, parseLocalDate } from "@/lib/utils";
 import {
   AlertFeedback,
   Badge,
@@ -58,11 +62,16 @@ import {
   SheetDescription,
   SheetHeader,
   SheetTitle,
-  useAmountFormatting,
   useNumberFormatting,
   type FormattingApi,
 } from "@wealthfolio/ui";
-import { EmptyPlaceholder } from "@wealthfolio/ui/components/ui/empty-placeholder";
+import {
+  Empty,
+  EmptyHeader,
+  EmptyMedia,
+  EmptyTitle,
+  EmptyDescription,
+} from "@wealthfolio/ui/components/ui/empty";
 import { isSameDay, subDays, subMonths } from "date-fns";
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -139,6 +148,18 @@ function chartExclusion(
     return {
       kind: "missingData",
       message: t("performance:exclusion.no_series"),
+    };
+  }
+  // A return the engine reports as unavailable (an unpriced or unconvertible
+  // period endpoint) has no line worth drawing: the series would only trace
+  // the excluded days as zeros.
+  if (
+    (metric === "twr" || metric === "irr" || metric === "valueReturn") &&
+    metricValue(result, metric) == null
+  ) {
+    return {
+      kind: "missingData",
+      message: t("performance:exclusion.no_data"),
     };
   }
 
@@ -309,16 +330,18 @@ function humanizeAccountIds(text: string, namesById: Map<string, string>): strin
 /** Trim long raw decimals (e.g. "95.50000000") in warnings to readable amounts. */
 function formatWarningNumbers(
   text: string,
-  formatting: Pick<FormattingApi, "formatAmount">,
+  formatting: Pick<FormattingApi, "formatDecimal">,
 ): string {
-  return text.replace(DECIMAL_RE, (value) => formatting.formatAmount(Number(value), "USD", false));
+  return text.replace(DECIMAL_RE, (value) =>
+    formatting.formatDecimal(Number(value), { minimumFractionDigits: 2, maximumFractionDigits: 2 }),
+  );
 }
 
 /** Make a data-quality warning user-facing: real account names + tidy numbers. */
 function presentWarning(
   text: string,
   namesById: Map<string, string>,
-  formatting: Pick<FormattingApi, "formatAmount">,
+  formatting: Pick<FormattingApi, "formatDecimal">,
 ): string {
   return formatWarningNumbers(humanizeAccountIds(text, namesById), formatting);
 }
@@ -327,7 +350,7 @@ function presentMoneyWeightedWarning(
   text: string,
   namesById: Map<string, string>,
   t: TFunction,
-  formatting: Pick<FormattingApi, "formatAmount">,
+  formatting: Pick<FormattingApi, "formatDecimal">,
 ): string {
   return presentWarning(text, namesById, formatting)
     .replace(/\bXIRR\b/gi, t("performance:metric.annualized_mwr"))
@@ -389,9 +412,9 @@ function HeaderMetric({
     <div
       className={cn(
         "flex min-w-0 flex-col gap-1",
-        align === "left" && "items-start text-left",
+        align === "left" && "items-start text-start",
         align === "center" && "items-center text-center",
-        align === "right" && "items-end text-right",
+        align === "right" && "items-end text-end",
       )}
     >
       <MetricLabelWithInfo
@@ -421,11 +444,11 @@ function HeaderMetric({
 }
 
 const STRIP_SECTION_CLASS =
-  "border-border/70 flex min-h-[4.75rem] min-w-0 flex-col justify-center border-l pl-5";
+  "border-border/70 flex min-h-[4.75rem] min-w-0 flex-col justify-center border-s ps-5";
 const STRIP_TITLE_CLASS =
-  "text-muted-foreground/70 mb-2.5 font-mono text-[9px] font-semibold uppercase tracking-[0.28em]";
+  "text-muted-foreground/70 mb-2.5 font-mono text-2xs font-semibold uppercase tracking-[0.28em]";
 const STRIP_LABEL_CLASS =
-  "text-muted-foreground truncate font-mono text-[11px] font-medium tracking-[0.02em]";
+  "text-muted-foreground truncate font-mono text-2xs font-medium tracking-[0.02em]";
 const STRIP_VALUE_CLASS = "font-mono text-lg font-semibold leading-none";
 
 function StripSection({
@@ -450,19 +473,54 @@ function StripMetric({
   value,
   tone = "gain",
   reason,
-  hasWarning = false,
+  infoText,
+  warningText,
+  boldTerms,
 }: {
   label: string;
   value: number | null;
   tone?: "gain" | "neutral";
   reason?: string;
-  hasWarning?: boolean;
+  infoText: string;
+  warningText?: string | string[];
+  boldTerms?: string[];
 }) {
+  const { t } = useTranslation();
+  const warningItems = metricWarningItems(warningText);
+
   return (
     <div className="flex min-w-0 flex-col items-start gap-2">
       <div className="flex max-w-full items-center gap-1">
         <span className={STRIP_LABEL_CLASS}>{label}</span>
-        {hasWarning && <Icons.AlertTriangle className="text-warning h-3 w-3 shrink-0" />}
+        {warningItems.length > 0 && (
+          <Popover>
+            <PopoverTrigger
+              render={
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="text-warning hover:text-warning h-4 w-4 shrink-0 rounded-full p-0"
+                />
+              }
+            >
+              <Icons.AlertTriangle className="h-3 w-3" />
+              <span className="sr-only">
+                {t("common:component.calculation_note_for", { label })}
+              </span>
+            </PopoverTrigger>
+            <PopoverContent
+              className="w-[34rem] max-w-[calc(100vw-2rem)] p-0 text-sm"
+              side="bottom"
+              align="start"
+            >
+              <MetricInfoPopoverBody
+                infoText={infoText}
+                warningItems={warningItems}
+                boldTerms={boldTerms}
+              />
+            </PopoverContent>
+          </Popover>
+        )}
       </div>
       {value == null && reason ? (
         <span className="text-muted-foreground line-clamp-2 max-w-[12rem] text-xs leading-snug">
@@ -485,15 +543,17 @@ function StripHelpPopover({ items }: { items: StripHelpItem[] }) {
   const { t } = useTranslation();
   return (
     <Popover>
-      <PopoverTrigger asChild>
-        <Button
-          variant="ghost"
-          size="icon"
-          className="text-muted-foreground hover:text-foreground absolute right-0 top-0 h-6 w-6 rounded-full"
-          aria-label={t("performance:help.aria_label")}
-        >
-          <Icons.Info className="h-3.5 w-3.5" />
-        </Button>
+      <PopoverTrigger
+        render={
+          <Button
+            variant="ghost"
+            size="icon"
+            className="text-muted-foreground hover:text-foreground absolute end-0 top-0 h-6 w-6 rounded-full"
+            aria-label={t("performance:help.aria_label")}
+          />
+        }
+      >
+        <Icons.Info className="h-3.5 w-3.5" />
       </PopoverTrigger>
       <PopoverContent className="w-[34rem] max-w-[calc(100vw-2rem)] p-0" side="bottom" align="end">
         <div className="space-y-4 p-5">
@@ -635,6 +695,8 @@ function AttributionDetailMetric({
   labelClassName,
   valueClassName,
   align = "center",
+  warnings,
+  warningTerms,
 }: {
   result: PerformanceResult | null;
   itemName?: string;
@@ -647,6 +709,8 @@ function AttributionDetailMetric({
   labelClassName?: string;
   valueClassName?: string;
   align?: "left" | "center" | "right";
+  warnings: string[];
+  warningTerms: string[];
 }) {
   const { t } = useTranslation();
   const [isOpen, setIsOpen] = useState(false);
@@ -654,6 +718,12 @@ function AttributionDetailMetric({
   if (!result || result.mode === "symbolPriceBased") return null;
   const periodPnl = performancePeriodPnl(result);
   if (periodPnl == null) return null;
+  // A missing mixed-scope return series does not make attributed P&L incomplete.
+  // Keep that warning with the return metric, alongside the existing IRR filter.
+  const attributionWarnings = warnings.filter(
+    (warning) => !warning.startsWith("Return series unavailable for all-time mixed scopes"),
+  );
+  const isPartial = result.summary?.quality === "partial" && attributionWarnings.length > 0;
 
   const currency = result.scope.currency;
   const driverRows: AttributionRow[] = [
@@ -719,7 +789,7 @@ function AttributionDetailMetric({
   const amountNode = (
     <div
       className={cn(
-        "flex items-center gap-1",
+        "flex flex-wrap items-center gap-1",
         align === "left" && "justify-start",
         align === "center" && "justify-center",
         align === "right" && "justify-end",
@@ -730,7 +800,12 @@ function AttributionDetailMetric({
         currency={currency}
         className={cn("text-base font-semibold", sectionTitle && STRIP_VALUE_CLASS, valueClassName)}
       />
-      <Icons.ChevronRight className="text-muted-foreground/60 group-hover:text-muted-foreground h-3.5 w-3.5 shrink-0 transition-all group-hover:translate-x-0.5" />
+      {isPartial && (
+        <Badge variant="warning-subtle" className="text-2xs">
+          {t("performance:attribution.partial_data")}
+        </Badge>
+      )}
+      <Icons.ChevronRight className="text-muted-foreground/60 group-hover:text-muted-foreground h-3.5 w-3.5 shrink-0 transition-all group-hover:translate-x-0.5 rtl:rotate-180 rtl:group-hover:-translate-x-0.5" />
     </div>
   );
 
@@ -743,12 +818,12 @@ function AttributionDetailMetric({
           sectionTitle
             ? cn(
                 STRIP_SECTION_CLASS,
-                "hover:bg-muted/30 group h-auto w-full items-start rounded-none px-0 pl-5 text-left",
+                "hover:bg-muted/30 group h-auto w-full items-start rounded-none px-0 ps-5 text-start",
               )
             : "hover:bg-muted/50 group h-auto w-full min-w-0 rounded-md px-2 py-1",
-          align === "left" && "text-left",
+          align === "left" && "text-start",
           align === "center" && "text-center",
-          align === "right" && "text-right",
+          align === "right" && "text-end",
           className,
         )}
         onClick={() => setIsOpen(true)}
@@ -770,7 +845,7 @@ function AttributionDetailMetric({
       </Button>
 
       <SheetContent
-        side={isMobile ? "bottom" : "right"}
+        side={isMobile ? "bottom" : "inline-end"}
         className={cn(
           "flex w-full flex-col p-0",
           isMobile ? "h-[85vh] rounded-t-3xl" : "h-full sm:max-w-md",
@@ -785,29 +860,49 @@ function AttributionDetailMetric({
                 {[itemName, dateRangeLabel].filter(Boolean).join(" · ")}
               </SheetDescription>
             </div>
-            <SheetClose asChild>
-              <Button
-                variant="ghost"
-                size="icon"
-                className="text-muted-foreground h-8 w-8 shrink-0"
-              >
-                <Icons.X className="h-4 w-4" />
-                <span className="sr-only">{t("performance:attribution.close")}</span>
-              </Button>
+            <SheetClose
+              render={
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="text-muted-foreground h-8 w-8 shrink-0"
+                />
+              }
+            >
+              <Icons.X className="h-4 w-4" />
+              <span className="sr-only">{t("performance:attribution.close")}</span>
             </SheetClose>
           </div>
           <div className="pt-3">
             <div className="text-muted-foreground text-xs font-medium uppercase tracking-wide">
               {t("performance:attribution.period_gain_loss_lower")}
             </div>
-            <AttributionAmount
-              value={periodPnl}
-              currency={currency}
-              className="mt-2 block text-xl font-semibold leading-tight"
-            />
+            <div className="mt-2 flex flex-wrap items-center gap-2">
+              <AttributionAmount
+                value={periodPnl}
+                currency={currency}
+                className="text-xl font-semibold leading-tight"
+              />
+              {isPartial && (
+                <Badge variant="warning-subtle">{t("performance:attribution.partial_data")}</Badge>
+              )}
+            </div>
           </div>
         </SheetHeader>
         <div className="min-h-0 flex-1 overflow-y-auto px-6 py-2">
+          {isPartial && (
+            <div
+              role="note"
+              aria-label={t("performance:attribution.partial_data")}
+              className="py-3.5"
+            >
+              <MetricInfoPopoverBody
+                infoText={t("performance:metric.gain_loss_info")}
+                warningItems={metricWarningItems(attributionWarnings)}
+                boldTerms={warningTerms}
+              />
+            </div>
+          )}
           <div className="py-3.5">
             <div className="text-muted-foreground mb-3 text-xs font-medium uppercase tracking-wide">
               {t("performance:attribution.performance_drivers")}
@@ -864,24 +959,25 @@ function PerformanceContent({
       )}
 
       {!chartData?.length && !isLoading && !hasErrors && (
-        <EmptyPlaceholder
-          className="mx-auto flex max-w-[420px] items-center justify-center"
-          icon={<Icons.BarChart className="h-10 w-10" />}
-          title={t("performance:empty.title")}
-          description={t("performance:empty.description")}
-        />
+        <Empty className="max-w-105 mx-auto flex items-center justify-center">
+          <EmptyHeader>
+            <EmptyMedia variant="icon">{<Icons.BarChart className="size-10" />}</EmptyMedia>
+            <EmptyTitle>{t("performance:empty.title")}</EmptyTitle>
+            <EmptyDescription>{t("performance:empty.description")}</EmptyDescription>
+          </EmptyHeader>
+        </Empty>
       )}
 
       {/* Modern horizontal loader with improved UX */}
       {isLoading && (
         <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center">
           <div className="animate-subtle-pulse absolute inset-0 border-2 border-transparent">
-            <div className="animate-progress-border bg-primary absolute left-0 top-0 h-[2px]"></div>
+            <div className="animate-progress-border bg-primary absolute start-0 top-0 h-[2px] rtl:-scale-x-100"></div>
           </div>
-          <div className="absolute bottom-4 right-4">
+          <div className="absolute bottom-4 end-4">
             <div className="bg-background/80 rounded-md border px-3 py-1.5 shadow-sm backdrop-blur-sm">
               <p className="text-muted-foreground flex items-center text-xs font-medium">
-                <span className="bg-primary mr-2 inline-block h-2 w-2 animate-pulse rounded-full"></span>
+                <span className="bg-primary me-2 inline-block h-2 w-2 animate-pulse rounded-full"></span>
                 {t("performance:calculating")}
               </p>
             </div>
@@ -937,25 +1033,23 @@ const SelectedItemBadge = ({
       className={cn(
         "text-foreground group relative cursor-pointer rounded-md border px-2.5 py-1.5 shadow-sm transition-all sm:px-3",
         "hover:bg-accent/80 hover:shadow-md",
-        "focus-visible:ring-ring focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2",
+        "has-[[data-badge-select]:focus-visible]:ring-ring has-[[data-badge-select]:focus-visible]:ring-2 has-[[data-badge-select]:focus-visible]:ring-offset-2",
         !isPlotted &&
           "text-muted-foreground bg-muted/30 hover:bg-muted/50 border-dashed shadow-none hover:shadow-sm",
-        isSelected && "bg-warning/20 hover:bg-warning/30",
+        isSelected && "bg-warning-subtle hover:bg-warning-subtle/70",
       )}
-      onClick={onSelect}
-      role="button"
       variant="secondary"
-      tabIndex={0}
       title={plotReason}
-      onKeyDown={(e) => {
-        if (e.key === "Enter" || e.key === " ") {
-          e.preventDefault();
-          onSelect();
-        }
-      }}
-      aria-pressed={isSelected}
     >
-      <div className="flex items-center space-x-2 sm:space-x-3">
+      {/* The select button stretches over the whole badge with ::after; the
+          remove button sits beside it rather than inside another control. */}
+      <button
+        type="button"
+        data-badge-select=""
+        onClick={onSelect}
+        aria-pressed={isSelected}
+        className="flex cursor-pointer items-center space-x-2 outline-none after:absolute after:inset-0 after:content-[''] sm:space-x-3"
+      >
         <div
           className={cn(
             "h-3 w-1 rounded-full sm:h-4",
@@ -965,7 +1059,7 @@ const SelectedItemBadge = ({
                 ? "transition-opacity group-hover:opacity-80"
                 : item.type === "account"
                   ? "bg-muted-foreground group-hover:bg-foreground transition-colors"
-                  : "bg-orange-500 transition-colors group-hover:bg-orange-600 dark:bg-orange-400",
+                  : "bg-warning group-hover:bg-warning transition-colors",
           )}
           style={isPlotted && color ? { backgroundColor: color } : undefined}
         />
@@ -973,22 +1067,22 @@ const SelectedItemBadge = ({
           {item.name}
         </span>
         {!isPlotted && (
-          <span className="bg-background/70 text-muted-foreground rounded px-1.5 py-0.5 text-[10px] font-medium">
+          <span className="bg-background/70 text-muted-foreground text-2xs rounded px-1.5 py-0.5 font-medium">
             {t("performance:not_plotted")}
           </span>
         )}
         {isPlotted && contextLabel && (
-          <span className="bg-background/70 text-muted-foreground rounded px-1.5 py-0.5 text-[10px] font-medium">
+          <span className="bg-background/70 text-muted-foreground text-2xs rounded px-1.5 py-0.5 font-medium">
             {contextLabel}
           </span>
         )}
-      </div>
+      </button>
       <Button
         variant="ghost"
         size="icon-xs"
         className={cn(
-          "ml-2 size-5 transition-all duration-150",
-          "hover:bg-destructive/10 hover:text-destructive hover:scale-110",
+          "relative ms-2 size-5 transition-all duration-150",
+          "hover:bg-destructive-subtle hover:text-destructive-subtle-foreground hover:scale-110",
           "focus-visible:ring-destructive/50 focus-visible:ring-2",
         )}
         onClick={onDelete}
@@ -1001,7 +1095,7 @@ const SelectedItemBadge = ({
 };
 
 export default function PerformancePage() {
-  const amountFormatting = useAmountFormatting();
+  const numberFormatting = useNumberFormatting();
 
   const { t } = useTranslation();
   const isMobile = useIsMobileViewport();
@@ -1013,21 +1107,24 @@ export default function PerformancePage() {
     "performance:selectedItemId",
     null,
   );
-  const [dateRange, setDateRange] = usePersistentState<DateRange | undefined>(
+  const { settings } = useSettingsContext();
+  const todayISO = formatZonedDateKey(new Date(), settings?.timezone);
+  const today = useMemo(() => parseLocalDate(todayISO), [todayISO]);
+  const [savedDateRange, setDateRange] = usePersistentState<DateRange | undefined | null>(
     "performance:dateRange",
-    {
-      from: subMonths(new Date(), 12),
-      to: new Date(),
-    },
+    null,
+  );
+  const dateRange = useMemo(
+    () => (savedDateRange === null ? { from: subMonths(today, 12), to: today } : savedDateRange),
+    [savedDateRange, today],
   );
 
   useEffect(() => {
     if (!dateRange?.from || !dateRange?.to) return;
-    const today = new Date();
     if (isSameDay(dateRange.from, subDays(today, 1)) && isSameDay(dateRange.to, today)) {
       setDateRange({ from: subDays(today, 7), to: today });
     }
-  }, [dateRange, setDateRange]);
+  }, [dateRange, setDateRange, today]);
   // Scope selectors include hidden accounts and mixed account types. Resolve
   // their names from the full inventory; the backend applies report eligibility.
   const {
@@ -1211,9 +1308,9 @@ export default function PerformancePage() {
     const rawMoneyWeightedWarnings = rawWarnings.filter(isMoneyWeightedMessage);
     const visibleWarnings = rawWarnings
       .filter((warning) => !isMoneyWeightedMessage(warning))
-      .map((warning) => presentWarning(warning, accountNamesById, amountFormatting));
+      .map((warning) => presentWarning(warning, accountNamesById, numberFormatting));
     const moneyWeightedWarnings = rawMoneyWeightedWarnings.map((warning) =>
-      presentMoneyWeightedWarning(warning, accountNamesById, t, amountFormatting),
+      presentMoneyWeightedWarning(warning, accountNamesById, t, numberFormatting),
     );
     const rawReason = selectedMetricValue == null ? firstNotApplicableReason(found) : undefined;
     const showAnnualizedMoneyWeightedReturn =
@@ -1224,7 +1321,7 @@ export default function PerformancePage() {
     const rawMoneyWeightedReason =
       moneyWeightedReturn == null ? firstMoneyWeightedReason(found) : undefined;
     const presentedMoneyWeightedReason = rawMoneyWeightedReason
-      ? presentMoneyWeightedWarning(rawMoneyWeightedReason, accountNamesById, t, amountFormatting)
+      ? presentMoneyWeightedWarning(rawMoneyWeightedReason, accountNamesById, t, numberFormatting)
       : undefined;
     const moneyWeightedReason =
       presentedMoneyWeightedReason ??
@@ -1287,7 +1384,7 @@ export default function PerformancePage() {
       chartMetric: selectedMetric,
       selectedMetricValue,
       selectedMetricReason: rawReason
-        ? presentWarning(rawReason, accountNamesById, amountFormatting)
+        ? presentWarning(rawReason, accountNamesById, numberFormatting)
         : undefined,
       warningTerms: Array.from(accountNamesById.values()),
       annualizedReturn: annualizedDisplayMetricValue(found, selectedMetric),
@@ -1312,7 +1409,7 @@ export default function PerformancePage() {
       warnings: visibleWarnings,
       notApplicableReasons: found.dataQuality.notApplicableReasons ?? [],
     };
-  }, [selectedPerformanceData, accountNamesById, amountFormatting, t]);
+  }, [selectedPerformanceData, accountNamesById, numberFormatting, t]);
 
   const preserveCurrentChartAnchor = (fallbackId: string) => {
     setSelectedItemId(
@@ -1409,10 +1506,11 @@ export default function PerformancePage() {
 
   return (
     <>
-      {/* Account scope + date range selectors - fixed position in header area */}
-      <div className="pointer-events-auto fixed right-2 top-4 z-20 hidden items-center gap-2 md:flex lg:right-4">
+      {/* Keep tablet filters below the tabs; wide screens have room in the header. */}
+      <div className="pointer-events-auto mb-4 hidden items-center justify-end gap-2 md:flex xl:fixed xl:end-4 xl:top-4 xl:z-20 xl:mb-0">
         <AccountScopeSelector value={accountScope} onChange={setAccountScope} />
         <DateRangeSelector
+          asOf={today}
           value={dateRange}
           onChange={setDateRange}
           hiddenRanges={PERFORMANCE_HIDDEN_DATE_RANGES}
@@ -1423,6 +1521,7 @@ export default function PerformancePage() {
         <div className="flex items-center justify-end gap-2 md:hidden">
           <AccountScopeSelector value={accountScope} onChange={setAccountScope} />
           <DateRangeSelector
+            asOf={today}
             value={dateRange}
             onChange={setDateRange}
             hiddenRanges={PERFORMANCE_HIDDEN_DATE_RANGES}
@@ -1431,21 +1530,22 @@ export default function PerformancePage() {
 
         {/* Mobile: Carousel + Plus button in same row */}
         <div className="flex items-center gap-2 md:hidden">
-          {/* Selected items badges carousel */}
+          {/* Selected items badges carousel. min-w-0 lets it shrink and scroll, so the
+              badges can't push the Plus button off the screen. */}
           {selectedItems.length > 0 && (
             <Carousel
               opts={{
                 align: "start",
                 loop: false,
               }}
-              className="flex-1 touch-pan-x overscroll-x-contain"
+              className="min-w-0 flex-1 touch-pan-x overscroll-x-contain"
               data-no-swipe-drag
             >
-              <CarouselContent className="-ml-2">
+              <CarouselContent className="-ms-2">
                 {selectedItems.map((item) => {
                   const plotState = itemPlotStateById.get(item.id) ?? PLOTTED_ITEM_STATE;
                   return (
-                    <CarouselItem key={item.id} className="basis-auto pl-2">
+                    <CarouselItem key={item.id} className="basis-auto ps-2">
                       <SelectedItemBadge
                         item={item}
                         isSelected={activeChartAnchorId === item.id}
@@ -1469,26 +1569,28 @@ export default function PerformancePage() {
 
           {/* Mobile: Plus button with dropdown */}
           <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <Button
-                variant="outline"
-                size="icon"
-                className="bg-secondary/30 hover:bg-muted/80 size-9 flex-shrink-0 rounded-md border-[1.5px] border-none"
-                aria-label={t("performance:add_item")}
-              >
-                <Icons.Plus className="h-4 w-4" />
-              </Button>
+            <DropdownMenuTrigger
+              render={
+                <Button
+                  variant="outline"
+                  size="icon"
+                  className="bg-secondary/30 hover:bg-muted/80 size-9 flex-shrink-0 rounded-md border-[1.5px] border-none"
+                  aria-label={t("performance:add_item")}
+                />
+              }
+            >
+              <Icons.Plus className="h-4 w-4" />
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="w-48">
-              <DropdownMenuItem onSelect={() => setAccountSheetOpen(true)} className="py-4 md:py-2">
-                <Icons.Briefcase className="mr-2 h-4 w-4" />
+              <DropdownMenuItem onClick={() => setAccountSheetOpen(true)} className="py-4 md:py-2">
+                <Icons.Briefcase className="me-2 h-4 w-4" />
                 {t("performance:add_account")}
               </DropdownMenuItem>
               <DropdownMenuItem
-                onSelect={() => setBenchmarkSheetOpen(true)}
+                onClick={() => setBenchmarkSheetOpen(true)}
                 className="py-4 md:py-2"
               >
-                <Icons.TrendingUp className="mr-2 h-4 w-4" />
+                <Icons.TrendingUp className="me-2 h-4 w-4" />
                 {t("performance:add_benchmark")}
               </DropdownMenuItem>
             </DropdownMenuContent>
@@ -1507,11 +1609,11 @@ export default function PerformancePage() {
                 }}
                 className="w-full max-w-[calc(100vw-24rem)] md:max-w-[calc(100vw-28rem)]"
               >
-                <CarouselContent className="-ml-2">
+                <CarouselContent className="-ms-2">
                   {selectedItems.map((item) => {
                     const plotState = itemPlotStateById.get(item.id) ?? PLOTTED_ITEM_STATE;
                     return (
-                      <CarouselItem key={item.id} className="basis-auto pl-2">
+                      <CarouselItem key={item.id} className="basis-auto ps-2">
                         <SelectedItemBadge
                           item={item}
                           isSelected={activeChartAnchorId === item.id}
@@ -1594,8 +1696,8 @@ export default function PerformancePage() {
                   <CardDescription
                     className={cn(
                       "text-xs sm:text-sm",
-                      !isMobile && "whitespace-nowrap text-right 2xl:text-left",
-                      isMobile && "text-[10px]",
+                      !isMobile && "whitespace-nowrap text-end 2xl:text-start",
+                      isMobile && "text-2xs",
                     )}
                   >
                     {displayDateRange}
@@ -1604,7 +1706,7 @@ export default function PerformancePage() {
                     <Badge
                       variant={selectedItemData.trackingModeBadge.variant}
                       className={cn(
-                        "mt-2 h-5 rounded-md px-1.5 text-[10px] font-medium",
+                        "text-2xs mt-2 h-5 rounded-md px-1.5 font-medium",
                         !isMobile && "col-start-1 mt-1 w-fit 2xl:mt-2",
                       )}
                     >
@@ -1624,8 +1726,8 @@ export default function PerformancePage() {
                         className="w-full touch-pan-x overscroll-x-contain"
                         data-no-swipe-drag
                       >
-                        <CarouselContent className="-ml-2">
-                          <CarouselItem className="basis-[42%] pl-2">
+                        <CarouselContent className="-ms-2">
+                          <CarouselItem className="basis-[42%] ps-2">
                             <div className="bg-muted/30 rounded-lg px-3 py-2">
                               <HeaderMetric
                                 label={
@@ -1641,7 +1743,7 @@ export default function PerformancePage() {
                               />
                             </div>
                           </CarouselItem>
-                          <CarouselItem className="basis-[42%] pl-2">
+                          <CarouselItem className="basis-[42%] ps-2">
                             <div className="bg-muted/30 rounded-lg px-3 py-2">
                               <HeaderMetric
                                 label={
@@ -1658,7 +1760,7 @@ export default function PerformancePage() {
                             </div>
                           </CarouselItem>
                           {selectedItemData?.showMoneyWeightedReturn && (
-                            <CarouselItem className="basis-[42%] pl-2">
+                            <CarouselItem className="basis-[42%] ps-2">
                               <div className="bg-muted/30 rounded-lg px-3 py-2">
                                 <HeaderMetric
                                   label={selectedItemData.moneyWeightedReturnMobileLabel}
@@ -1672,7 +1774,7 @@ export default function PerformancePage() {
                               </div>
                             </CarouselItem>
                           )}
-                          <CarouselItem className="basis-[42%] pl-2">
+                          <CarouselItem className="basis-[42%] ps-2">
                             <div className="bg-muted/30 rounded-lg px-3 py-2">
                               <HeaderMetric
                                 label={t("performance:metric.volatility")}
@@ -1685,7 +1787,7 @@ export default function PerformancePage() {
                               />
                             </div>
                           </CarouselItem>
-                          <CarouselItem className="basis-[42%] pl-2">
+                          <CarouselItem className="basis-[42%] ps-2">
                             <div className="bg-muted/30 rounded-lg px-3 py-2">
                               <HeaderMetric
                                 label={t("performance:metric.max_drawdown")}
@@ -1697,9 +1799,11 @@ export default function PerformancePage() {
                             </div>
                           </CarouselItem>
                           {selectedItemData?.periodPnl != null && (
-                            <CarouselItem className="basis-[52%] pl-2">
+                            <CarouselItem className="basis-[52%] ps-2">
                               <AttributionDetailMetric
                                 result={selectedItemData.result}
+                                warnings={selectedItemData.warnings}
+                                warningTerms={selectedItemData.warningTerms}
                                 itemName={selectedItemData.name}
                                 dateRangeLabel={displayDateRange}
                                 isMobile={isMobile}
@@ -1712,7 +1816,7 @@ export default function PerformancePage() {
                         </CarouselContent>
                       </Carousel>
                     ) : (
-                      <div className="relative w-full overflow-x-auto pb-1 pr-8 2xl:w-auto 2xl:overflow-visible">
+                      <div className="relative w-full overflow-x-auto pb-1 pe-8 2xl:w-auto 2xl:overflow-visible">
                         {selectedItemData && (
                           <StripHelpPopover items={selectedItemData.helpItems} />
                         )}
@@ -1735,24 +1839,29 @@ export default function PerformancePage() {
                                 label={stripReturnLabel(selectedItemData?.label, t)}
                                 value={selectedItemData?.selectedMetricValue ?? null}
                                 reason={selectedItemData?.selectedMetricReason}
-                                hasWarning={Boolean(
-                                  selectedItemData?.returnWarnings.length ||
-                                  selectedItemData?.selectedMetricReason,
-                                )}
+                                infoText={selectedItemData?.infoText ?? SIMPLE_RETURN_INFO}
+                                warningText={[
+                                  ...(selectedItemData?.returnWarnings ?? []),
+                                  ...(selectedItemData?.selectedMetricReason
+                                    ? [selectedItemData.selectedMetricReason]
+                                    : []),
+                                ]}
+                                boldTerms={selectedItemData?.warningTerms}
                               />
                               {selectedItemData?.showMoneyWeightedReturn && (
                                 <StripMetric
                                   label={selectedItemData.moneyWeightedReturnLabel}
                                   value={selectedItemData.moneyWeightedReturn}
                                   reason={selectedItemData.moneyWeightedReason}
-                                  hasWarning={Boolean(
-                                    selectedItemData.moneyWeightedWarnings.length,
-                                  )}
+                                  infoText={MONEY_WEIGHTED_RETURN_INFO}
+                                  warningText={selectedItemData.moneyWeightedWarnings}
+                                  boldTerms={selectedItemData.warningTerms}
                                 />
                               )}
                               <StripMetric
                                 label={t("performance:metric.annualized_short")}
                                 value={selectedItemData?.annualizedReturn ?? null}
+                                infoText={annualizedReturnInfo}
                               />
                             </div>
                           </StripSection>
@@ -1763,11 +1872,14 @@ export default function PerformancePage() {
                                 label={t("performance:metric.volatility")}
                                 value={selectedItemData?.volatility ?? null}
                                 tone="neutral"
-                                hasWarning={Boolean(selectedItemData?.volatilityWarnings.length)}
+                                infoText={volatilityInfo}
+                                warningText={selectedItemData?.volatilityWarnings}
+                                boldTerms={selectedItemData?.warningTerms}
                               />
                               <StripMetric
                                 label={t("performance:metric.max_drawdown_short")}
                                 value={selectedItemData?.maxDrawdown ?? null}
+                                infoText={maxDrawdownInfo}
                               />
                             </div>
                           </StripSection>
@@ -1775,6 +1887,8 @@ export default function PerformancePage() {
                           {selectedItemData?.periodPnl != null && (
                             <AttributionDetailMetric
                               result={selectedItemData.result}
+                              warnings={selectedItemData.warnings}
+                              warningTerms={selectedItemData.warningTerms}
                               itemName={selectedItemData.name}
                               dateRangeLabel={displayDateRange}
                               isMobile={isMobile}

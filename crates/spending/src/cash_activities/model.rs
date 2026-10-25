@@ -85,6 +85,10 @@ pub struct CashActivitySearchRequest {
     pub offset: usize,
     #[serde(default = "default_limit")]
     pub limit: usize,
+    /// Ask for the cash balance after each row. Filled only when the search
+    /// covers exactly one cash or credit-card account that holds no securities.
+    #[serde(default)]
+    pub include_cash_balances: bool,
 }
 
 fn default_limit() -> usize {
@@ -156,6 +160,26 @@ pub struct CashActivity {
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub net_amount_base: Option<f64>,
+    /// Signed contribution of this row to spending totals, in the row's own
+    /// currency: the spending-bucket amount (positive for charges, negative
+    /// for refunds) with the portions allocated to excluded categories
+    /// removed. Zero for non-spending rows and for rows whose every
+    /// allocation is excluded; uncategorized spend is never excluded.
+    /// Computed with the same allocator and `ExclusionIndex` as the
+    /// insight/report aggregates, so visuals built client-side from rows
+    /// agree with the server headline without re-deriving either rule.
+    #[serde(default)]
+    pub visible_spending_amount: f64,
+    /// The cash of this row's account after the row, in
+    /// `cash_balance_currency`: filled only when the search asked for balances
+    /// and covers exactly one cash or credit-card account that holds no
+    /// securities. Taken from the account's whole history, before any filter.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cash_balance: Option<String>,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cash_balance_currency: Option<String>,
 }
 
 /// A signed net in one currency.

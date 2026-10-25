@@ -89,6 +89,9 @@ const PRESET_JSONS: &[(&str, &str)] = &[
     ("ca", include_str!("../../seeds/presets/ca.json")),
     ("gb", include_str!("../../seeds/presets/gb.json")),
     ("es", include_str!("../../seeds/presets/es.json")),
+    ("de", include_str!("../../seeds/presets/de.json")),
+    ("fr", include_str!("../../seeds/presets/fr.json")),
+    ("nl", include_str!("../../seeds/presets/nl.json")),
     ("au", include_str!("../../seeds/presets/au.json")),
     ("nz", include_str!("../../seeds/presets/nz.json")),
     ("se", include_str!("../../seeds/presets/se.json")),
@@ -150,12 +153,11 @@ mod tests {
     use super::*;
     use crate::categorization_rules::{match_rules, CategorizationRule, RuleMatchType};
     use chrono::Utc;
-    use regex::Regex;
 
-    fn match_swedish_preset(notes: &str) -> Option<String> {
+    fn match_preset(preset_id: &str, notes: &str) -> Option<String> {
         let now = Utc::now().naive_utc();
-        let rules = load_preset("se")
-            .expect("Swedish preset should load")
+        let rules = load_preset(preset_id)
+            .expect("preset should load")
             .rules
             .into_iter()
             .map(|rule| CategorizationRule {
@@ -173,7 +175,7 @@ mod tests {
                 priority: rule.priority,
                 is_global: true,
                 account_id: None,
-                preset_id: Some("se".to_string()),
+                preset_id: Some(preset_id.to_string()),
                 preset_rule_key: None,
                 preset_version: None,
                 preset_modified: false,
@@ -186,9 +188,177 @@ mod tests {
             .and_then(|matched| matched.rule.category_id.clone())
     }
 
+    fn match_swedish_preset(notes: &str) -> Option<String> {
+        match_preset("se", notes)
+    }
+
+    #[test]
+    fn french_bakeries_do_not_match_electronics_retailer() {
+        for notes in ["CB BOULANGERIE DU CENTRE", "CB BOULANGERIE ANGE"] {
+            assert_eq!(
+                match_preset("fr", notes).as_deref(),
+                Some("food_coffee"),
+                "{notes}"
+            );
+        }
+        assert_eq!(
+            match_preset("fr", "CB BOULANGER").as_deref(),
+            Some("shopping_electronics")
+        );
+    }
+
+    #[test]
+    fn french_transaction_descriptors_do_not_match_action_retailer() {
+        for (notes, category) in [
+            ("TRANSACTION AMAZON", "shopping_online"),
+            ("TRANSACTION MCDONALDS", "food_restaurants"),
+            ("CB ACTION", "shopping_home"),
+        ] {
+            assert_eq!(
+                match_preset("fr", notes).as_deref(),
+                Some(category),
+                "{notes}"
+            );
+        }
+        assert_eq!(match_preset("fr", "TRANSACTION 123"), None);
+    }
+
+    #[test]
+    fn french_additional_merchants_match_specific_categories() {
+        for (notes, category) in [
+            ("cb naturalia paris", "groceries"),
+            ("CB La Vie Claire", "groceries"),
+            ("PRLV HELLOFRESH", "groceries"),
+            ("CB HELLO FRESH", "groceries"),
+            ("CB QUITOQUE", "groceries"),
+            ("CB FLIXBUS", "transport_public"),
+            ("CB BLABLACAR BUS", "transport_public"),
+            ("CB BLABLACARBUS", "transport_public"),
+            ("CB OUIBUS", "transport_public"),
+            ("CB BIOGROUP LCD", "health_medical"),
+            ("CB CERBALLIANCE", "health_medical"),
+        ] {
+            assert_eq!(
+                match_preset("fr", notes).as_deref(),
+                Some(category),
+                "{notes}"
+            );
+        }
+    }
+
+    #[test]
+    fn french_additional_merchants_require_complete_names() {
+        for notes in [
+            "NATURALIANA",
+            "LA VIE CLAIREMENT",
+            "HELLOFRESHNESS",
+            "QUITOQUETTE",
+            "FLIXBUSINESS",
+            "BLABLACAR BUSINESS",
+            "BLABLACAR",
+            "OUIBUSINESS",
+            "BIOGROUPAGE",
+            "CERBALLIANCES",
+        ] {
+            assert_eq!(match_preset("fr", notes), None, "{notes}");
+        }
+    }
+
+    #[test]
+    fn dutch_merchants_match_specific_categories() {
+        for (notes, category) in [
+            ("BEA, Betaalpas ALBERT HEIJN 1234,PAS123", "groceries"),
+            ("Jumbo Utrecht", "groceries"),
+            ("NS GROEP IZ NS REIZIGERS", "transport_public"),
+            ("Q-Park Nederland", "transport_parking"),
+            ("Eneco Services", "housing_utilities"),
+            ("Gemeentelijke belastingen Amsterdam", "housing_utilities"),
+            ("Zilveren Kruis Zorgverzekeringen", "health_insurance"),
+            ("Ziggo Services BV", "bills_internet"),
+            ("Thuisbezorgd.nl", "food_delivery"),
+            ("Kosten OranjePakket", "fees_bank"),
+            ("Coolblue BV", "shopping_electronics"),
+            ("Basic-Fit Nederland", "health_fitness"),
+            ("NS-Utrecht Centraal 123 UTRECHT NLD", "transport_public"),
+            ("Rabobank Hypotheken", "housing_rent"),
+            ("BENU Apotheken", "health_pharmacy"),
+            ("AH to go Schiphol", "groceries"),
+        ] {
+            assert_eq!(
+                match_preset("nl", notes).as_deref(),
+                Some(category),
+                "{notes}"
+            );
+        }
+    }
+
+    #[test]
+    fn dutch_merchants_require_complete_names() {
+        for notes in [
+            "JUMBOREE",
+            "SPARTA ROTTERDAM",
+            "TRANSACTION 123",
+            "PICNICTAFEL",
+            "HUUR FIETS",
+            "GAMMASTRALING",
+            "Example BV SCHIPHOL RIJK",
+        ] {
+            assert_eq!(match_preset("nl", notes), None, "{notes}");
+        }
+    }
+
+    #[test]
+    fn german_merchants_match_specific_categories() {
+        for (notes, category) in [
+            ("VISA REWE Markt GmbH", "groceries"),
+            ("NETTO MARKEN-DISCOUNT", "groceries"),
+            ("PENNY.Markt GmbH", "groceries"),
+            ("DB Vertrieb GmbH", "transport_public"),
+            ("Stadtwerke Muenster GmbH", "housing_utilities"),
+            (
+                "ARD ZDF Deutschlandradio Beitragsservice",
+                "housing_utilities",
+            ),
+            ("Techniker Krankenkasse", "health_insurance"),
+            ("Telekom Deutschland GmbH", "bills_phone"),
+            ("Lieferando.de", "food_delivery"),
+            ("Entgelt fuer Kontofuehrung", "fees_bank"),
+            ("dm-drogerie markt", "health_pharmacy"),
+            ("Baeckerei Mueller", "food_coffee"),
+            ("Vodafone Kabel Deutschland GmbH", "bills_internet"),
+            ("EnBW mobility+ AG", "transport_gas"),
+            ("Burger King Flughafen Muenchen", "food_restaurants"),
+            ("H&M Flughafen Frankfurt", "shopping_clothing"),
+            ("Entgelt fuer Girocard", "fees_bank"),
+        ] {
+            assert_eq!(
+                match_preset("de", notes).as_deref(),
+                Some(category),
+                "{notes}"
+            );
+        }
+    }
+
+    #[test]
+    fn german_merchants_require_complete_names() {
+        for notes in [
+            "NETTOBETRAG",
+            "Netto 123,45 EUR",
+            "PENNYWISE",
+            "OTTO MUELLER",
+            "DEPOT WERTPAPIERE",
+            "ROLLER LEIHE",
+            "REWEB DESIGN",
+            "Kiosk Flughafen Hamburg",
+            "Entgelt fuer Stellplatz",
+        ] {
+            assert_eq!(match_preset("de", notes), None, "{notes}");
+        }
+    }
+
     #[test]
     fn bundled_presets_have_unique_keys_and_valid_regexes() {
-        for preset_id in ["us", "ca", "gb", "es", "au", "nz", "se"] {
+        for preset_id in ["us", "ca", "gb", "es", "de", "fr", "nl", "au", "nz", "se"] {
             let preset = load_preset(preset_id).expect("preset should load");
             assert_eq!(preset.preset_id, preset_id);
             assert!(!preset.rules.is_empty(), "preset {preset_id} has no rules");
@@ -214,12 +384,13 @@ mod tests {
                     rule.key
                 );
                 if rule.match_type == "regex" {
-                    Regex::new(&rule.pattern).unwrap_or_else(|err| {
-                        panic!(
-                            "invalid regex in preset {} rule {}: {}",
-                            preset.preset_id, rule.key, err
-                        )
-                    });
+                    crate::categorization_rules::compile_regex_pattern(&rule.pattern)
+                        .unwrap_or_else(|err| {
+                            panic!(
+                                "invalid regex in preset {} rule {}: {}",
+                                preset.preset_id, rule.key, err
+                            )
+                        });
                 }
             }
         }

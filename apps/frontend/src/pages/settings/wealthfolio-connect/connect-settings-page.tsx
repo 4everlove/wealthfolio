@@ -1,5 +1,6 @@
+import { ConnectSessionUnavailable } from "@/features/wealthfolio-connect/components/connect-session-unavailable";
 import { ConnectedView, LoginForm, useWealthfolioConnect } from "@/features/wealthfolio-connect";
-import { Card, CardDescription, CardHeader, CardTitle } from "@wealthfolio/ui";
+import { Card, CardDescription, CardHeader, CardTitle, Spinner } from "@wealthfolio/ui";
 import { Icons } from "@wealthfolio/ui/components/ui/icons";
 import { Separator } from "@wealthfolio/ui/components/ui/separator";
 import { useTranslation } from "react-i18next";
@@ -7,7 +8,7 @@ import { SettingsHeader } from "../settings-header";
 
 export default function ConnectSettingsPage() {
   const { t } = useTranslation();
-  const { isEnabled, isConnected, isInitializing } = useWealthfolioConnect();
+  const { isEnabled, isConnected, isInitializing, isSessionUnavailable } = useWealthfolioConnect();
 
   // Show "not configured" state when Connect feature is disabled
   if (!isEnabled) {
@@ -40,7 +41,7 @@ export default function ConnectSettingsPage() {
         />
         <Separator />
         <div className="flex items-center justify-center py-12">
-          <Icons.Spinner className="text-muted-foreground h-8 w-8 animate-spin" />
+          <Spinner className="text-muted-foreground h-8 w-8" />
         </div>
       </div>
     );
@@ -53,7 +54,13 @@ export default function ConnectSettingsPage() {
         text={t("settings:connect_description_full")}
       />
       <Separator />
-      {isConnected ? <ConnectedView /> : <LoginForm />}
+      {isSessionUnavailable ? (
+        <ConnectSessionUnavailable />
+      ) : isConnected ? (
+        <ConnectedView />
+      ) : (
+        <LoginForm />
+      )}
     </div>
   );
 }

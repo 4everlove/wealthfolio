@@ -5,13 +5,18 @@ import { toast } from "sonner";
 
 import {
   Button,
-  EmptyPlaceholder,
   Icons,
   Skeleton,
   Tabs,
   TabsContent,
   TabsList,
   TabsTrigger,
+  Empty,
+  EmptyHeader,
+  EmptyMedia,
+  EmptyTitle,
+  EmptyDescription,
+  EmptyContent,
 } from "@wealthfolio/ui";
 import {
   useCreateCategory,
@@ -24,7 +29,10 @@ import type { TaxonomyCategory } from "@/lib/types";
 import { CategoryEditModal } from "@/features/spending/components/category-edit-modal";
 import { CategoryItem, type CategoryNode } from "@/features/spending/components/category-item";
 import type { CategoryFormValues } from "@/features/spending/components/category-form";
-import { useSpendingSettings } from "@/features/spending/hooks/use-spending-settings";
+import {
+  useSpendingSettings,
+  useSpendingSettingsMutation,
+} from "@/features/spending/hooks/use-spending-settings";
 
 import { SettingsHeader } from "../../settings-header";
 import { SpendingBackLink } from "../components/spending-back-link";
@@ -49,7 +57,8 @@ function buildTree(categories: TaxonomyCategory[]): CategoryNode[] {
 
 export default function SpendingCategoriesPage() {
   const { t } = useTranslation();
-  const { isEnabled, isLoading: settingsLoading } = useSpendingSettings();
+  const { isEnabled, isLoading: settingsLoading, excludedCategoryIds } = useSpendingSettings();
+  const settingsMutation = useSpendingSettingsMutation({ silent: true });
   const [searchParams, setSearchParams] = useSearchParams();
 
   const spending = useTaxonomy(SPENDING_TAXONOMY);
@@ -58,6 +67,8 @@ export default function SpendingCategoriesPage() {
   const createCategory = useCreateCategory();
   const updateCategory = useUpdateCategory();
   const deleteCategory = useDeleteCategory();
+
+  const excludedIds = useMemo(() => new Set(excludedCategoryIds), [excludedCategoryIds]);
 
   // URL is the source of truth for the active tab — no mirrored state, no sync effect.
   const activeTab: "expense" | "income" | "savings" =
@@ -81,6 +92,9 @@ export default function SpendingCategoriesPage() {
 
   const [visibleModal, setVisibleModal] = useState(false);
   const [selectedCategory, setSelectedCategory] = useState<CategoryNode | undefined>();
+  // Inherited exclusion of the row being edited, reported by the tree so the
+  // dialog needs no ancestor walk of its own.
+  const [selectedParentExcluded, setSelectedParentExcluded] = useState(false);
   const [parentCategory, setParentCategory] = useState<CategoryNode | undefined>();
 
   const expenseTree = useMemo(
@@ -120,8 +134,9 @@ export default function SpendingCategoriesPage() {
     setVisibleModal(true);
   };
 
-  const handleEditCategory = (category: CategoryNode) => {
+  const handleEditCategory = (category: CategoryNode, parentExcluded = false) => {
     setSelectedCategory(category);
+    setSelectedParentExcluded(parentExcluded);
     setParentCategory(undefined);
     setVisibleModal(true);
   };
@@ -143,23 +158,34 @@ export default function SpendingCategoriesPage() {
       .replace(/[^a-z0-9]+/g, "_")
       .replace(/^_+|_+$/g, "");
 
-  const handleSave = (values: CategoryFormValues) => {
+  const handleSave = async (values: CategoryFormValues) => {
     if (selectedCategory) {
-      updateCategory.mutate(
-        {
+      // Exclusion lives in spending settings, not the taxonomy record, so a
+      // save can be two writes. Do the settings write first and only report
+      // once both landed: if either fails the dialog stays open with its
+      // values, and a retry skips whichever half already succeeded.
+      const exclusionChanged =
+        selectedCategory.taxonomyId === SPENDING_TAXONOMY &&
+        values.excluded !== undefined &&
+        values.excluded !== excludedIds.has(selectedCategory.id);
+      try {
+        if (exclusionChanged) {
+          const nextIds = values.excluded
+            ? Array.from(new Set([...excludedCategoryIds, selectedCategory.id]))
+            : excludedCategoryIds.filter((id) => id !== selectedCategory.id);
+          await settingsMutation.mutateAsync({ excludedCategoryIds: nextIds });
+        }
+        await updateCategory.mutateAsync({
           ...selectedCategory,
           name: values.name,
           color: values.color ?? selectedCategory.color,
           icon: values.icon ?? null,
-        },
-        {
-          onSuccess: () => {
-            toast.success(t("settings:spending.categories.updated"));
-            setVisibleModal(false);
-          },
-          onError: () => toast.error(t("settings:spending.categories.update_error")),
-        },
-      );
+        });
+        toast.success(t("settings:spending.categories.updated"));
+        setVisibleModal(false);
+      } catch {
+        toast.error(t("settings:spending.categories.update_error"));
+      }
     } else {
       const taxonomyId = parentCategory ? parentCategory.taxonomyId : activeTaxonomyId;
       createCategory.mutate(
@@ -183,7 +209,7 @@ export default function SpendingCategoriesPage() {
     }
   };
 
-  const renderCategoryList = (categoryList: CategoryNode[]) => {
+  const renderCategoryList = (categoryList: CategoryNode[], isExpenseList = false) => {
     if (categoryList.length === 0) {
       return (
         <div className="text-muted-foreground py-8 text-center text-sm">
@@ -202,6 +228,7 @@ export default function SpendingCategoriesPage() {
             onEdit={handleEditCategory}
             onDelete={handleDeleteCategory}
             onAddSubcategory={handleAddSubcategory}
+            excludedIds={isExpenseList ? excludedIds : undefined}
           />
         ))}
       </div>
@@ -227,7 +254,7 @@ export default function SpendingCategoriesPage() {
             <Icons.Plus className="h-3.5 w-3.5" />
           </Button>
           <Button size="sm" className="hidden sm:inline-flex" onClick={handleAddCategory}>
-            <Icons.Plus className="mr-2 h-3.5 w-3.5" />
+            <Icons.Plus className="me-2 h-3.5 w-3.5" />
             {t("settings:spending.categories.add")}
           </Button>
         </SettingsHeader>
@@ -239,19 +266,23 @@ export default function SpendingCategoriesPage() {
             <Skeleton className="h-12 w-full" />
           </div>
         ) : total === 0 ? (
-          <EmptyPlaceholder>
-            <EmptyPlaceholder.Icon name="Tag" />
-            <EmptyPlaceholder.Title>
-              {t("settings:spending.categories.empty_title")}
-            </EmptyPlaceholder.Title>
-            <EmptyPlaceholder.Description>
-              {t("settings:spending.categories.empty_description")}
-            </EmptyPlaceholder.Description>
-            <Button onClick={handleAddCategory}>
-              <Icons.Plus className="mr-2 h-4 w-4" />
-              {t("settings:spending.categories.add")}
-            </Button>
-          </EmptyPlaceholder>
+          <Empty>
+            <EmptyHeader>
+              <EmptyMedia variant="icon">
+                <Icons.Tag />
+              </EmptyMedia>
+              <EmptyTitle>{t("settings:spending.categories.empty_title")}</EmptyTitle>
+              <EmptyDescription>
+                {t("settings:spending.categories.empty_description")}
+              </EmptyDescription>
+            </EmptyHeader>
+            <EmptyContent>
+              <Button onClick={handleAddCategory}>
+                <Icons.Plus className="me-2 h-4 w-4" />
+                {t("settings:spending.categories.add")}
+              </Button>
+            </EmptyContent>
+          </Empty>
         ) : (
           <Tabs value={activeTab} onValueChange={handleTabChange} className="w-full">
             <TabsList className="grid w-full max-w-md grid-cols-3">
@@ -266,7 +297,7 @@ export default function SpendingCategoriesPage() {
               </TabsTrigger>
             </TabsList>
             <TabsContent value="expense" className="mt-6">
-              {renderCategoryList(expenseTree)}
+              {renderCategoryList(expenseTree, true)}
             </TabsContent>
             <TabsContent value="income" className="mt-6">
               {renderCategoryList(incomeTree)}
@@ -284,7 +315,12 @@ export default function SpendingCategoriesPage() {
         category={selectedCategory}
         parentCategory={parentCategory}
         onSave={handleSave}
-        isLoading={createCategory.isPending || updateCategory.isPending}
+        isLoading={
+          createCategory.isPending || updateCategory.isPending || settingsMutation.isPending
+        }
+        showExcludeToggle={!!selectedCategory && selectedCategory.taxonomyId === SPENDING_TAXONOMY}
+        initialExcluded={!!selectedCategory && excludedIds.has(selectedCategory.id)}
+        parentExcluded={selectedParentExcluded}
       />
     </>
   );

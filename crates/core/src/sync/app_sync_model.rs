@@ -80,10 +80,10 @@ pub const APP_SYNC_TABLES: &[&str] = &[
     "allocation_target_constraints",
 ];
 
-/// Schema version stamped on uploaded snapshots. Bumped to 2 when `asset_logos`
-/// joined `APP_SYNC_TABLES`; older clients refuse newer snapshots so a device never
-/// bootstraps from a snapshot missing a table it expects.
-pub const SNAPSHOT_SCHEMA_VERSION: i32 = 2;
+/// Schema version stamped on uploaded snapshots. Version 4 uses compressed binary
+/// encryption and includes broker holdings, activities and their import records.
+/// Older clients must not restore it with their manual-only import filters.
+pub const SNAPSHOT_SCHEMA_VERSION: i32 = 4;
 
 /// A remote snapshot is reusable only when it covers the required event cursor
 /// and contains at least the schema required by the local client.
@@ -130,6 +130,8 @@ pub enum SyncEntity {
     // would clash with the codebase's existing event-system vocabulary
     // (DomainEvent, EventBus, sync_applied_events, etc.).
     SpendingSetting,
+    /// Allowlisted cross-device UI preferences stored in app_settings.
+    AppPreference,
     ActivityTaxonomyAssignment,
     SpendingActivitySplit,
     SpendingActivityEvent,
@@ -145,6 +147,61 @@ pub enum SyncEntity {
     AddonStorage,
     // Custom asset logo override (PK asset_id). Pure LWW, generic apply.
     AssetLogo,
+}
+
+impl SyncEntity {
+    /// Whether this entity's IDs are derived from natural or user keys (an
+    /// account and a date, an activity and a taxonomy, a setting key), so a
+    /// deleted ID can legitimately be written again.
+    ///
+    /// Replay resolves every operation on these entities by last-writer-wins:
+    /// a delete is one more write to the key. The other entities get random IDs
+    /// that never come back, so replay keeps their deletes permanent and treats
+    /// a later write to a deleted ID as a stale edit.
+    pub fn reuses_entity_ids(self) -> bool {
+        match self {
+            SyncEntity::Quote
+            | SyncEntity::BrokerActivityUserPatch
+            | SyncEntity::ImportTemplate
+            | SyncEntity::GoalPlan
+            | SyncEntity::Snapshot
+            | SyncEntity::PortfolioAccount
+            | SyncEntity::SpendingSetting
+            | SyncEntity::AppPreference
+            | SyncEntity::ActivityTaxonomyAssignment
+            | SyncEntity::SpendingActivityEvent
+            | SyncEntity::SpendingCategorizationRule
+            | SyncEntity::SpendingPresetRuleDeletion
+            | SyncEntity::BudgetGroupAssignment
+            | SyncEntity::BudgetTarget
+            | SyncEntity::BudgetRolloverSetting
+            | SyncEntity::AddonStorage
+            | SyncEntity::AssetLogo => true,
+            SyncEntity::Account
+            | SyncEntity::Asset
+            | SyncEntity::AssetTaxonomyAssignment
+            | SyncEntity::Activity
+            | SyncEntity::ActivityImportProfile
+            | SyncEntity::Goal
+            | SyncEntity::GoalsAllocation
+            | SyncEntity::AiThread
+            | SyncEntity::AiMessage
+            | SyncEntity::AiThreadTag
+            | SyncEntity::ContributionLimit
+            | SyncEntity::Platform
+            | SyncEntity::CustomProvider
+            | SyncEntity::CustomTaxonomy
+            | SyncEntity::ImportRun
+            | SyncEntity::Portfolio
+            | SyncEntity::AllocationTarget
+            | SyncEntity::AllocationTargetWeight
+            | SyncEntity::AllocationTargetConstraint
+            | SyncEntity::SpendingActivitySplit
+            | SyncEntity::SpendingEvent
+            | SyncEntity::SpendingEventType
+            | SyncEntity::BudgetGroup => false,
+        }
+    }
 }
 
 /// Supported sync operations.
@@ -314,7 +371,9 @@ pub trait EntitySyncAdapter: Send + Sync {
 
 #[cfg(test)]
 mod tests {
-    use super::{should_apply_lww, snapshot_covers_cursor_and_schema, SyncEntity};
+    use super::{
+        should_apply_lww, snapshot_covers_cursor_and_schema, SyncEntity, SNAPSHOT_SCHEMA_VERSION,
+    };
 
     #[test]
     fn snapshot_reuse_requires_current_cursor_and_schema() {
@@ -323,6 +382,13 @@ mod tests {
         assert!(snapshot_covers_cursor_and_schema(11, 3, 10, 2));
         assert!(!snapshot_covers_cursor_and_schema(9, 2, 10, 2));
         assert!(!snapshot_covers_cursor_and_schema(11, 1, 10, 2));
+        // A snapshot predating broker data inclusion must not be reused.
+        assert!(!snapshot_covers_cursor_and_schema(
+            11,
+            3,
+            10,
+            SNAPSHOT_SCHEMA_VERSION
+        ));
     }
 
     #[test]
@@ -383,6 +449,7 @@ mod tests {
             SyncEntity::AllocationTargetWeight,
             SyncEntity::AllocationTargetConstraint,
             SyncEntity::SpendingSetting,
+            SyncEntity::AppPreference,
             SyncEntity::ActivityTaxonomyAssignment,
             SyncEntity::SpendingActivitySplit,
             SyncEntity::SpendingActivityEvent,
@@ -427,6 +494,7 @@ mod tests {
             "\"allocation_target_weight\"",
             "\"allocation_target_constraint\"",
             "\"spending_setting\"",
+            "\"app_preference\"",
             "\"activity_taxonomy_assignment\"",
             "\"spending_activity_split\"",
             "\"spending_activity_event\"",

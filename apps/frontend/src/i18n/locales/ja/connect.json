@@ -1,4 +1,5 @@
 {
+  "opensInBrowser": "ブラウザで開きます",
   "page": {
     "title": "同期と連携",
     "subtitle": "すべてのデバイスを一元管理。",
@@ -13,7 +14,10 @@
     "noDevicesSyncing": "同期中のデバイスはありません",
     "noDevicesDescription": "設定でデバイス同期を有効にすると、複数のデバイス間でデータを同期できます。",
     "noActivity": "更新はまだありません",
-    "noActivityDescription": "データの同期が始まると、ここに更新内容が表示されます。"
+    "noActivityDescription": "データの同期が始まると、ここに更新内容が表示されます。",
+    "showMore_one": "さらに{{count}}件を表示",
+    "showMore_other": "さらに{{count}}件を表示",
+    "showLess": "表示を減らす"
   },
   "emptyState": {
     "optional": "任意",
@@ -23,20 +27,21 @@
     "learnMore": "Connectについて詳しく見る",
     "features": {
       "brokerageSync": {
-        "title": "証券会社の同期",
-        "description": "口座と取引を毎日自動で同期します。"
+        "title": "接続された口座",
+        "description": "証券会社の取引を自動的に同期。"
       },
       "deviceSync": {
-        "title": "デバイス同期",
-        "description": "E2E暗号化で複数のデバイス間を同期します。"
+        "title": "デバイス同期とバックアップ",
+        "description": "エンドツーエンド暗号化による同期と自動クラウドバックアップ。"
       },
       "householdView": {
-        "title": "世帯ビュー",
-        "description": "家族と口座を共有できます。"
+        "title": "家族のポートフォリオ",
+        "description": "家族の投資を共有ビューで確認。"
       }
     }
   },
   "flow": {
+    "aggregatorExample": "（例：SnapTrade）",
     "yourDevice": "お使いのデバイス",
     "localDatabase": "ローカルデータベース",
     "dataStaysHere": "データはここに保存されます",
@@ -69,7 +74,8 @@
     "noDataYet": "データがありません",
     "dataAsOf": "{{date}}時点のデータ",
     "emptyTitle": "同期済みの口座はまだありません",
-    "emptyDescription": "証券会社を連携すると、口座の同期を開始できます。"
+    "emptyDescription": "証券会社を連携すると、口座の同期を開始できます。",
+    "needsSetup": "要設定"
   },
   "connections": {
     "title": "証券会社の連携",
@@ -86,7 +92,11 @@
     "accountsSyncing_one": "{{count}}件の口座を同期中",
     "accountsSyncing_other": "{{count}}件の口座を同期中",
     "partialSyncing_one": "{{total}}件中{{syncing}}件の口座を同期中 · {{excluded}}件を除外",
-    "partialSyncing_other": "{{total}}件中{{syncing}}件の口座を同期中 · {{excluded}}件を除外"
+    "partialSyncing_other": "{{total}}件中{{syncing}}件の口座を同期中 · {{excluded}}件を除外",
+    "accountCount_one": "{{count}}件の口座",
+    "accountCount_other": "{{count}}件の口座",
+    "excludedCount_one": "{{count}}件を除外",
+    "excludedCount_other": "{{count}}件を除外"
   },
   "sync": {
     "syncNow": "今すぐ同期",
@@ -178,20 +188,33 @@
   "attention": {
     "title": "証券会社の同期に対応が必要です",
     "description_one": "{{count}}件の口座で再試行または証券会社側の確認が必要です。",
-    "description_other": "{{count}}件の口座で再試行または証券会社側の確認が必要です。"
+    "description_other": "{{count}}件の口座で再試行または証券会社側の確認が必要です。",
+    "heading": "対応が必要",
+    "connectionLost": "接続が切れました",
+    "accountsNotSyncing_one": "{{count}}件の口座が同期されていません",
+    "accountsNotSyncing_other": "{{count}}件の口座が同期されていません",
+    "syncFailed": "前回の同期に失敗しました"
   },
   "setup": {
     "newAccountsTitle": "新しい口座の設定が必要です",
     "newAccountsDescription_one": "同期を開始する前に、{{count}}件の口座で簡単な設定が必要です。",
     "newAccountsDescription_other": "同期を開始する前に、{{count}}件の口座で簡単な設定が必要です。",
-    "reviewAccounts": "口座を確認"
+    "reviewAccounts": "口座を確認",
+    "setUp": "設定"
   },
   "devices": {
     "thisDevice": "このデバイス",
     "activeNow": "現在利用中",
     "lastSeen": "最終接続 {{time}}",
     "online": "オンライン",
-    "never": "なし"
+    "never": "なし",
+    "showInactive_one": "非アクティブなデバイス{{count}}台を表示",
+    "showInactive_other": "非アクティブなデバイス{{count}}台を表示",
+    "hideInactive": "非アクティブなデバイスを隠す",
+    "platforms": {
+      "server": "サーバー",
+      "web": "Web"
+    }
   },
   "deviceStatus": {
     "syncError": "同期エラー",
@@ -220,6 +243,10 @@
     "lastUsed": "前回使用"
   },
   "subscription": {
+    "copySupportEmail": "サポートのメールアドレスをコピー",
+    "syncPausedTooltip": "同期は一時停止中です — 有効なサブスクリプションが必要です",
+    "syncPausedTitle": "同期は一時停止中です",
+    "syncPausedDescription": "同期には有効なサブスクリプションが必要です。ローカルデータと未同期の変更は保持されます。",
     "comingSoon": "近日公開",
     "getStarted": "始める",
     "perMonthShort": "月",
@@ -280,5 +307,16 @@
   },
   "errors": {
     "unknown": "不明なエラー"
+  },
+  "session": {
+    "restoring": "Connect を復元しています…",
+    "unavailable": "Connect は一時的に利用できません",
+    "localAvailable": "ローカルのポートフォリオは利用できます。再接続してください。"
+  },
+  "rebind": {
+    "title": "このプロフィールのConnect接続を変更しますか？",
+    "description": "別のアカウントまたは世帯に接続しようとしています。ローカルのポートフォリオデータは保持されますが、既存の証券会社との連携とデバイス同期の設定は削除されます。新しいアカウントは、このプロフィールに証券会社のデータを追加できます。必要に応じてデバイス同期を再設定してください。データを分けて管理したい場合は、新しいプロフィールを使用してください。",
+    "cancel": "キャンセル",
+    "confirm": "接続を変更"
   }
 }

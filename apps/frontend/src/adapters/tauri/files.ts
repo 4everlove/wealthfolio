@@ -2,8 +2,8 @@
 import { open, save } from "@tauri-apps/plugin-dialog";
 import {
   BaseDirectory,
-  copyFile,
-  remove,
+  type FileHandle,
+  open as openFile,
   startAccessingSecurityScopedResource,
   stopAccessingSecurityScopedResource,
 } from "@tauri-apps/plugin-fs";
@@ -15,21 +15,28 @@ interface PendingExport {
   filename: string;
 }
 
-const isIOSUserAgent = (): boolean => {
+interface StagedRestore {
+  relativePath: string;
+  pendingDir: string;
+}
+
+const COPY_BUFFER_SIZE = 1024 * 1024;
+
+const isMobileUserAgent = (): boolean => {
   if (typeof window === "undefined") {
     return false;
   }
 
   const userAgent = window.navigator.userAgent.toLowerCase();
-  return /iphone|ipad|ipod/.test(userAgent);
+  return /android|iphone|ipad|ipod/.test(userAgent);
 };
 
-const isIOSRuntime = async (): Promise<boolean> => {
+const isMobileRuntime = async (): Promise<boolean> => {
   try {
-    const platform = await invoke<{ os: string }>("get_platform");
-    return platform.os === "ios";
+    const platform = await invoke<{ is_mobile?: boolean; os: string }>("get_platform");
+    return platform.is_mobile ?? (platform.os === "ios" || platform.os === "android");
   } catch {
-    return isIOSUserAgent();
+    return isMobileUserAgent();
   }
 };
 
@@ -50,6 +57,12 @@ const toBase64 = (bytes: Uint8Array): string => {
   return btoa(binary);
 };
 
+const restoreId = (): string => {
+  return (
+    globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`
+  );
+};
+
 const describeError = (error: unknown): string => {
   if (error instanceof Error) {
     return error.message;
@@ -61,6 +74,85 @@ const describeError = (error: unknown): string => {
     return JSON.stringify(error);
   } catch {
     return String(error);
+  }
+};
+
+const writeAll = async (file: FileHandle, data: Uint8Array): Promise<void> => {
+  let offset = 0;
+  while (offset < data.byteLength) {
+    const written = await file.write(data.subarray(offset));
+    if (written <= 0) {
+      throw new Error("write returned without writing data");
+    }
+    offset += written;
+  }
+};
+
+const copyFileByHandle = async (
+  fromPath: string,
+  toPath: string,
+  options: {
+    fromPathBaseDir?: BaseDirectory;
+    toPathBaseDir?: BaseDirectory;
+    maxBytes?: number;
+    signal?: AbortSignal;
+  } = {},
+): Promise<void> => {
+  let source: FileHandle | null = null;
+  let destination: FileHandle | null = null;
+  const sourceOptions = {
+    read: true,
+    ...(options.fromPathBaseDir ? { baseDir: options.fromPathBaseDir } : {}),
+  };
+  const destinationOptions = {
+    write: true,
+    create: true,
+    truncate: true,
+    ...(options.toPathBaseDir ? { baseDir: options.toPathBaseDir } : {}),
+  };
+
+  try {
+    if (!options.fromPathBaseDir) source = await openFile(fromPath, sourceOptions);
+    if (source && options.maxBytes !== undefined && (await source.stat()).size > options.maxBytes) {
+      throw new Error("Backup exceeds the supported 2 GiB limit");
+    }
+    if (!options.toPathBaseDir) destination = await openFile(toPath, destinationOptions);
+
+    const buffer = new Uint8Array(COPY_BUFFER_SIZE);
+    let copied = 0;
+    while (true) {
+      options.signal?.throwIfAborted();
+      let bytesRead: number | null;
+      if (source) bytesRead = await source.read(buffer);
+      else {
+        const encoded = await invoke<string>("profile_transfer_file", {
+          relativePath: fromPath,
+          operation: "read",
+          offset: copied,
+        });
+        const chunk = Uint8Array.from(atob(encoded), (c) => c.charCodeAt(0));
+        bytesRead = chunk.length;
+        buffer.set(chunk);
+      }
+      if (bytesRead === null || bytesRead === 0) {
+        break;
+      }
+      copied += bytesRead;
+      if (options.maxBytes !== undefined && copied > options.maxBytes) {
+        throw new Error("Backup exceeds the supported 2 GiB limit");
+      }
+      if (destination) await writeAll(destination, buffer.subarray(0, bytesRead));
+      else
+        await invoke("profile_transfer_file", {
+          relativePath: toPath,
+          operation: "write",
+          offset: copied - bytesRead,
+          content: toBase64(buffer.subarray(0, bytesRead)),
+        });
+    }
+  } finally {
+    await destination?.close().catch(() => undefined);
+    await source?.close().catch(() => undefined);
   }
 };
 
@@ -85,7 +177,7 @@ export const openFileSaveDialog = async (
   fileName: string,
 ): Promise<boolean> => {
   if (typeof fileContent === "string") {
-    if (await isIOSRuntime()) {
+    if (await isMobileRuntime()) {
       const { relativePath, filename } = await invoke<PendingExport>(
         "write_pending_export_text_file",
         {
@@ -111,7 +203,7 @@ export const openFileSaveDialog = async (
   }
 
   const contentBase64 = toBase64(contentToSave);
-  if (await isIOSRuntime()) {
+  if (await isMobileRuntime()) {
     const { relativePath, filename } = await invoke<PendingExport>("write_pending_export_file", {
       fileName,
       contentBase64,
@@ -161,7 +253,7 @@ export const saveAppDataFileViaPicker = async (
     try {
       await startAccessingSecurityScopedResource(filePath);
       didStartScopedAccess = true;
-      await copyFile(relativePath, filePath, {
+      await copyFileByHandle(relativePath, filePath, {
         fromPathBaseDir: BaseDirectory.AppData,
       });
     } catch (error) {
@@ -175,9 +267,34 @@ export const saveAppDataFileViaPicker = async (
     }
     return true;
   } finally {
-    await remove(relativePath, { baseDir: BaseDirectory.AppData }).catch(() => undefined);
-    await remove(pendingDir, { baseDir: BaseDirectory.AppData }).catch(() => undefined);
+    await removeAppDataPath(pendingDir);
   }
+};
+
+export const stagePickedDatabaseFileForRestore = async (
+  pickedFilePath: string,
+  signal?: AbortSignal,
+): Promise<StagedRestore> => {
+  const pendingDir = `scratch/portable-picked-${restoreId()}`;
+  const relativePath = `${pendingDir}/restore.db`;
+
+  try {
+    await copyFileByHandle(pickedFilePath, relativePath, {
+      toPathBaseDir: BaseDirectory.AppData,
+      maxBytes: 2 * 1024 * 1024 * 1024,
+      signal,
+    });
+    return { relativePath, pendingDir };
+  } catch (error) {
+    await removeAppDataPath(pendingDir);
+    throw error;
+  }
+};
+
+export const removeAppDataPath = async (relativePath: string): Promise<void> => {
+  await invoke("profile_transfer_file", { relativePath, operation: "remove" }).catch(
+    () => undefined,
+  );
 };
 
 // ============================================================================

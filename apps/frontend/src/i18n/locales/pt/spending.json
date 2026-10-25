@@ -37,6 +37,11 @@
     "transactionCount_many": "{{count}} transações",
     "editCategoryTitle": "Editar categoria",
     "deleteCategoryTitle": "Excluir categoria",
+    "excludeLabel": "Ignorar nos gastos",
+    "excludeDescription": "Oculta em totais, gráficos, análises e orçamentos",
+    "excludeDisabledParent": "Ignorada porque a categoria principal é ignorada",
+    "excludedTooltip": "Ignorada nos gastos",
+    "excludedWithParent": "Ignorada junto com {{name}}",
     "categoryActions": "Ações da categoria",
     "deleteTitle": "Excluir categoria",
     "deleteConfirm": "Tem certeza que deseja excluir \"{{name}}\"?",
@@ -45,6 +50,13 @@
     "searchCategories": "Buscar categorias...",
     "noCategoriesFound": "Nenhuma categoria encontrada.",
     "clearCategory": "Remover categoria"
+  },
+  "activityTypes": {
+    "balanceTransferCashAdvance": "Transferência de saldo / Saque",
+    "charge": "Cobrança",
+    "interestCharge": "Juros cobrados",
+    "refundCredit": "Estorno / Crédito",
+    "reimbursementRefund": "Reembolso / devolução"
   },
   "rules": {
     "editTitle": "Editar regra",
@@ -226,7 +238,13 @@
     "viewingMonth": "Vendo {{label}}, clique para alterar",
     "pickMonth": "Escolher um mês específico",
     "selectMonth": "Selecionar mês",
-    "clearMonth": "Limpar seleção de mês"
+    "clearMonth": "Limpar seleção de mês",
+    "chooseMonth": "Escolha um mês",
+    "selectDates": "Selecionar datas",
+    "startDate": "Data de início",
+    "chooseCustomDates": "Escolher datas personalizadas",
+    "invalidRange": "A data de término deve ser igual ou posterior à data de início",
+    "endDate": "Data de término"
   },
   "presets": {
     "loading": "Carregando conjuntos predefinidos…",
@@ -413,7 +431,8 @@
     "largest": "Maior",
     "noSpending": "Não há gasto nesta faixa.",
     "outlier": "Atípico",
-    "weekOf": "Semana de {{date}}"
+    "weekOf": "Semana de {{date}}",
+    "customSubtitle": "Transações no período selecionado"
   },
   "split": {
     "title": "Dividir transação",
@@ -570,7 +589,11 @@
     "brighter": "Mais claro",
     "moreSpend": "= mais gasto.",
     "less": "menos",
-    "more": "mais"
+    "more": "mais",
+    "customSubtitleShort": "Período selecionado",
+    "customNoActivity": "Nenhuma movimentação de caixa no período selecionado.",
+    "customLegendIntro": "Cada célula representa uma hora de um dia da semana no período selecionado.",
+    "customSubtitle": "Período selecionado · intensidade dos gastos por dia da semana e hora."
   },
   "eventDetail": {
     "previousEvent": "Evento anterior",
@@ -734,12 +757,7 @@
     "noIncome": "Não há receitas nas contas selecionadas para este período.",
     "spent": "Gasto",
     "saved": "Economizado",
-    "incomeSaving": "Receitas e poupança",
-    "nonSpendingCashflow": "Fluxo de caixa não relacionado a gastos para {{period}}.",
-    "moneyIn": "Dinheiro entrando",
-    "incomeSources": "Fontes de receita",
     "setAside": "Reservado",
-    "savingDestinations": "Destinos de poupança",
     "sortSpent": "gasto",
     "sortChange": "variação",
     "sortName": "nome",
@@ -754,10 +772,56 @@
     "categoriesShown_one": "{{shown}} de {{total}} categoria mostrada",
     "categoriesShown_other": "{{shown}} de {{total}} categorias mostradas",
     "categoriesShown_many": "{{shown}} de {{total}} categorias mostradas",
+    "excludedInSettings_one": "{{count}} ignorada nas configurações",
+    "excludedInSettings_other": "{{count}} ignoradas nas configurações",
+    "excludedInSettings_many": "{{count}} ignoradas nas configurações",
     "openTransactions": "Abrir transações →",
     "moreCount_one": "+{{count}} mais",
     "moreCount_other": "+{{count}} mais",
-    "moreCount_many": "+{{count}} mais"
+    "moreCount_many": "+{{count}} mais",
+    "vsRange": "em relação a {{from}} – {{to}}"
+  },
+  "moneyFlow": {
+    "title": "Fluxo de dinheiro",
+    "subtitle": "De onde veio o seu dinheiro e para onde foi em {{period}}.",
+    "focusSubtitle": "Todas as categorias em {{period}}.",
+    "focusSubcategoriesSubtitle": "Todas as subcategorias em {{period}}.",
+    "back": "Todos os fluxos",
+    "backTo": "Voltar para {{name}}",
+    "chartLabel": "Diagrama do fluxo de dinheiro. Use as setas para navegar entre os fluxos.",
+    "nodeAria": "{{name}}, {{amount}}",
+    "nodeActionAria": "{{name}}, {{amount}}. {{action}}",
+    "shareOfIncome": "{{pct}} das receitas",
+    "shareOfTotal": "{{pct}} do total",
+    "clickTransactions": "Clique para ver as transações",
+    "clickCategories": "Clique para ver todas as categorias",
+    "clickSubcategories": "Clique para ver as subcategorias",
+    "action": {
+      "categories": "Ver todas as categorias",
+      "subcategories": "Ver subcategorias",
+      "transactions": "Ver transações"
+    },
+    "node": {
+      "total": "Total",
+      "shortfall": "Déficit",
+      "refunds": "Reembolsos líquidos",
+      "surplus": "Sobrado",
+      "uncategorizedIncome": "Receitas sem categoria",
+      "netSpending": "Gasto líquido"
+    },
+    "hint": {
+      "total": "Dinheiro entrando mais reembolsos líquidos e qualquer déficit. Sempre igual ao dinheiro saindo.",
+      "totalOut": "Tudo o que foi gasto e reservado, antes dos reembolsos.",
+      "shortfall": "Gastos e poupança além do que entrou.",
+      "refunds": "Categorias em que os reembolsos superaram os gastos.",
+      "saved": "Transferido para contas de poupança e investimento.",
+      "surplus": "Entrou, mas não foi gasto nem reservado.",
+      "uncategorized": "Gastos que ainda não têm categoria.",
+      "net": "O que esta categoria custou depois dos reembolsos.",
+      "direct": "Atribuído à própria categoria, não a uma subcategoria."
+    },
+    "groupRefunds": "Antes de subtrair {{amount}} em reembolsos líquidos.",
+    "categoryRefunds": "Antes de subtrair {{refunds}} em reembolsos líquidos. Gasto líquido: {{net}}."
   },
   "budgetChart": {
     "overBudget": "Orçamento excedido",
@@ -901,6 +965,9 @@
     "automateMatching": "Automatize a correspondência para estabelecimentos recorrentes",
     "loadError": "Não foi possível carregar os dados de gastos.",
     "spentLabel": "Gasto",
+    "excludedCategoriesHint_one": "{{count}} categoria ignorada",
+    "excludedCategoriesHint_other": "{{count}} categorias ignoradas",
+    "excludedCategoriesHint_many": "{{count}} categorias ignoradas",
     "noSpendingInPeriod": "Não há gastos neste período",
     "whereItWent": "Para onde foi",
     "whereItWentView": "Visão de para onde foi",
@@ -1021,6 +1088,7 @@
     "addSource_many": "Adicionar fonte ({{count}} disponíveis)",
     "overridesTitle_one": "Exceção · {{count}}",
     "overridesTitle_other": "Exceções · {{count}}",
-    "overridesTitle_many": "Exceções · {{count}}"
+    "overridesTitle_many": "Exceções · {{count}}",
+    "sourceMonth": "Mês de origem"
   }
 }

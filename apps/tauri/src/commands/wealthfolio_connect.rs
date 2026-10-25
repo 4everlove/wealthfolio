@@ -8,26 +8,23 @@ use crate::commands::device_sync::{
     get_sync_identity_from_store, sync_identity_can_run_background,
 };
 use crate::context::ServiceContext;
-use crate::secret_store::KeyringSecretStore;
+use crate::profiles::{ConnectAccess, NativeProfiles, ProfileAccess};
 use log::{debug, error};
 use serde::Serialize;
+#[cfg(feature = "device-sync")]
 use std::future::Future;
 use std::sync::Arc;
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager};
 #[cfg(feature = "connect-sync")]
 use wealthfolio_connect::{
     prepare_post_login_broker_bootstrap, BrokerApiClient, PostLoginBrokerBootstrapDecision,
 };
 use wealthfolio_connect::{
     PostLoginBootstrapReason, PostLoginBootstrapResult, PostLoginBootstrapSyncResult,
+    CLOUD_REFRESH_TOKEN_KEY,
 };
-use wealthfolio_core::secrets::SecretStore;
 #[cfg(feature = "device-sync")]
 use wealthfolio_device_sync::SyncState;
-
-// Storage keys (without prefix - the SecretStore adds "wealthfolio_" prefix)
-const SYNC_ACCESS_TOKEN_KEY: &str = "sync_access_token";
-const SYNC_REFRESH_TOKEN_KEY: &str = "sync_refresh_token";
 
 #[cfg(feature = "device-sync")]
 enum PostLoginDeviceBootstrapDecision {
@@ -77,39 +74,60 @@ where
 
 #[tauri::command]
 pub async fn store_sync_session(
-    refresh_token: Option<String>,
-    state: State<'_, Arc<ServiceContext>>,
+    app: AppHandle,
+    refresh_token: String,
+    confirm_rebind: Option<bool>,
+    state: ProfileAccess,
+    scope_id: uuid::Uuid,
 ) -> Result<(), String> {
-    match refresh_token.as_deref().map(str::trim) {
-        Some(token) if !token.is_empty() => {
-            if let Err(e) = KeyringSecretStore.set_secret(SYNC_REFRESH_TOKEN_KEY, token) {
-                error!("Failed to store refresh token in keyring: {}", e);
-                return Err(format!("Failed to store refresh token: {}", e));
-            }
-            // Best-effort cleanup for legacy versions that stored access tokens at rest.
-            let _ = KeyringSecretStore.delete_secret(SYNC_ACCESS_TOKEN_KEY);
-            debug!("Refresh token stored successfully");
-        }
-        _ => {
-            if let Err(e) = KeyringSecretStore.delete_secret(SYNC_REFRESH_TOKEN_KEY) {
-                error!("Failed to delete refresh token from keyring: {}", e);
-                // Don't fail the whole operation if we can't delete
-            }
-        }
+    let token = refresh_token.trim();
+    if token.is_empty() {
+        return Err("Refresh token must not be empty.".into());
     }
+    let _transition = app
+        .state::<NativeProfiles>()
+        .begin_connect_transition(scope_id, &state)
+        .await?;
+    let context = state.context()?;
+    let _sync_lifecycle = context.sync_lifecycle.lock().await;
+    // Reserve broker sync for the complete login transition, including cleanup.
+    let _broker_guard =
+        wealthfolio_connect::acquire_broker_sync_guard(&context.broker_sync_running())
+            .ok_or("Broker sync is running. Wait for it to finish and try again.")?;
+    context
+        .connect_service()
+        .store_session(token, confirm_rebind.unwrap_or(false), || async {
+            #[cfg(feature = "device-sync")]
+            {
+                context.device_sync_runtime().clear_restore().await;
+                context
+                    .device_sync_runtime()
+                    .ensure_background_stopped()
+                    .await;
+                context.sync_approvals.clear()?;
+            }
+            context
+                .app_sync_repository()
+                .clear_connect_binding_state()
+                .await
+                .map_err(|e| e.to_string())?;
+            Ok(())
+        })
+        .await?;
 
-    state.connect_service().clear_cached_token().await;
+    state.backup_scheduler.wake();
     Ok(())
 }
 
 #[tauri::command]
 pub async fn post_login_bootstrap(
     app: AppHandle,
-    state: State<'_, Arc<ServiceContext>>,
+    state: ConnectAccess,
 ) -> Result<PostLoginBootstrapResult, String> {
-    let context = state.inner().clone();
-    let broker_sync = run_post_login_broker_bootstrap(app, Arc::clone(&context)).await;
-    let device_sync = run_post_login_device_bootstrap(context).await;
+    let context = state.context()?;
+    let cloned_context = context.clone();
+    let broker_sync = run_broker_bootstrap(app, Arc::clone(&cloned_context)).await;
+    let device_sync = run_post_login_device_bootstrap(cloned_context).await;
 
     Ok(PostLoginBootstrapResult {
         broker_sync,
@@ -118,7 +136,7 @@ pub async fn post_login_bootstrap(
 }
 
 #[cfg(feature = "connect-sync")]
-async fn run_post_login_broker_bootstrap(
+pub(crate) async fn run_broker_bootstrap(
     app: AppHandle,
     context: Arc<ServiceContext>,
 ) -> PostLoginBootstrapSyncResult {
@@ -156,10 +174,10 @@ async fn run_post_login_broker_bootstrap(
     tauri::async_runtime::spawn(async move {
         match perform_broker_sync_with_guard(&context, Some(&app_handle), guard).await {
             Ok(_result) => {
-                debug!("[Connect] Post-login broker sync completed successfully");
+                debug!("[Connect] Broker bootstrap sync completed successfully");
             }
             Err(err) => {
-                error!("[Connect] Post-login broker sync failed: {}", err);
+                error!("[Connect] Broker bootstrap sync failed: {}", err);
             }
         }
     });
@@ -168,7 +186,7 @@ async fn run_post_login_broker_bootstrap(
 }
 
 #[cfg(not(feature = "connect-sync"))]
-async fn run_post_login_broker_bootstrap(
+pub(crate) async fn run_broker_bootstrap(
     _app: AppHandle,
     _context: Arc<ServiceContext>,
 ) -> PostLoginBootstrapSyncResult {
@@ -179,7 +197,7 @@ async fn run_post_login_broker_bootstrap(
 async fn run_post_login_device_bootstrap(
     context: Arc<ServiceContext>,
 ) -> PostLoginBootstrapSyncResult {
-    let Some(identity) = get_sync_identity_from_store() else {
+    let Some(identity) = get_sync_identity_from_store(&context) else {
         return PostLoginBootstrapSyncResult::skipped(PostLoginBootstrapReason::NotEnrolled);
     };
 
@@ -212,6 +230,9 @@ async fn run_post_login_device_bootstrap(
     match decision {
         PostLoginDeviceBootstrapDecision::StartBackground => {}
         PostLoginDeviceBootstrapDecision::Skip(reason) => {
+            if matches!(reason, PostLoginBootstrapReason::AlreadyRunning) {
+                context.device_sync_runtime().notify_sync_work_available();
+            }
             return PostLoginBootstrapSyncResult::skipped(reason);
         }
     }
@@ -236,35 +257,51 @@ async fn run_post_login_device_bootstrap(
 }
 
 #[tauri::command]
-pub async fn clear_sync_session(state: State<'_, Arc<ServiceContext>>) -> Result<(), String> {
-    // Best-effort cleanup for legacy installs that persisted the access token.
-    let _ = KeyringSecretStore.delete_secret(SYNC_ACCESS_TOKEN_KEY);
-    let refresh_result = KeyringSecretStore.delete_secret(SYNC_REFRESH_TOKEN_KEY);
+pub async fn clear_sync_session(state: ConnectAccess) -> Result<(), String> {
+    let context = state.context()?;
+    disconnect_cloud_session(&context).await
+}
 
-    // Report refresh-token errors but don't fail on legacy access-token cleanup.
-    let mut errors = Vec::new();
-    if let Err(e) = refresh_result {
-        error!("Failed to delete refresh token from keyring: {}", e);
-        errors.push(format!("refresh_token: {}", e));
-    }
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncSessionStatus {
+    pub is_configured: bool,
+}
 
-    state.connect_service().clear_cached_token().await;
-    #[cfg(feature = "device-sync")]
-    clear_min_snapshot_created_at_from_store();
-    let _ = state
-        .app_sync_repository()
-        .clear_all_min_snapshot_created_at()
-        .await;
+// Async so the keyring read runs off the UI thread: a slow or locked keyring
+// would otherwise freeze the window.
+#[tauri::command]
+pub async fn get_sync_session_status(state: ConnectAccess) -> Result<SyncSessionStatus, String> {
+    let context = state.context()?;
+    Ok(SyncSessionStatus {
+        is_configured: context.connect_service().is_session_configured()?,
+    })
+}
 
-    if errors.is_empty() {
-        debug!("Sync session cleared from keyring");
-        Ok(())
-    } else {
-        Err(format!(
-            "Failed to clear some tokens: {}",
-            errors.join(", ")
-        ))
-    }
+/// Clear explicit logout credentials and stop the worker in one transition.
+async fn disconnect_cloud_session(context: &ServiceContext) -> Result<(), String> {
+    context.backup_scheduler.wake();
+    context
+        .connect_service()
+        .clear_session_with(|| async {
+            #[cfg(feature = "device-sync")]
+            context.device_sync_runtime().clear_restore().await;
+            #[cfg(feature = "device-sync")]
+            clear_min_snapshot_created_at_from_store(context);
+            let _ = context
+                .app_sync_repository()
+                .clear_all_min_snapshot_created_at()
+                .await;
+            #[cfg(feature = "device-sync")]
+            context
+                .device_sync_runtime()
+                .ensure_background_stopped()
+                .await;
+        })
+        .await
+        .map(|_| {
+            context.backup_scheduler.wake();
+        })
 }
 
 #[derive(Serialize)]
@@ -276,12 +313,14 @@ pub struct RestoreSyncSessionResponse {
 
 #[tauri::command]
 pub async fn restore_sync_session(
-    state: State<'_, Arc<ServiceContext>>,
+    state: ConnectAccess,
 ) -> Result<RestoreSyncSessionResponse, String> {
-    let access_token = state.connect_service().get_valid_access_token().await?;
+    let context = state.context()?;
+    let access_token = context.connect_service().get_valid_access_token().await?;
 
-    let refresh_token = KeyringSecretStore
-        .get_secret(SYNC_REFRESH_TOKEN_KEY)
+    let refresh_token = context
+        .secret_store
+        .get_secret(CLOUD_REFRESH_TOKEN_KEY)
         .map_err(|e| format!("Failed to read refresh token: {}", e))?
         .ok_or_else(|| "No sync session configured".to_string())?;
 

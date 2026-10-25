@@ -36,6 +36,11 @@
     "transactionCount_other": "거래 {{count}}건",
     "editCategoryTitle": "카테고리 수정",
     "deleteCategoryTitle": "카테고리 삭제",
+    "excludeLabel": "지출에서 제외",
+    "excludeDescription": "합계, 차트, 인사이트, 예산에 포함되지 않습니다",
+    "excludeDisabledParent": "상위 카테고리가 제외되어 함께 제외됩니다",
+    "excludedTooltip": "지출에서 제외됨",
+    "excludedWithParent": "{{name}}와(과) 함께 제외됨",
     "categoryActions": "카테고리 작업",
     "deleteTitle": "카테고리 삭제",
     "deleteConfirm": "\"{{name}}\"을(를) 삭제하시겠습니까?",
@@ -44,6 +49,13 @@
     "searchCategories": "카테고리 검색...",
     "noCategoriesFound": "카테고리를 찾을 수 없습니다.",
     "clearCategory": "카테고리 지우기"
+  },
+  "activityTypes": {
+    "balanceTransferCashAdvance": "잔액 이체 / 현금 서비스",
+    "charge": "카드 사용",
+    "interestCharge": "이자 비용",
+    "refundCredit": "환급 / 크레딧",
+    "reimbursementRefund": "환급 / 환불"
   },
   "rules": {
     "editTitle": "규칙 수정",
@@ -217,7 +229,13 @@
     "viewingMonth": "{{label}} 보는 중, 클릭하여 변경",
     "pickMonth": "특정 월 선택",
     "selectMonth": "월 선택",
-    "clearMonth": "월 선택 해제"
+    "clearMonth": "월 선택 해제",
+    "chooseMonth": "월 선택",
+    "selectDates": "날짜 선택",
+    "startDate": "시작일",
+    "chooseCustomDates": "사용자 지정 날짜 선택",
+    "invalidRange": "종료일은 시작일과 같거나 이후여야 합니다",
+    "endDate": "종료일"
   },
   "presets": {
     "loading": "프리셋 불러오는 중…",
@@ -388,7 +406,8 @@
     "largest": "최대",
     "noSpending": "이 시간대에 지출이 없습니다.",
     "outlier": "이상값",
-    "weekOf": "{{date}} 주"
+    "weekOf": "{{date}} 주",
+    "customSubtitle": "선택한 기간의 거래"
   },
   "split": {
     "title": "거래 분할",
@@ -536,7 +555,11 @@
     "brighter": "밝을수록",
     "moreSpend": "= 지출이 많다는 뜻입니다.",
     "less": "적음",
-    "more": "많음"
+    "more": "많음",
+    "customSubtitleShort": "선택한 기간",
+    "customNoActivity": "선택한 기간에 현금 거래가 없습니다.",
+    "customLegendIntro": "각 셀은 선택한 기간의 요일별 한 시간대를 나타냅니다.",
+    "customSubtitle": "선택한 기간 · 요일 및 시간대별 지출 강도."
   },
   "eventDetail": {
     "previousEvent": "이전 이벤트",
@@ -688,12 +711,7 @@
     "noIncome": "이 기간에 선택한 계좌에 수입이 없습니다.",
     "spent": "지출",
     "saved": "저축",
-    "incomeSaving": "수입 및 저축",
-    "nonSpendingCashflow": "{{period}}의 비지출 현금 흐름입니다.",
-    "moneyIn": "들어온 돈",
-    "incomeSources": "수입원",
     "setAside": "따로 모은 금액",
-    "savingDestinations": "저축 목적지",
     "sortSpent": "지출액",
     "sortChange": "변동",
     "sortName": "이름",
@@ -707,8 +725,53 @@
     "sortByLabel": "{{label}} 기준 정렬",
     "categoriesShown_one": "카테고리 {{total}}개 중 {{shown}}개 표시",
     "categoriesShown_other": "카테고리 {{total}}개 중 {{shown}}개 표시",
+    "excludedInSettings_one": "설정에서 {{count}}개 제외",
+    "excludedInSettings_other": "설정에서 {{count}}개 제외",
     "openTransactions": "거래 내역 열기 →",
-    "moreCount_other": "+{{count}} 더보기"
+    "moreCount_other": "+{{count}} 더보기",
+    "vsRange": "{{from}} – {{to}} 대비"
+  },
+  "moneyFlow": {
+    "title": "돈의 흐름",
+    "subtitle": "{{period}} 동안 돈이 어디서 들어와 어디로 나갔는지 보여줍니다.",
+    "focusSubtitle": "{{period}}의 모든 카테고리입니다.",
+    "focusSubcategoriesSubtitle": "{{period}}의 모든 하위 카테고리입니다.",
+    "back": "전체 흐름",
+    "backTo": "{{name}}(으)로 돌아가기",
+    "chartLabel": "돈의 흐름 차트. 화살표 키로 항목 사이를 이동할 수 있습니다.",
+    "nodeAria": "{{name}}, {{amount}}",
+    "nodeActionAria": "{{name}}, {{amount}}. {{action}}",
+    "shareOfIncome": "수입의 {{pct}}",
+    "shareOfTotal": "합계의 {{pct}}",
+    "clickTransactions": "클릭하여 거래 내역 보기",
+    "clickCategories": "클릭하여 모든 카테고리 보기",
+    "clickSubcategories": "클릭하여 하위 카테고리 보기",
+    "action": {
+      "categories": "모든 카테고리 보기",
+      "subcategories": "하위 카테고리 보기",
+      "transactions": "거래 내역 보기"
+    },
+    "node": {
+      "total": "합계",
+      "shortfall": "부족분",
+      "refunds": "순 환불",
+      "surplus": "남은 금액",
+      "uncategorizedIncome": "미분류 수입",
+      "netSpending": "순 지출"
+    },
+    "hint": {
+      "total": "들어온 돈에 순 환불과 부족분을 더한 합계입니다. 항상 나간 돈과 같습니다.",
+      "totalOut": "환불 전의 지출과 따로 모은 금액 합계입니다.",
+      "shortfall": "들어온 돈을 넘어선 지출과 저축입니다.",
+      "refunds": "환불이 지출보다 많았던 카테고리입니다.",
+      "saved": "저축 및 투자 계좌로 옮긴 금액입니다.",
+      "surplus": "들어왔지만 쓰거나 따로 모으지 않은 금액입니다.",
+      "uncategorized": "아직 카테고리가 없는 지출입니다.",
+      "net": "환불 후 이 카테고리에 든 금액입니다.",
+      "direct": "하위 카테고리가 아닌 카테고리 자체에 지정된 금액입니다."
+    },
+    "groupRefunds": "순 환불 {{amount}} 차감 전 금액입니다.",
+    "categoryRefunds": "순 환불 {{refunds}} 차감 전 금액입니다. 순 지출: {{net}}."
   },
   "budgetChart": {
     "overBudget": "예산 초과",
@@ -844,6 +907,8 @@
     "automateMatching": "반복 가맹점 자동 매칭",
     "loadError": "지출 데이터를 불러올 수 없습니다.",
     "spentLabel": "지출",
+    "excludedCategoriesHint_one": "카테고리 {{count}}개 제외",
+    "excludedCategoriesHint_other": "카테고리 {{count}}개 제외",
     "noSpendingInPeriod": "이 기간에 지출이 없습니다",
     "whereItWent": "지출처",
     "whereItWentView": "지출처 보기",
@@ -955,6 +1020,7 @@
     "dataUnavailable": "예산 데이터를 사용할 수 없습니다",
     "migrationNeeded": "현재 로컬 데이터베이스는 업데이트된 지출 마이그레이션 이전에 생성되었습니다.",
     "addSource_other": "수입원 추가 (사용 가능 {{count}}개)",
-    "overridesTitle_other": "재정의 · {{count}}개"
+    "overridesTitle_other": "재정의 · {{count}}개",
+    "sourceMonth": "원본 월"
   }
 }

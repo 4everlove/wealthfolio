@@ -499,7 +499,7 @@ impl ValuationStatus {
 #[derive(Debug, Clone)]
 pub struct NegativeBalanceInfo {
     pub account_id: String,
-    /// First date the total_value went negative.
+    /// First date the cash balance or total value went negative.
     pub first_negative_date: NaiveDate,
     /// Cash balance on that date (account currency).
     pub cash_balance: Decimal,
@@ -507,6 +507,18 @@ pub struct NegativeBalanceInfo {
     pub total_value: Decimal,
     /// Account currency (e.g. "EUR").
     pub account_currency: String,
+}
+
+/// A day's cash from an account's valuation, without the rest of the row.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DailyCashBalance {
+    pub valuation_date: NaiveDate,
+    /// In `account_currency`.
+    pub cash_balance: Decimal,
+    pub account_currency: String,
+    /// `Unavailable` when the engine could not complete the day, which
+    /// includes cash it could not convert and so left out of `cash_balance`.
+    pub value_status: ValuationStatus,
 }
 
 /// Domain model for daily account valuation

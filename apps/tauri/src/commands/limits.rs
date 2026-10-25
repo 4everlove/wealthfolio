@@ -1,8 +1,7 @@
-use std::sync::Arc;
+use crate::profiles::ProfileAccess;
 
 use crate::context::ServiceContext;
 use log::debug;
-use tauri::State;
 use wealthfolio_core::{
     accounts::{account_supports_purpose, AccountPurpose},
     limits::{ContributionLimit, DepositsCalculation, NewContributionLimit},
@@ -49,10 +48,11 @@ fn validate_contribution_limit_accounts(
 
 #[tauri::command]
 pub async fn get_contribution_limits(
-    state: State<'_, Arc<ServiceContext>>,
+    state: ProfileAccess,
 ) -> Result<Vec<ContributionLimit>, String> {
+    let context = state.context()?;
     debug!("Fetching contribution limits...");
-    state
+    context
         .limits_service()
         .get_contribution_limits()
         .map_err(|e| format!("Failed to load contribution limits: {}", e))
@@ -61,11 +61,12 @@ pub async fn get_contribution_limits(
 #[tauri::command]
 pub async fn create_contribution_limit(
     new_limit: NewContributionLimit,
-    state: State<'_, Arc<ServiceContext>>,
+    state: ProfileAccess,
 ) -> Result<ContributionLimit, String> {
+    let context = state.context()?;
     debug!("Creating new contribution limit...");
-    validate_contribution_limit_accounts(&state, &new_limit)?;
-    state
+    validate_contribution_limit_accounts(&context, &new_limit)?;
+    context
         .limits_service()
         .create_contribution_limit(new_limit)
         .await
@@ -76,11 +77,12 @@ pub async fn create_contribution_limit(
 pub async fn update_contribution_limit(
     id: String,
     updated_limit: NewContributionLimit,
-    state: State<'_, Arc<ServiceContext>>,
+    state: ProfileAccess,
 ) -> Result<ContributionLimit, String> {
+    let context = state.context()?;
     debug!("Updating contribution limit...");
-    validate_contribution_limit_accounts(&state, &updated_limit)?;
-    state
+    validate_contribution_limit_accounts(&context, &updated_limit)?;
+    context
         .limits_service()
         .update_contribution_limit(&id, updated_limit)
         .await
@@ -88,12 +90,10 @@ pub async fn update_contribution_limit(
 }
 
 #[tauri::command]
-pub async fn delete_contribution_limit(
-    id: String,
-    state: State<'_, Arc<ServiceContext>>,
-) -> Result<(), String> {
+pub async fn delete_contribution_limit(id: String, state: ProfileAccess) -> Result<(), String> {
+    let context = state.context()?;
     debug!("Deleting contribution limit...");
-    state
+    context
         .limits_service()
         .delete_contribution_limit(&id)
         .await
@@ -103,11 +103,19 @@ pub async fn delete_contribution_limit(
 #[tauri::command]
 pub async fn calculate_deposits_for_contribution_limit(
     limit_id: String,
-    state: State<'_, Arc<ServiceContext>>,
+    state: ProfileAccess,
 ) -> Result<DepositsCalculation, String> {
+    let context = state.context()?;
     debug!("Calculating deposits for contribution limit...");
-    let base_currency = state.base_currency.read().unwrap();
-    state
+    let base_currency = context
+        .base_currency
+        .read()
+        .map_err(|_| {
+            "Base currency state is unavailable. Restart the application before continuing."
+                .to_string()
+        })?
+        .clone();
+    context
         .limits_service()
         .calculate_deposits_for_contribution_limit(&limit_id, &base_currency)
         .map_err(|e| format!("Failed to calculate deposits for contribution limit: {}", e))

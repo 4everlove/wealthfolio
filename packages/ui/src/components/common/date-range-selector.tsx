@@ -22,64 +22,66 @@ const ranges = [
   {
     label: "1D",
     name: "Last Day",
-    getValue: () => ({ from: subDays(new Date(), 1), to: new Date() }),
+    getValue: (asOf: Date) => ({ from: subDays(asOf, 1), to: asOf }),
   },
   {
     label: "1W",
     name: "Last Week",
-    getValue: () => ({ from: subDays(new Date(), 7), to: new Date() }),
+    getValue: (asOf: Date) => ({ from: subDays(asOf, 7), to: asOf }),
   },
   {
     label: "1M",
     name: "Last Month",
-    getValue: () => ({ from: subMonths(new Date(), 1), to: new Date() }),
+    getValue: (asOf: Date) => ({ from: subMonths(asOf, 1), to: asOf }),
   },
   {
     label: "3M",
     name: "Last 3 Months",
-    getValue: () => ({ from: subMonths(new Date(), 3), to: new Date() }),
+    getValue: (asOf: Date) => ({ from: subMonths(asOf, 3), to: asOf }),
   },
   {
     label: "6M",
     name: "Last 6 Months",
-    getValue: () => ({ from: subMonths(new Date(), 6), to: new Date() }),
+    getValue: (asOf: Date) => ({ from: subMonths(asOf, 6), to: asOf }),
   },
   {
     label: "YTD",
     name: "Year to Date",
-    getValue: () => ({ from: startOfYear(new Date()), to: new Date() }),
+    getValue: (asOf: Date) => ({ from: startOfYear(asOf), to: asOf }),
   },
   {
     label: "1Y",
     name: "Last Year",
-    getValue: () => ({ from: subYears(new Date(), 1), to: new Date() }),
+    getValue: (asOf: Date) => ({ from: subYears(asOf, 1), to: asOf }),
   },
   {
     label: "3Y",
     name: "Last 3 Years",
-    getValue: () => ({ from: subYears(new Date(), 3), to: new Date() }),
+    getValue: (asOf: Date) => ({ from: subYears(asOf, 3), to: asOf }),
   },
   {
     label: "5Y",
     name: "Last 5 Years",
-    getValue: () => ({ from: subYears(new Date(), 5), to: new Date() }),
+    getValue: (asOf: Date) => ({ from: subYears(asOf, 5), to: asOf }),
   },
   {
     label: "ALL",
     name: "All Time",
-    getValue: () => ({ from: new Date(1970, 0, 1), to: new Date() }),
+    getValue: (asOf: Date) => ({ from: new Date(1970, 0, 1), to: asOf }),
   },
 ] as const;
 
 type DateRangePresetLabel = (typeof ranges)[number]["label"];
 
 interface DateRangeSelectorProps {
+  /** Calendar date used to anchor relative presets. */
+  asOf?: Date;
   value: DateRange | undefined;
   onChange: (range: DateRange | undefined) => void;
   hiddenRanges?: readonly DateRangePresetLabel[];
 }
 
-export function DateRangeSelector({ value, onChange, hiddenRanges = [] }: DateRangeSelectorProps) {
+export function DateRangeSelector({ value, onChange, hiddenRanges = [], asOf = new Date() }: DateRangeSelectorProps) {
   const { t } = useTranslation();
   const formatting = useDateFormatting();
   const isMobile = useIsMobile();
@@ -100,7 +102,7 @@ export function DateRangeSelector({ value, onChange, hiddenRanges = [] }: DateRa
     }
 
     const selected = visibleRanges.find((range) => {
-      const predefinedRange = range.getValue();
+      const predefinedRange = range.getValue(asOf);
       return compareDates(value?.from, predefinedRange.from) && compareDates(value?.to, predefinedRange.to);
     });
     return selected?.label;
@@ -109,7 +111,7 @@ export function DateRangeSelector({ value, onChange, hiddenRanges = [] }: DateRa
   const selectedLabel = getSelectedRange();
   const isCustomRange = !selectedLabel;
   const isDraftRangeComplete = !draftRange || (!!draftRange.from && !!draftRange.to);
-  const allTimeRange = visibleRanges.find((range) => range.label === "ALL")?.getValue();
+  const allTimeRange = visibleRanges.find((range) => range.label === "ALL")?.getValue(asOf);
   const appliedDraftRange = draftRange ?? allTimeRange;
 
   const handleCustomPickerOpenChange = (open: boolean) => {
@@ -149,7 +151,9 @@ export function DateRangeSelector({ value, onChange, hiddenRanges = [] }: DateRa
   );
 
   return (
-    <div className="flex items-center space-x-1">
+    // data-no-swipe-drag: on a swipe page, a sideways drag scrolls the presets instead of
+    // switching the page's view.
+    <div className="flex items-center space-x-1" data-no-swipe-drag>
       <AnimatedToggleGroup
         items={visibleRanges.map((range) => ({
           value: range.label,
@@ -163,16 +167,16 @@ export function DateRangeSelector({ value, onChange, hiddenRanges = [] }: DateRa
           }
           const selectedRange = visibleRanges.find((r) => r.label === newValue);
           if (selectedRange) {
-            onChange(selectedRange.getValue());
+            onChange(selectedRange.getValue(asOf));
           }
         }}
-        size="sm"
+        size={isMobile ? "compact" : "sm"}
         variant="secondary"
       />
 
       {isMobile ? (
         <Sheet open={isCustomPickerOpen} onOpenChange={handleCustomPickerOpenChange}>
-          <SheetTrigger asChild>{triggerButton}</SheetTrigger>
+          <SheetTrigger render={triggerButton} />
           <SheetContent side="bottom" className="rounded-t-4xl mx-1 flex max-h-[85vh] flex-col p-0">
             <SheetHeader className="border-border border-b px-6 py-4">
               <SheetTitle>{t("ui:dateRange.customRange", "Custom range")}</SheetTitle>
@@ -220,7 +224,7 @@ export function DateRangeSelector({ value, onChange, hiddenRanges = [] }: DateRa
               </Button>
               <Button
                 type="button"
-                className="ml-auto"
+                className="ms-auto"
                 onClick={handleApplyDraftRange}
                 disabled={!isDraftRangeComplete}
               >
@@ -231,9 +235,9 @@ export function DateRangeSelector({ value, onChange, hiddenRanges = [] }: DateRa
         </Sheet>
       ) : (
         <Popover>
-          <PopoverTrigger asChild>{triggerButton}</PopoverTrigger>
+          <PopoverTrigger render={triggerButton} />
           <PopoverContent
-            className="max-h-[min(var(--radix-popover-content-available-height,80vh),80vh)] w-auto overflow-y-auto overscroll-contain p-0 [-webkit-overflow-scrolling:touch]"
+            className="max-h-[min(var(--available-height,80vh),80vh)] w-auto overflow-y-auto overscroll-contain p-0 [-webkit-overflow-scrolling:touch]"
             align="end"
           >
             <Calendar

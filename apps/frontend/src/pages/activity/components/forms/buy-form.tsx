@@ -1,10 +1,10 @@
 import { useHoldings } from "@/hooks/use-holdings";
 import { useSettings } from "@/hooks/use-settings";
 import { ACTIVITY_SUBTYPES, ActivityType, QuoteMode } from "@/lib/constants";
-import { buildOccSymbol } from "@/lib/occ-symbol";
+import { buildOccSymbol, isValidOptionExpiration } from "@/lib/occ-symbol";
 import { normalizeCurrency } from "@/lib/utils";
 import { zodResolver } from "@hookform/resolvers/zod";
-import { useNumberFormatting } from "@wealthfolio/ui";
+import { useNumberFormatting, Spinner } from "@wealthfolio/ui";
 import { Alert, AlertDescription } from "@wealthfolio/ui/components/ui/alert";
 import { Button } from "@wealthfolio/ui/components/ui/button";
 import { Icons } from "@wealthfolio/ui/components/ui/icons";
@@ -13,6 +13,7 @@ import { useEffect, useMemo, useRef } from "react";
 import { FormProvider, useForm, type Resolver } from "react-hook-form";
 import { useTranslation } from "react-i18next";
 import { z } from "zod";
+import { useActivityCurrency } from "../../hooks/use-activity-currency";
 import {
   AccountSelect,
   AdvancedOptionsSection,
@@ -118,7 +119,8 @@ export const createBuyFormSchema = (t?: TFunction) =>
         .positive({
           message: msg(t, "activity:form.err_fxrate_positive", "FX Rate must be positive."),
         })
-        .optional(),
+        .optional()
+        .nullable(),
       // Internal fields
       quoteMode: z.enum([QuoteMode.MARKET, QuoteMode.MANUAL]).default(QuoteMode.MARKET),
       exchangeMic: z.string().nullable().optional(),
@@ -184,6 +186,17 @@ export const createBuyFormSchema = (t?: TFunction) =>
               t,
               "activity:form.err_expiration_required",
               "Expiration date is required.",
+            ),
+            path: ["expirationDate"],
+          });
+        }
+        if (data.expirationDate?.trim() && !isValidOptionExpiration(data.expirationDate)) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: msg(
+              t,
+              "activity:form.err_expiration_invalid",
+              "Enter a valid expiration date.",
             ),
             path: ["expirationDate"],
           });
@@ -271,6 +284,8 @@ export function BuyForm({
       currency: defaultValues?.currency?.trim() || initialCurrency,
     },
   });
+
+  useActivityCurrency(form, accounts, { isEditing });
 
   const { watch, setValue } = form;
   const accountId = watch("accountId");
@@ -491,7 +506,7 @@ export function BuyForm({
             </>
           )}
 
-          <AccountSelect name="accountId" accounts={accounts} currencyName="currency" />
+          <AccountSelect name="accountId" accounts={accounts} />
           <DatePicker name="activityDate" label={t("activity:field_date")} enableTime={true} />
         </FormSection>
 
@@ -558,27 +573,23 @@ export function BuyForm({
           />
 
           {isBuyWhileShortWithoutCover && (
-            <Alert variant="default" className="border-warning bg-warning/10">
-              <Icons.AlertTriangle className="text-warning h-4 w-4" />
-              <AlertDescription className="text-warning text-sm">
-                {t("activity:form.warn_buy_while_short")}
-              </AlertDescription>
+            <Alert variant="warning">
+              <Icons.AlertTriangle />
+              <AlertDescription>{t("activity:form.warn_buy_while_short")}</AlertDescription>
             </Alert>
           )}
 
           {isCoverWithoutShort && (
-            <Alert variant="default" className="border-warning bg-warning/10">
-              <Icons.AlertTriangle className="text-warning h-4 w-4" />
-              <AlertDescription className="text-warning text-sm">
-                {t("activity:form.warn_cover_without_short")}
-              </AlertDescription>
+            <Alert variant="warning">
+              <Icons.AlertTriangle />
+              <AlertDescription>{t("activity:form.warn_cover_without_short")}</AlertDescription>
             </Alert>
           )}
 
           {isCoverQuantityExcess && (
-            <Alert variant="default" className="border-warning bg-warning/10">
-              <Icons.AlertTriangle className="text-warning h-4 w-4" />
-              <AlertDescription className="text-warning text-sm">
+            <Alert variant="warning">
+              <Icons.AlertTriangle />
+              <AlertDescription>
                 {t("activity:form.warn_cover_quantity_excess", {
                   covering: formatting.formatDecimal(Number(optQuantity)),
                   short: formatting.formatDecimal(currentShortQuantity),
@@ -615,11 +626,11 @@ export function BuyForm({
             </Button>
           )}
           <Button type="submit" disabled={isLoading}>
-            {isLoading && <Icons.Spinner className="mr-2 h-4 w-4 animate-spin" />}
+            {isLoading && <Spinner className="me-2 h-4 w-4" />}
             {isEditing ? (
-              <Icons.Check className="mr-2 h-4 w-4" />
+              <Icons.Check className="me-2 h-4 w-4" />
             ) : (
-              <Icons.Plus className="mr-2 h-4 w-4" />
+              <Icons.Plus className="me-2 h-4 w-4" />
             )}
             {isEditing
               ? t("activity:form.button_update")

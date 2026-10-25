@@ -1,8 +1,13 @@
-use std::{net::SocketAddr, time::Duration};
+use std::{ffi::OsString, net::SocketAddr, time::Duration};
 
-use crate::auth::{decode_secret_key, derive_keys, AuthConfig, CookieSecurePolicy};
+use anyhow::Context;
+
+use crate::auth::{
+    decode_secret_key, derive_database_key, derive_keys, AuthConfig, CookieSecurePolicy,
+};
 use crate::oidc::OidcConfig;
 
+#[derive(Clone)]
 pub struct Config {
     pub listen_addr: SocketAddr,
     pub db_path: String,
@@ -14,6 +19,17 @@ pub struct Config {
     pub raw_secret_key: Vec<u8>,
     /// HKDF-derived key for secrets encryption
     pub secrets_encryption_key: [u8; 32],
+    /// HKDF-derived key for database encryption. Always derivable; whether it is
+    /// *used* is decided by `db_encryption_required`.
+    pub database_key: [u8; 32],
+    /// Whether this instance requires an encrypted database
+    /// (`WF_DB_REQUIRE_ENCRYPTION`).
+    ///
+    /// A requirement, not an action: it decides how a database that does not
+    /// exist yet is created, and is checked against the observed state of one
+    /// that does. Converting an existing database is `wealthfolio-server db
+    /// encrypt`, never this flag.
+    pub db_encryption_required: bool,
     /// Session-signing config. Present when password login OR OIDC is configured.
     pub auth: Option<AuthConfig>,
     /// OIDC SSO config. Present when `WF_OIDC_ISSUER_URL` + `WF_OIDC_CLIENT_ID` are set.
@@ -34,13 +50,13 @@ pub struct Config {
 }
 
 impl Config {
-    pub fn from_env() -> Self {
+    pub fn from_env() -> anyhow::Result<Self> {
         dotenvy::dotenv().ok();
         let listen_addr: SocketAddr = std::env::var("WF_LISTEN_ADDR")
             .unwrap_or_else(|_| "0.0.0.0:8088".to_string())
             .parse()
-            .expect("Invalid WF_LISTEN_ADDR");
-        let db_path = std::env::var("WF_DB_PATH").unwrap_or_else(|_| "./db/app.db".into());
+            .context("Invalid WF_LISTEN_ADDR")?;
+        let db_path = database_path_from_env()?;
         let cors_allow: Vec<String> = std::env::var("WF_CORS_ALLOW_ORIGINS")
             .ok()
             .filter(|s| !s.is_empty())
@@ -54,16 +70,16 @@ impl Config {
             .parse()
             .unwrap_or(300000);
         let static_dir = std::env::var("WF_STATIC_DIR").unwrap_or_else(|_| "dist".into());
-        let secret_key = std::env::var("WF_SECRET_KEY")
-            .unwrap_or_else(|_| panic!("WF_SECRET_KEY must be set and contain a 32-byte key"))
-            .trim()
-            .to_string();
-        if secret_key.is_empty() {
-            panic!("WF_SECRET_KEY must not be empty");
-        }
-        let raw_secret_key = decode_secret_key(&secret_key)
-            .unwrap_or_else(|e| panic!("Failed to decode WF_SECRET_KEY: {e}"));
+        let raw_secret_key = load_secret_key(
+            std::env::var_os("WF_SECRET_KEY"),
+            std::env::var_os("WF_SECRET_KEY_FILE"),
+        )
+        .context("Failed to load server secret key")?;
         let (jwt_key, secrets_encryption_key) = derive_keys(&raw_secret_key);
+        let database_key = derive_database_key(&raw_secret_key);
+        let db_encryption_required = std::env::var("WF_DB_REQUIRE_ENCRYPTION")
+            .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "true" | "1" | "yes"))
+            .unwrap_or(false);
         let addons_root = std::env::var("WF_ADDONS_DIR").unwrap_or_else(|_| {
             std::path::Path::new(&db_path)
                 .parent()
@@ -76,7 +92,7 @@ impl Config {
             .map(|hash| hash.trim().to_string())
             .filter(|hash| !hash.is_empty());
 
-        let oidc = OidcConfig::from_env();
+        let oidc = OidcConfig::from_env()?;
 
         // The session signer is needed whenever ANY auth method is enabled.
         let auth = if password_hash.is_some() || oidc.is_some() {
@@ -91,7 +107,7 @@ impl Config {
                 "auto" => CookieSecurePolicy::Auto,
                 "true" | "1" | "yes" => CookieSecurePolicy::Always,
                 "false" | "0" | "no" => CookieSecurePolicy::Never,
-                other => panic!(
+                other => anyhow::bail!(
                     "Invalid WF_COOKIE_SECURE value: \"{other}\". \
                      Expected one of: auto, true, false"
                 ),
@@ -123,7 +139,7 @@ impl Config {
 
         // When auth is enabled, wildcard CORS is incompatible with credentials
         if auth.is_some() && cors_allow.iter().any(|o| o == "*") {
-            panic!(
+            anyhow::bail!(
                 "WF_CORS_ALLOW_ORIGINS cannot be \"*\" when authentication is enabled. \
                  Set explicit origins, e.g. WF_CORS_ALLOW_ORIGINS=https://my.domain.com"
             );
@@ -136,7 +152,7 @@ impl Config {
                 .map(|v| !v.eq_ignore_ascii_case("false"))
                 .unwrap_or(true);
             if auth_required {
-                panic!(
+                anyhow::bail!(
                     "Refusing to start: listening on non-loopback address {listen_addr} without \
                      authentication.\n\
                      \n\
@@ -158,7 +174,7 @@ impl Config {
         // There is no WF_AUTH_REQUIRED escape hatch here — server MCP has
         // no trusted reverse proxy bypass.
         if mcp_enabled && auth.is_none() && !listen_addr.ip().is_loopback() {
-            panic!(
+            anyhow::bail!(
                 "Refusing to start: WF_MCP_ENABLED=true while listening on non-loopback \
                  address {listen_addr} without authentication.\n\
                  \n\
@@ -169,9 +185,11 @@ impl Config {
             );
         }
 
-        Self {
+        let config = Self {
             listen_addr,
             db_path,
+            database_key,
+            db_encryption_required,
             cors_allow,
             request_timeout: Duration::from_millis(timeout_ms),
             static_dir,
@@ -183,6 +201,353 @@ impl Config {
             mcp_enabled,
             mcp_audit_enabled,
             mcp_allowed_hosts,
+        };
+        let _ = crate::api::cors_layer(&config)?;
+        Ok(config)
+    }
+}
+
+/// Preserve the existing database-parent layout. WF_DATA_DIR supplies a legacy
+/// candidate in that directory; the registry still owns actual profile paths.
+/// Shared by startup and offline commands, before either can write files.
+pub(crate) fn database_path_from_env() -> anyhow::Result<String> {
+    resolve_database_path(
+        std::env::var_os("WF_DATA_DIR"),
+        std::env::var("WF_DB_PATH").ok(),
+    )
+}
+
+fn resolve_database_path(
+    data_dir: Option<OsString>,
+    db_path: Option<String>,
+) -> anyhow::Result<String> {
+    let Some(data_dir) = data_dir.filter(|value| !value.is_empty()) else {
+        return Ok(db_path.unwrap_or_else(|| crate::main_lib::DEFAULT_DB_PATH.to_string()));
+    };
+    let root = std::path::PathBuf::from(data_dir);
+    let root_text = root.to_str().context("WF_DATA_DIR must be valid UTF-8")?;
+    anyhow::ensure!(!root.starts_with("~"), "WF_DATA_DIR does not expand ~; use an absolute path or a path relative to the working directory");
+    let resolved_root = resolve_directory(&root).context("Invalid WF_DATA_DIR")?;
+    if let Some(database) = db_path.filter(|value| !value.is_empty()) {
+        let parent = std::path::Path::new(&database)
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or_else(|| std::path::Path::new("."));
+        anyhow::ensure!(
+            resolved_root == resolve_directory(parent).context("Invalid WF_DB_PATH directory")?,
+            "WF_DATA_DIR and the parent of WF_DB_PATH must select the same directory. Update both paths, or clear WF_DB_PATH to use WF_DATA_DIR/app.db for legacy adoption. Docker images supply WF_DB_PATH by default."
+        );
+        return Ok(database);
+    }
+    // Lossless: root_text and "app.db" are both UTF-8.
+    Ok(std::path::Path::new(root_text)
+        .join("app.db")
+        .to_string_lossy()
+        .into_owned())
+}
+
+/// Resolve existing aliases and new child directories without creating them.
+fn resolve_directory(path: &std::path::Path) -> anyhow::Result<std::path::PathBuf> {
+    match path.canonicalize() {
+        Ok(resolved) => {
+            anyhow::ensure!(resolved.is_dir(), "The data directory is not a directory");
+            Ok(resolved)
         }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let absolute = std::path::absolute(path)?;
+            let name = absolute
+                .file_name()
+                .context("Use a data directory without unresolved parent components")?;
+            let parent = absolute.parent().context("Missing data directory parent")?;
+            Ok(resolve_directory(parent)?.join(name))
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+// Empty environment values are unset, allowing Compose to pass optional inputs.
+// File paths are OS-native and must not be trimmed or converted lossily.
+pub(crate) fn load_secret_key(
+    key: Option<OsString>,
+    key_file: Option<OsString>,
+) -> anyhow::Result<Vec<u8>> {
+    let key = key.filter(|value| !value.is_empty());
+    let key_file = key_file.filter(|value| !value.is_empty());
+    let (value, source) = match (key, key_file) {
+        (Some(_), Some(_)) => anyhow::bail!("Set only one of WF_SECRET_KEY or WF_SECRET_KEY_FILE"),
+        (None, None) => anyhow::bail!("WF_SECRET_KEY or WF_SECRET_KEY_FILE must be set"),
+        (Some(value), None) => (
+            value
+                .into_string()
+                .map_err(|_| anyhow::anyhow!("WF_SECRET_KEY must be valid UTF-8"))?,
+            "WF_SECRET_KEY",
+        ),
+        (None, Some(path)) => (
+            std::fs::read_to_string(path).context("Cannot read WF_SECRET_KEY_FILE")?,
+            "WF_SECRET_KEY_FILE",
+        ),
+    };
+    decode_secret_key(&value).with_context(|| format!("Invalid {source}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const KEY: &str = "--------------------------------";
+
+    #[test]
+    fn data_directory_preserves_legacy_configuration_and_resolves_new_roots() {
+        for database in [
+            None,
+            Some("/data/wealthfolio.db"),
+            Some("app.db"),
+            Some("./db/custom.db"),
+        ] {
+            for root in [None, Some(OsString::new())] {
+                assert_eq!(
+                    resolve_database_path(root, database.map(str::to_owned)).unwrap(),
+                    database.unwrap_or(crate::main_lib::DEFAULT_DB_PATH)
+                );
+            }
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("new/nested");
+        for database in [
+            None,
+            Some(String::new()),
+            Some(root.join("app.db").to_str().unwrap().into()),
+        ] {
+            let path =
+                resolve_database_path(Some(root.clone().into_os_string()), database).unwrap();
+            assert_eq!(std::path::Path::new(&path), root.join("app.db"));
+            assert!(!root.exists());
+        }
+        assert!(resolve_database_path(
+            Some(".".into()),
+            Some(
+                std::env::current_dir()
+                    .unwrap()
+                    .join("custom.db")
+                    .to_str()
+                    .unwrap()
+                    .into()
+            )
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn data_directory_rejects_conflicts_and_files_without_writing() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("new");
+        let error = resolve_database_path(
+            Some(root.into_os_string()),
+            Some(temp.path().join("other/custom.db").to_str().unwrap().into()),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("must select the same directory"));
+        assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 0);
+        let file = temp.path().join("database");
+        std::fs::write(&file, "preserved").unwrap();
+        assert!(resolve_database_path(Some(file.clone().into_os_string()), None).is_err());
+        assert_eq!(std::fs::read_to_string(file).unwrap(), "preserved");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn data_directory_accepts_symlink_aliases_without_rewriting_legacy_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let real = temp.path().join("real");
+        let alias = temp.path().join("alias");
+        std::fs::create_dir(&real).unwrap();
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
+        let database = real.join("new/custom.db").to_str().unwrap().to_owned();
+        assert_eq!(
+            resolve_database_path(
+                Some(alias.join("new").into_os_string()),
+                Some(database.clone())
+            )
+            .unwrap(),
+            database
+        );
+        assert!(!real.join("new").exists());
+    }
+
+    #[test]
+    fn invalid_startup_configuration_returns_errors_without_panicking() {
+        let dir = tempfile::tempdir().unwrap();
+        let cases: &[(&str, &[(&str, &str)])] = &[
+            ("Invalid WF_LISTEN_ADDR", &[("WF_LISTEN_ADDR", "invalid")]),
+            (
+                "WF_CORS_ALLOW_ORIGINS",
+                &[("WF_CORS_ALLOW_ORIGINS", "https://example.com\ninvalid")],
+            ),
+            ("server secret key", &[("WF_SECRET_KEY", "")]),
+            (
+                "Invalid WF_COOKIE_SECURE",
+                &[
+                    ("WF_AUTH_PASSWORD_HASH", "configured"),
+                    ("WF_COOKIE_SECURE", "invalid"),
+                ],
+            ),
+            ("cannot be", &[("WF_AUTH_PASSWORD_HASH", "configured")]),
+            ("Refusing to start", &[("WF_LISTEN_ADDR", "0.0.0.0:8088")]),
+            (
+                "WF_MCP_ENABLED=true",
+                &[
+                    ("WF_LISTEN_ADDR", "0.0.0.0:8088"),
+                    ("WF_AUTH_REQUIRED", "false"),
+                    ("WF_MCP_ENABLED", "true"),
+                ],
+            ),
+            (
+                "partially configured",
+                &[("WF_OIDC_ISSUER_URL", "https://issuer.example")],
+            ),
+            (
+                "WF_OIDC_REDIRECT_URL",
+                &[
+                    ("WF_OIDC_ISSUER_URL", "https://issuer.example"),
+                    ("WF_OIDC_CLIENT_ID", "client"),
+                ],
+            ),
+            (
+                "without an allowlist",
+                &[
+                    ("WF_OIDC_ISSUER_URL", "https://issuer.example"),
+                    ("WF_OIDC_CLIENT_ID", "client"),
+                    ("WF_OIDC_REDIRECT_URL", "https://app.example/callback"),
+                ],
+            ),
+        ];
+        for (expected, env) in cases {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "config::tests::invalid_config_worker",
+                    "--nocapture",
+                ])
+                .current_dir(dir.path())
+                .env_clear()
+                .env("WF_LISTEN_ADDR", "127.0.0.1:8088")
+                .env("WF_SECRET_KEY", KEY)
+                .env("WF_CONFIG_EXPECT_ERROR", expected)
+                .envs(env.iter().copied())
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "case {expected}: {}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_config_worker() {
+        let Ok(expected) = std::env::var("WF_CONFIG_EXPECT_ERROR") else {
+            return;
+        };
+        match Config::from_env() {
+            Err(error) => assert!(format!("{error:#}").contains(&expected), "{error:#}"),
+            Ok(_) => panic!("invalid configuration was accepted"),
+        }
+    }
+
+    #[test]
+    fn file_and_environment_derive_identical_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("master key é.txt");
+        for value in [
+            KEY.to_string(),
+            format!("{KEY}\n"),
+            format!("{KEY}\r\n"),
+            "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=".to_string(),
+        ] {
+            std::fs::write(&path, &value).unwrap();
+            let env = load_secret_key(Some(value.into()), Some(OsString::new())).unwrap();
+            let file = load_secret_key(Some(OsString::new()), Some(path.clone().into())).unwrap();
+            assert_eq!(env, file);
+            assert_eq!(derive_keys(&env), derive_keys(&file));
+        }
+    }
+
+    #[test]
+    fn startup_reads_file_key_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("startup key.txt");
+        std::fs::write(&path, format!("{KEY}\r\n")).unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "config::tests::startup_worker", "--nocapture"])
+            .current_dir(dir.path())
+            .env_clear()
+            .env("WF_KEY_INPUT_TEST", "1")
+            .env("WF_LISTEN_ADDR", "127.0.0.1:8088")
+            .env("WF_SECRET_KEY_FILE", &path)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!path.exists(), "startup worker must execute");
+    }
+
+    #[test]
+    fn startup_worker() {
+        if std::env::var_os("WF_KEY_INPUT_TEST").is_none() {
+            return;
+        }
+        let config = Config::from_env().unwrap();
+        std::fs::remove_file(std::env::var_os("WF_SECRET_KEY_FILE").unwrap()).unwrap();
+        assert_eq!(config.raw_secret_key, KEY.as_bytes());
+        assert_eq!(config.secrets_encryption_key, derive_keys(KEY.as_bytes()).1);
+    }
+
+    #[test]
+    fn rejects_conflicting_or_missing_sources() {
+        assert!(load_secret_key(None, None).is_err());
+        assert!(load_secret_key(Some(OsString::new()), Some(OsString::new())).is_err());
+        let error = load_secret_key(Some(KEY.into()), Some("missing-file".into())).unwrap_err();
+        assert!(error.to_string().contains("Set only one"));
+        assert!(!error.to_string().contains(KEY));
+        assert!(load_secret_key(Some("   ".into()), None).is_err());
+    }
+
+    #[test]
+    fn invalid_files_fail_without_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("key");
+        assert!(load_secret_key(None, Some(path.clone().into())).is_err());
+        assert!(load_secret_key(None, Some(dir.path().into())).is_err());
+        for bytes in [b"".as_slice(), b"  \r\n", b"invalid-key", &[0xff]] {
+            std::fs::write(&path, bytes).unwrap();
+            let error = load_secret_key(None, Some(path.clone().into())).unwrap_err();
+            assert!(format!("{error:#}").contains("WF_SECRET_KEY_FILE"));
+            assert!(!format!("{error:#}").contains("invalid-key"));
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn supports_non_utf8_file_paths() {
+        use std::os::unix::ffi::OsStringExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(OsString::from_vec(vec![0xff]));
+        std::fs::write(&path, KEY).unwrap();
+        assert_eq!(
+            load_secret_key(None, Some(path.into())).unwrap(),
+            KEY.as_bytes()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_non_utf8_keys() {
+        use std::os::unix::ffi::OsStringExt;
+        assert!(load_secret_key(Some(OsString::from_vec(vec![0xff])), None).is_err());
     }
 }

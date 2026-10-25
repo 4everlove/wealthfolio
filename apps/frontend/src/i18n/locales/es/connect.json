@@ -1,4 +1,5 @@
 {
+  "opensInBrowser": "Se abre en el navegador",
   "page": {
     "title": "Sincronización y conexiones",
     "subtitle": "Tus dispositivos, todos en un solo lugar.",
@@ -13,7 +14,11 @@
     "noDevicesSyncing": "Aún no hay dispositivos sincronizándose",
     "noDevicesDescription": "Configura la sincronización de dispositivos en los ajustes para mantener tus datos sincronizados entre dispositivos.",
     "noActivity": "Aún no hay actividad",
-    "noActivityDescription": "Las actualizaciones aparecerán aquí cuando tus datos empiecen a sincronizarse."
+    "noActivityDescription": "Las actualizaciones aparecerán aquí cuando tus datos empiecen a sincronizarse.",
+    "showMore_one": "Mostrar {{count}} más",
+    "showMore_many": "Mostrar {{count}} más",
+    "showMore_other": "Mostrar {{count}} más",
+    "showLess": "Mostrar menos"
   },
   "emptyState": {
     "optional": "Opcional",
@@ -23,20 +28,21 @@
     "learnMore": "Más información sobre Connect",
     "features": {
       "brokerageSync": {
-        "title": "Sincronización de corredores",
-        "description": "Sincroniza cuentas y transacciones automáticamente a diario."
+        "title": "Cuentas conectadas",
+        "description": "Sincroniza automáticamente las transacciones de tus brókeres."
       },
       "deviceSync": {
-        "title": "Sincronización de dispositivos",
-        "description": "Sincroniza entre dispositivos con cifrado de extremo a extremo."
+        "title": "Sincronización y copias",
+        "description": "Sincronización cifrada de extremo a extremo y copias automáticas en la nube."
       },
       "householdView": {
-        "title": "Vista familiar",
-        "description": "Comparte cuentas con miembros de la familia."
+        "title": "Carteras familiares",
+        "description": "Una vista compartida de las inversiones de tu familia."
       }
     }
   },
   "flow": {
+    "aggregatorExample": "(p. ej., SnapTrade)",
     "yourDevice": "Tu dispositivo",
     "localDatabase": "Base de datos local",
     "dataStaysHere": "Los datos permanecen aquí",
@@ -69,7 +75,8 @@
     "noDataYet": "Aún no hay datos",
     "dataAsOf": "Datos a fecha de {{date}}",
     "emptyTitle": "Aún no hay cuentas sincronizadas",
-    "emptyDescription": "Conecta un corredor para empezar a sincronizar tus cuentas."
+    "emptyDescription": "Conecta un corredor para empezar a sincronizar tus cuentas.",
+    "needsSetup": "Requiere configuración"
   },
   "connections": {
     "title": "Conexiones de corredores",
@@ -88,7 +95,13 @@
     "accountsSyncing_many": "{{count}} cuentas sincronizándose",
     "partialSyncing_one": "{{syncing}} de {{total}} cuentas sincronizándose · {{excluded}} cuenta excluida",
     "partialSyncing_other": "{{syncing}} de {{total}} cuentas sincronizándose · {{excluded}} cuentas excluidas",
-    "partialSyncing_many": "{{syncing}} de {{total}} cuentas sincronizándose · {{excluded}} cuentas excluidas"
+    "partialSyncing_many": "{{syncing}} de {{total}} cuentas sincronizándose · {{excluded}} cuentas excluidas",
+    "accountCount_one": "{{count}} cuenta",
+    "accountCount_many": "{{count}} cuentas",
+    "accountCount_other": "{{count}} cuentas",
+    "excludedCount_one": "{{count}} excluida",
+    "excludedCount_many": "{{count}} excluidas",
+    "excludedCount_other": "{{count}} excluidas"
   },
   "sync": {
     "syncNow": "Sincronizar ahora",
@@ -196,21 +209,36 @@
     "title": "La sincronización del corredor requiere atención",
     "description_one": "{{count}} cuenta necesita un reintento o revisión del corredor.",
     "description_other": "{{count}} cuentas necesitan un reintento o revisión del corredor.",
-    "description_many": "{{count}} cuentas necesitan un reintento o revisión del corredor."
+    "description_many": "{{count}} cuentas necesitan un reintento o revisión del corredor.",
+    "heading": "Requiere atención",
+    "connectionLost": "Conexión perdida",
+    "accountsNotSyncing_one": "{{count}} cuenta sin sincronizar",
+    "accountsNotSyncing_many": "{{count}} cuentas sin sincronizar",
+    "accountsNotSyncing_other": "{{count}} cuentas sin sincronizar",
+    "syncFailed": "La última sincronización falló"
   },
   "setup": {
     "newAccountsTitle": "Las nuevas cuentas requieren configuración",
     "newAccountsDescription_one": "{{count}} cuenta necesita una configuración rápida antes de que podamos empezar a sincronizar.",
     "newAccountsDescription_other": "{{count}} cuentas necesitan una configuración rápida antes de que podamos empezar a sincronizar.",
     "newAccountsDescription_many": "{{count}} cuentas necesitan una configuración rápida antes de que podamos empezar a sincronizar.",
-    "reviewAccounts": "Revisar cuentas"
+    "reviewAccounts": "Revisar cuentas",
+    "setUp": "Configurar"
   },
   "devices": {
     "thisDevice": "Este dispositivo",
     "activeNow": "Activo ahora",
     "lastSeen": "Visto por última vez {{time}}",
     "online": "En línea",
-    "never": "Nunca"
+    "never": "Nunca",
+    "showInactive_one": "Mostrar {{count}} dispositivo inactivo",
+    "showInactive_many": "Mostrar {{count}} dispositivos inactivos",
+    "showInactive_other": "Mostrar {{count}} dispositivos inactivos",
+    "hideInactive": "Ocultar dispositivos inactivos",
+    "platforms": {
+      "server": "Servidor",
+      "web": "Web"
+    }
   },
   "deviceStatus": {
     "syncError": "Error de sincronización",
@@ -239,6 +267,10 @@
     "lastUsed": "Usado por última vez"
   },
   "subscription": {
+    "copySupportEmail": "Copiar el correo de soporte",
+    "syncPausedTooltip": "Sincronización pausada — se requiere una suscripción activa",
+    "syncPausedTitle": "La sincronización está pausada",
+    "syncPausedDescription": "Se requiere una suscripción activa para sincronizar. Tus datos locales y los cambios pendientes se conservan.",
     "comingSoon": "Próximamente",
     "getStarted": "Empezar",
     "perMonthShort": "mes",
@@ -299,5 +331,16 @@
   },
   "errors": {
     "unknown": "Error desconocido"
+  },
+  "session": {
+    "restoring": "Restaurando Connect…",
+    "unavailable": "Connect no está disponible temporalmente",
+    "localAvailable": "Tu cartera local está disponible. Reintenta la conexión."
+  },
+  "rebind": {
+    "title": "¿Cambiar la conexión de Connect de este perfil?",
+    "description": "Vas a conectar otra cuenta u otro grupo familiar. Se conservarán los datos locales de tu cartera, pero se eliminarán sus vínculos con brókeres y la configuración de sincronización de dispositivos. La nueva cuenta podrá añadir datos de brókeres a este perfil. Vuelve a configurar la sincronización de dispositivos cuando quieras. Usa un perfil nuevo si prefieres mantener los datos separados.",
+    "cancel": "Cancelar",
+    "confirm": "Cambiar conexión"
   }
 }

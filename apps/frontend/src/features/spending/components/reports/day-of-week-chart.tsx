@@ -8,7 +8,7 @@ import type { Activity } from "@/lib/types";
 import {} from "@/lib/utils";
 import { useAmountFormatting } from "@wealthfolio/ui";
 
-import { getActivitySpendingAmount } from "../../lib/constants";
+import { getVisibleSpendingAmount } from "../../lib/constants";
 
 interface DayOfWeekChartProps {
   activities: Activity[];
@@ -55,14 +55,14 @@ export function DayOfWeekChart({
   const peak = useMemo(() => Math.max(0, ...data.map((d) => d.total)), [data]);
 
   return (
-    <div className="h-[180px] w-full">
+    <div className="h-45 w-full">
       <ResponsiveContainer width="100%" height="100%">
         <BarChart data={data} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
           <XAxis
             dataKey="day"
             axisLine={false}
             tickLine={false}
-            tick={{ fontSize: 11, fill: "var(--muted-foreground)" }}
+            tick={{ fontSize: "0.6875rem", fill: "var(--muted-foreground)" }}
           />
           <Tooltip
             cursor={{ fill: "var(--chart-cursor)" }}
@@ -96,7 +96,7 @@ export function DayOfWeekChart({
           </Bar>
         </BarChart>
       </ResponsiveContainer>
-      <div className="text-muted-foreground/70 mt-1 flex justify-between text-[10px] tabular-nums">
+      <div className="text-muted-foreground/70 text-2xs mt-1 flex justify-between tabular-nums">
         <span>
           {t("spending:dayOfWeek.min")}{" "}
           {isBalanceHidden
@@ -120,7 +120,7 @@ function buildSeries(
   const totals = new Array(7).fill(0) as number[];
   const counts = new Array(7).fill(0) as number[];
   for (const a of activities) {
-    const spendingAmount = getActivitySpendingAmount(a, accountTypeById?.get(a.accountId));
+    const spendingAmount = getVisibleSpendingAmount(a, accountTypeById?.get(a.accountId));
     if (spendingAmount === 0) continue;
     const dow = (new Date(a.activityDate).getDay() + 6) % 7; // Mon=0
     totals[dow] += spendingAmount;

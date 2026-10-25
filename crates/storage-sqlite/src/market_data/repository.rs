@@ -18,7 +18,8 @@ use crate::utils::{chunk_for_sqlite, SQLITE_MAX_PARAMS_CHUNK};
 use wealthfolio_core::quotes::store::{ProviderSettingsStore, QuoteStore};
 use wealthfolio_core::quotes::types::{AssetId, Day, QuoteSource};
 use wealthfolio_core::quotes::{
-    LatestQuotePair, MarketDataProviderSetting, Quote, UpdateMarketDataProviderSetting,
+    LatestQuotePair, MarketDataProviderSetting, ProviderHistoryResetContext, Quote,
+    ResetProviderHistoryResult, UpdateMarketDataProviderSetting,
 };
 use wealthfolio_core::Result;
 
@@ -34,6 +35,38 @@ const SOURCE_PRIORITY_CASE: &str =
 const SOURCE_PRIORITY_CASE_Q: &str =
     "CASE q.source WHEN 'MANUAL' THEN 1 WHEN 'BROKER' THEN 3 ELSE 2 END";
 
+/// `SOURCE_PRIORITY_CASE` for rows already read.
+fn source_priority(source: &str) -> u8 {
+    match source {
+        "MANUAL" => 1,
+        "BROKER" => 3,
+        _ => 2,
+    }
+}
+
+/// One quote per asset and day from rows ordered by (asset, day): the source
+/// that ranks first, then the latest timestamp.
+fn best_per_day(rows: Vec<QuoteDB>) -> Vec<QuoteDB> {
+    fn rank(row: &QuoteDB) -> (u8, std::cmp::Reverse<&str>) {
+        (
+            source_priority(&row.source),
+            std::cmp::Reverse(row.timestamp.as_str()),
+        )
+    }
+    let mut best: Vec<QuoteDB> = Vec::with_capacity(rows.len());
+    for row in rows {
+        match best.last_mut() {
+            Some(last) if last.asset_id == row.asset_id && last.day == row.day => {
+                if rank(&row) < rank(last) {
+                    *last = row;
+                }
+            }
+            _ => best.push(row),
+        }
+    }
+    best
+}
+
 pub struct MarketDataRepository {
     pool: Arc<Pool<ConnectionManager<SqliteConnection>>>,
     writer: WriteHandle,
@@ -43,6 +76,56 @@ impl MarketDataRepository {
     pub fn new(pool: Arc<Pool<ConnectionManager<SqliteConnection>>>, writer: WriteHandle) -> Self {
         Self { pool, writer }
     }
+}
+
+fn reset_context(conn: &mut SqliteConnection, id: &str) -> Result<ProviderHistoryResetContext> {
+    use crate::schema::{assets, market_data_providers as providers};
+    let asset: wealthfolio_core::assets::Asset = assets::table
+        .find(id)
+        .select(crate::assets::AssetDB::as_select())
+        .first::<crate::assets::AssetDB>(conn)
+        .map_err(StorageError::QueryFailed)?
+        .into();
+    let providers = providers::table
+        .order(providers::id.asc())
+        .select((
+            providers::id,
+            providers::enabled,
+            providers::priority,
+            providers::config,
+        ))
+        .load::<(String, bool, i32, Option<String>)>(conn)
+        .map_err(StorageError::QueryFailed)?;
+    // Exclude labels and last-sync bookkeeping: only fetch identity/configuration matters.
+    let fingerprint = serde_json::json!({
+        "kind": asset.kind, "active": asset.is_active, "mode": asset.quote_mode,
+        "currency": asset.quote_ccy, "type": asset.instrument_type,
+        "symbol": asset.instrument_symbol, "exchange": asset.instrument_exchange_mic,
+        "metadata": asset.metadata, "assetProvider": asset.provider_config,
+        "providers": providers,
+    })
+    .to_string();
+    let earliest: Option<String> = quotes_dsl::quotes
+        .filter(quotes_dsl::asset_id.eq(id))
+        .filter(quotes_dsl::source.ne("MANUAL"))
+        .filter(quotes_dsl::source.ne("BROKER"))
+        .select(diesel::dsl::min(quotes_dsl::day))
+        .first(conn)
+        .map_err(StorageError::QueryFailed)?;
+    let earliest_provider_date = earliest
+        .map(|day| chrono::NaiveDate::parse_from_str(&day, "%Y-%m-%d"))
+        .transpose()?;
+    let provider_configuration = providers
+        .iter()
+        .filter(|(_, enabled, _, _)| *enabled)
+        .map(|(id, _, priority, _)| (id.clone(), *priority))
+        .collect();
+    Ok(ProviderHistoryResetContext {
+        asset,
+        fingerprint,
+        earliest_provider_date,
+        provider_configuration,
+    })
 }
 
 // =============================================================================
@@ -138,18 +221,22 @@ impl QuoteStore for MarketDataRepository {
                     if provider_pairs.is_empty() {
                         db_rows
                     } else {
-                        let asset_ids: Vec<&str> = provider_pairs.iter().map(|(a, _)| *a).collect();
-                        let days: Vec<&str> = provider_pairs.iter().map(|(_, d)| *d).collect();
-
-                        let manual_days: HashSet<(String, String)> = quotes_dsl::quotes
-                            .filter(quotes_dsl::source.eq("MANUAL"))
-                            .filter(quotes_dsl::asset_id.eq_any(&asset_ids))
-                            .filter(quotes_dsl::day.eq_any(&days))
-                            .select((quotes_dsl::asset_id, quotes_dsl::day))
-                            .load::<(String, String)>(tx.conn())
-                            .map_err(StorageError::QueryFailed)?
-                            .into_iter()
-                            .collect();
+                        let provider_pairs: Vec<_> = provider_pairs.into_iter().collect();
+                        // Each pair can add two IN parameters; reserve one for source.
+                        let pairs_per_chunk = (SQLITE_MAX_PARAMS_CHUNK - 1) / 2;
+                        let mut manual_days = HashSet::new();
+                        for chunk in provider_pairs.chunks(pairs_per_chunk) {
+                            let asset_ids: HashSet<&str> = chunk.iter().map(|(a, _)| *a).collect();
+                            let days: HashSet<&str> = chunk.iter().map(|(_, d)| *d).collect();
+                            let rows = quotes_dsl::quotes
+                                .filter(quotes_dsl::source.eq("MANUAL"))
+                                .filter(quotes_dsl::asset_id.eq_any(asset_ids))
+                                .filter(quotes_dsl::day.eq_any(days))
+                                .select((quotes_dsl::asset_id, quotes_dsl::day))
+                                .load::<(String, String)>(tx.conn())
+                                .map_err(StorageError::QueryFailed)?;
+                            manual_days.extend(rows);
+                        }
 
                         if manual_days.is_empty() {
                             db_rows
@@ -209,6 +296,90 @@ impl QuoteStore for MarketDataRepository {
                 Ok(total_upserted)
             })
             .await
+    }
+
+    fn provider_history_reset_context(
+        &self,
+        asset_id: &str,
+    ) -> Result<ProviderHistoryResetContext> {
+        let mut conn = get_connection(&self.pool)?;
+        conn.transaction::<_, StorageError, _>(|conn| {
+            reset_context(conn, asset_id).map_err(StorageError::from)
+        })
+        .map_err(Into::into)
+    }
+
+    async fn replace_provider_history(
+        &self,
+        context: ProviderHistoryResetContext,
+        quotes: Vec<Quote>,
+    ) -> Result<ResetProviderHistoryResult> {
+        let first = quotes.first().ok_or_else(|| {
+            wealthfolio_core::Error::Asset(
+                "Cannot replace provider history with an empty response".into(),
+            )
+        })?;
+        let source = first.data_source.clone();
+        if source.is_empty()
+            || matches!(source.as_str(), "MANUAL" | "BROKER")
+            || quotes.iter().any(|q| {
+                q.asset_id != context.asset.id
+                    || q.data_source != source
+                    || q.currency.is_empty()
+                    || q.close <= rust_decimal::Decimal::ZERO
+            })
+        {
+            return Err(wealthfolio_core::Error::Asset(
+                "Invalid provider history replacement".into(),
+            ));
+        }
+        let from_date = quotes
+            .iter()
+            .map(|q| q.timestamp.date_naive())
+            .min()
+            .expect("quotes is non-empty: first was read above")
+            .to_string();
+        let to_date = quotes
+            .iter()
+            .map(|q| q.timestamp.date_naive())
+            .max()
+            .expect("quotes is non-empty: first was read above")
+            .to_string();
+        let rows: Vec<QuoteDB> = quotes.iter().map(QuoteDB::from).collect();
+        self.writer.exec_tx(move |tx| {
+            let current = reset_context(tx.conn(), &context.asset.id)?;
+            current.ensure_eligible()?;
+            if current.fingerprint != context.fingerprint {
+                return Err(wealthfolio_core::Error::Asset(
+                    "Asset or provider settings changed during fetching; history was not replaced".into()));
+            }
+            let deleted_count = diesel::delete(quotes_dsl::quotes
+                .filter(quotes_dsl::asset_id.eq(&context.asset.id))
+                .filter(quotes_dsl::source.ne("MANUAL"))
+                .filter(quotes_dsl::source.ne("BROKER")))
+                .execute(tx.conn()).map_err(StorageError::QueryFailed)?;
+            let mut inserted_count = 0;
+            // INSERT (not REPLACE) protects unrelated/manual identities from collisions.
+            // Deliberately bypass the ordinary upsert's manual-day exclusion.
+            for chunk in rows.chunks(1_000) {
+                inserted_count += diesel::insert_into(quotes_dsl::quotes).values(chunk)
+                    .execute(tx.conn()).map_err(StorageError::QueryFailed)?;
+            }
+            let now = chrono::Utc::now().to_rfc3339();
+            diesel::sql_query("INSERT INTO quote_sync_state
+                (asset_id, data_source, sync_priority, error_count, last_synced_at, created_at, updated_at)
+                VALUES (?, ?, 0, 0, ?, ?, ?)
+                ON CONFLICT(asset_id) DO UPDATE SET data_source=excluded.data_source,
+                error_count=0, last_error=NULL, last_synced_at=excluded.last_synced_at,
+                updated_at=excluded.updated_at")
+                .bind::<Text, _>(&context.asset.id).bind::<Text, _>(&source)
+                .bind::<Text, _>(&now).bind::<Text, _>(&now).bind::<Text, _>(&now)
+                .execute(tx.conn()).map_err(StorageError::QueryFailed)?;
+            Ok(ResetProviderHistoryResult {
+                asset_id: context.asset.id, source, from_date, to_date,
+                inserted_count, deleted_count,
+            })
+        }).await
     }
 
     async fn delete_quotes_for_asset(&self, asset_id: &AssetId) -> Result<usize> {
@@ -572,47 +743,13 @@ impl QuoteStore for MarketDataRepository {
         symbols: &[String],
         as_of: chrono::NaiveDate,
     ) -> Result<HashMap<String, Quote>> {
-        if symbols.is_empty() {
-            return Ok(HashMap::new());
-        }
-
-        let mut conn = get_connection(&self.pool)?;
-        let mut result: HashMap<String, Quote> = HashMap::new();
-        let as_of_str = as_of.format("%Y-%m-%d").to_string();
-
-        for chunk in chunk_for_sqlite(symbols) {
-            let placeholders = chunk.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
-
-            let sql = format!(
-                "WITH RankedQuotes AS ( \
-                    SELECT \
-                        q.*, \
-                        ROW_NUMBER() OVER (PARTITION BY q.asset_id ORDER BY q.day DESC, {priority} ASC, q.timestamp DESC) as rn \
-                    FROM quotes q \
-                    WHERE q.asset_id IN ({placeholders}) AND q.day <= ? \
-                ) \
-                SELECT * FROM RankedQuotes WHERE rn = 1 \
-                ORDER BY asset_id",
-                priority = SOURCE_PRIORITY_CASE_Q,
-                placeholders = placeholders
-            );
-
-            let mut query_builder = Box::new(sql_query(sql)).into_boxed::<Sqlite>();
-
-            for symbol_val in chunk {
-                query_builder = query_builder.bind::<Text, _>(symbol_val);
-            }
-            query_builder = query_builder.bind::<Text, _>(as_of_str.clone());
-
-            let ranked_quotes_db: Vec<QuoteDB> =
-                query_builder.load::<QuoteDB>(&mut conn).into_core()?;
-
-            for quote_db in ranked_quotes_db {
-                result.insert(quote_db.asset_id.clone(), quote_db.into());
-            }
-        }
-
-        Ok(result)
+        // One index seek per asset: ranking every quote up to `as_of` grows
+        // with the price history.
+        let requests: Vec<(String, NaiveDate)> = symbols
+            .iter()
+            .map(|symbol| (symbol.clone(), as_of))
+            .collect();
+        self.get_latest_quotes_as_of_dates(&requests)
     }
 
     fn get_latest_quotes_as_of_dates(
@@ -697,16 +834,13 @@ impl QuoteStore for MarketDataRepository {
                     placeholders = placeholders
                 )
             } else {
+                // Ranking the sources in SQL sorts every row of the range; the
+                // index already yields them in (asset, day) order, so the best
+                // source per day is picked while reading instead.
                 format!(
-                    "WITH RankedQuotes AS ( \
-                        SELECT q.*, \
-                            ROW_NUMBER() OVER (PARTITION BY q.asset_id, q.day ORDER BY {priority} ASC, q.timestamp DESC) as rn \
-                        FROM quotes q \
-                        WHERE q.asset_id IN ({placeholders}) AND q.day >= ? AND q.day <= ? \
-                    ) \
-                    SELECT * FROM RankedQuotes WHERE rn = 1 \
-                    ORDER BY asset_id, day ASC",
-                    priority = SOURCE_PRIORITY_CASE_Q,
+                    "SELECT q.* FROM quotes q \
+                     WHERE q.asset_id IN ({placeholders}) AND q.day >= ? AND q.day <= ? \
+                     ORDER BY q.asset_id, q.day",
                     placeholders = placeholders
                 )
             };
@@ -720,13 +854,13 @@ impl QuoteStore for MarketDataRepository {
             if let Some(source) = source {
                 query = query.bind::<Text, _>(source.to_storage_string());
             }
-            result.extend(
-                query
-                    .load::<QuoteDB>(&mut conn)
-                    .into_core()?
-                    .into_iter()
-                    .map(Quote::from),
-            );
+            let rows = query.load::<QuoteDB>(&mut conn).into_core()?;
+            let rows = if source.is_some() {
+                rows
+            } else {
+                best_per_day(rows)
+            };
+            result.extend(rows.into_iter().map(Quote::from));
         }
 
         result.sort_by(|left, right| {
@@ -1307,6 +1441,532 @@ mod tests {
         }
     }
 
+    struct NoSecrets;
+    impl wealthfolio_core::secrets::SecretStore for NoSecrets {
+        fn set_secret(&self, _: &str, _: &str) -> Result<()> {
+            Ok(())
+        }
+        fn get_secret(&self, _: &str) -> Result<Option<String>> {
+            Ok(None)
+        }
+        fn delete_secret(&self, _: &str) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct ShortHistoryProvider {
+        gate: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
+    }
+    #[async_trait]
+    impl wealthfolio_market_data::MarketDataProvider for ShortHistoryProvider {
+        fn id(&self) -> &'static str {
+            "YAHOO"
+        }
+        fn capabilities(&self) -> wealthfolio_market_data::ProviderCapabilities {
+            wealthfolio_market_data::FixtureProvider::new("unused").capabilities()
+        }
+        fn rate_limit(&self) -> wealthfolio_market_data::RateLimit {
+            Default::default()
+        }
+        async fn get_latest_quote(
+            &self,
+            _: &wealthfolio_market_data::QuoteContext,
+            _: wealthfolio_market_data::ProviderInstrument,
+        ) -> std::result::Result<
+            wealthfolio_market_data::Quote,
+            wealthfolio_market_data::errors::MarketDataError,
+        > {
+            unreachable!("history test must not fall back to latest")
+        }
+        async fn get_historical_quotes(
+            &self,
+            _: &wealthfolio_market_data::QuoteContext,
+            _: wealthfolio_market_data::ProviderInstrument,
+            start: chrono::DateTime<Utc>,
+            end: chrono::DateTime<Utc>,
+        ) -> std::result::Result<
+            Vec<wealthfolio_market_data::Quote>,
+            wealthfolio_market_data::errors::MarketDataError,
+        > {
+            if let Some((started, release)) = &self.gate {
+                started.notify_one();
+                release.notified().await;
+            }
+            Ok((2015..2020)
+                .map(|year| {
+                    wealthfolio_market_data::Quote::new(
+                        Utc.with_ymd_and_hms(year, 1, 4, 12, 0, 0).unwrap(),
+                        Decimal::TEN,
+                        "USD".into(),
+                        "YAHOO".into(),
+                    )
+                })
+                .filter(|q| q.timestamp >= start && q.timestamp <= end)
+                .collect())
+        }
+    }
+
+    #[tokio::test]
+    async fn backfill_execution_preserves_history_then_explicit_reset_replaces_it() {
+        use wealthfolio_core::quotes::{
+            MarketDataClient, QuoteSyncService, QuoteSyncServiceTrait, SyncMode,
+        };
+        let (repo, _temp) = create_test_repository().await;
+        insert_test_asset(&repo, "AAPL");
+        let mut conn = get_connection(&repo.pool).unwrap();
+        diesel::sql_query("UPDATE market_data_providers SET enabled=0")
+            .execute(&mut conn)
+            .unwrap();
+        diesel::sql_query("INSERT INTO accounts (id,name,account_type,currency,is_default,is_active,created_at,updated_at) VALUES ('history-account','History','SECURITIES','USD',0,1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)")
+            .execute(&mut conn).unwrap();
+        diesel::sql_query("INSERT INTO activities (id,account_id,asset_id,activity_type,activity_date,quantity,unit_price,currency,created_at,updated_at) VALUES ('history-buy','history-account','AAPL','BUY','2010-01-04T12:00:00Z','1','1','USD',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)")
+            .execute(&mut conn).unwrap();
+        drop(conn);
+        let old_quotes: Vec<_> = (2010..2020)
+            .map(|year| {
+                quote_with_source(
+                    "AAPL",
+                    NaiveDate::from_ymd_opt(year, 1, 4).unwrap(),
+                    "YAHOO",
+                    Decimal::ONE,
+                )
+            })
+            .collect();
+        repo.upsert_quotes(&old_quotes).await.unwrap();
+        let repo = Arc::new(repo);
+        let client = MarketDataClient::new_with_extra(
+            Arc::new(NoSecrets),
+            vec![],
+            vec![Arc::new(ShortHistoryProvider::default())],
+        )
+        .await
+        .unwrap();
+        let sync = QuoteSyncService::new(
+            Arc::new(tokio::sync::RwLock::new(client)),
+            repo.clone(),
+            Arc::new(crate::market_data::QuoteSyncStateRepository::new(
+                repo.pool.clone(),
+                repo.writer.clone(),
+            )),
+            Arc::new(crate::assets::AssetRepository::new(
+                repo.pool.clone(),
+                repo.writer.clone(),
+            )),
+            Arc::new(crate::activities::ActivityRepository::new(
+                repo.pool.clone(),
+                repo.writer.clone(),
+            )),
+        );
+        let result = sync
+            .sync(
+                SyncMode::BackfillHistory { days: 365 },
+                Some(vec!["AAPL".into()]),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.failed, 0, "{:?}", result.failures);
+        assert_eq!(result.quotes_synced, 5);
+        assert_eq!(raw_rows(&repo, "AAPL").len(), 10);
+        let reset = sync.reset_provider_history("AAPL").await.unwrap();
+        assert_eq!((reset.deleted_count, reset.inserted_count), (10, 5));
+        assert_eq!(raw_rows(&repo, "AAPL").len(), 5);
+    }
+
+    #[tokio::test]
+    async fn global_reset_commits_successes_preserves_failures_and_skips_manual_assets() {
+        use wealthfolio_core::quotes::{MarketDataClient, QuoteSyncService};
+        let (repo, _temp) = create_test_repository().await;
+        for id in ["GOOD", "FAILED", "MANUAL"] {
+            insert_test_asset(&repo, id);
+            repo.save_quote(&quote_with_source(
+                id,
+                NaiveDate::from_ymd_opt(2010, 1, 4).unwrap(),
+                "YAHOO",
+                Decimal::ONE,
+            ))
+            .await
+            .unwrap();
+        }
+        let mut conn = get_connection(&repo.pool).unwrap();
+        diesel::sql_query("UPDATE market_data_providers SET enabled=0")
+            .execute(&mut conn)
+            .unwrap();
+        diesel::sql_query(r#"UPDATE assets SET provider_config='{"preferred_provider":"UNAVAILABLE"}' WHERE id='FAILED'"#)
+            .execute(&mut conn).unwrap();
+        diesel::sql_query("UPDATE assets SET quote_mode='MANUAL' WHERE id='MANUAL'")
+            .execute(&mut conn)
+            .unwrap();
+        drop(conn);
+        let repo = Arc::new(repo);
+        let client = MarketDataClient::new_with_extra(
+            Arc::new(NoSecrets),
+            vec![],
+            vec![Arc::new(ShortHistoryProvider::default())],
+        )
+        .await
+        .unwrap();
+        let sync = QuoteSyncService::new(
+            Arc::new(tokio::sync::RwLock::new(client)),
+            repo.clone(),
+            Arc::new(crate::market_data::QuoteSyncStateRepository::new(
+                repo.pool.clone(),
+                repo.writer.clone(),
+            )),
+            Arc::new(crate::assets::AssetRepository::new(
+                repo.pool.clone(),
+                repo.writer.clone(),
+            )),
+            Arc::new(crate::activities::ActivityRepository::new(
+                repo.pool.clone(),
+                repo.writer.clone(),
+            )),
+        );
+        let result = sync.reset_all_provider_history().await.unwrap();
+        assert_eq!(result.results.len(), 1);
+        assert_eq!(result.results[0].asset_id, "GOOD");
+        assert_eq!(result.failures.len(), 1);
+        assert_eq!(result.failures[0].asset_id, "FAILED");
+        assert!(result
+            .skipped
+            .iter()
+            .any(|asset| asset.asset_id == "MANUAL"));
+        assert_eq!(raw_rows(&repo, "GOOD").len(), 5);
+        for id in ["FAILED", "MANUAL"] {
+            let rows = raw_rows(&repo, id);
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].close, "1");
+        }
+    }
+
+    #[tokio::test]
+    async fn reset_reports_busy_and_rechecks_configuration_after_fetch() {
+        use wealthfolio_core::quotes::{MarketDataClient, QuoteSyncService};
+        let (repo, _temp) = create_test_repository().await;
+        insert_test_asset(&repo, "BUSY");
+        diesel::sql_query("UPDATE market_data_providers SET enabled=0")
+            .execute(&mut get_connection(&repo.pool).unwrap())
+            .unwrap();
+        repo.save_quote(&quote_with_source(
+            "BUSY",
+            NaiveDate::from_ymd_opt(2010, 1, 4).unwrap(),
+            "YAHOO",
+            Decimal::ONE,
+        ))
+        .await
+        .unwrap();
+        let repo = Arc::new(repo);
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let client = MarketDataClient::new_with_extra(
+            Arc::new(NoSecrets),
+            vec![],
+            vec![Arc::new(ShortHistoryProvider {
+                gate: Some((started.clone(), release.clone())),
+            })],
+        )
+        .await
+        .unwrap();
+        let sync = Arc::new(QuoteSyncService::new(
+            Arc::new(tokio::sync::RwLock::new(client)),
+            repo.clone(),
+            Arc::new(crate::market_data::QuoteSyncStateRepository::new(
+                repo.pool.clone(),
+                repo.writer.clone(),
+            )),
+            Arc::new(crate::assets::AssetRepository::new(
+                repo.pool.clone(),
+                repo.writer.clone(),
+            )),
+            Arc::new(crate::activities::ActivityRepository::new(
+                repo.pool.clone(),
+                repo.writer.clone(),
+            )),
+        ));
+        let running = {
+            let sync = sync.clone();
+            tokio::spawn(async move { sync.reset_provider_history("BUSY").await })
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(3), started.notified())
+            .await
+            .unwrap();
+        let busy = sync.reset_provider_history("BUSY").await.unwrap_err();
+        assert!(busy.to_string().contains("Already refreshing"));
+        diesel::sql_query("UPDATE assets SET quote_mode='MANUAL' WHERE id='BUSY'")
+            .execute(&mut get_connection(&repo.pool).unwrap())
+            .unwrap();
+        release.notify_one();
+        assert!(running.await.unwrap().is_err());
+        assert_eq!(raw_rows(&repo, "BUSY").len(), 1);
+    }
+
+    fn raw_rows(repo: &MarketDataRepository, asset: &str) -> Vec<QuoteDB> {
+        quotes_dsl::quotes
+            .filter(quotes_dsl::asset_id.eq(asset))
+            .order((quotes_dsl::day, quotes_dsl::source))
+            .select(QuoteDB::as_select())
+            .load(&mut get_connection(&repo.pool).unwrap())
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn explicit_refresh_merges_five_years_without_deleting_ten_years() {
+        let (repo, _temp) = create_test_repository().await;
+        insert_test_asset(&repo, "MERGE");
+        let quotes: Vec<_> = (2010..2020)
+            .map(|year| {
+                quote_with_source(
+                    "MERGE",
+                    NaiveDate::from_ymd_opt(year, 1, 4).unwrap(),
+                    "YAHOO",
+                    Decimal::ONE,
+                )
+            })
+            .collect();
+        repo.upsert_quotes(&quotes).await.unwrap();
+        let recent: Vec<_> = quotes[5..]
+            .iter()
+            .cloned()
+            .map(|mut q| {
+                q.close = Decimal::TEN;
+                q
+            })
+            .collect();
+        repo.upsert_quotes(&recent).await.unwrap();
+        let rows = raw_rows(&repo, "MERGE");
+        assert_eq!(rows.len(), 10);
+        assert_eq!(rows[0].close, "1");
+        assert_eq!(rows[9].close, "10");
+    }
+
+    #[tokio::test]
+    async fn reset_preserves_overlays_and_inserts_provider_rows_beneath_them() {
+        let (repo, _temp) = create_test_repository().await;
+        insert_test_asset(&repo, "RESET");
+        let old = NaiveDate::from_ymd_opt(2010, 1, 4).unwrap();
+        let today = NaiveDate::from_ymd_opt(2025, 1, 4).unwrap();
+        for (date, source) in [(old, "YAHOO"), (today, "MANUAL"), (today, "BROKER")] {
+            repo.save_quote(&quote_with_source("RESET", date, source, Decimal::ONE))
+                .await
+                .unwrap();
+        }
+        let context = repo.provider_history_reset_context("RESET").unwrap();
+        assert_eq!(context.earliest_provider_date, Some(old));
+        let result = repo
+            .replace_provider_history(
+                context,
+                vec![quote_with_source("RESET", today, "YAHOO", Decimal::TEN)],
+            )
+            .await
+            .unwrap();
+        assert_eq!((result.deleted_count, result.inserted_count), (1, 1));
+        let rows = raw_rows(&repo, "RESET");
+        assert_eq!(rows.len(), 3);
+        assert!(rows.iter().all(|r| r.day == "2025-01-04"));
+        assert!(rows.iter().any(|r| r.source == "YAHOO" && r.close == "10"));
+    }
+
+    #[tokio::test]
+    async fn reset_rolls_back_deletion_when_insertion_fails() {
+        let (repo, _temp) = create_test_repository().await;
+        insert_test_asset(&repo, "ROLLBACK");
+        let date = NaiveDate::from_ymd_opt(2025, 1, 4).unwrap();
+        repo.upsert_quotes(&[quote_with_source("ROLLBACK", date, "YAHOO", Decimal::ONE)])
+            .await
+            .unwrap();
+        let before = raw_rows(&repo, "ROLLBACK");
+        let context = repo.provider_history_reset_context("ROLLBACK").unwrap();
+        diesel::sql_query("CREATE TRIGGER reject_reset BEFORE INSERT ON quotes WHEN NEW.source = 'FAIL' BEGIN SELECT RAISE(ABORT, 'injected failure'); END")
+            .execute(&mut get_connection(&repo.pool).unwrap()).unwrap();
+        assert!(repo
+            .replace_provider_history(
+                context,
+                vec![quote_with_source("ROLLBACK", date, "FAIL", Decimal::TEN)]
+            )
+            .await
+            .is_err());
+        assert_eq!(
+            serde_json::to_value(raw_rows(&repo, "ROLLBACK")).unwrap(),
+            serde_json::to_value(before).unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn reset_ignores_unrelated_custom_provider_configuration_changes() {
+        let (repo, _temp) = create_test_repository().await;
+        insert_test_asset(&repo, "RESET");
+        let date = NaiveDate::from_ymd_opt(2025, 1, 4).unwrap();
+        repo.save_quote(&quote_with_source("RESET", date, "YAHOO", Decimal::ONE))
+            .await
+            .unwrap();
+        let mut conn = get_connection(&repo.pool).unwrap();
+        diesel::sql_query("INSERT INTO market_data_custom_providers
+            (id, code, name, description, enabled, priority, config, created_at, updated_at)
+            VALUES ('unrelated', 'UNRELATED', 'Unrelated', '', 1, 1, '{}', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)")
+            .execute(&mut conn).unwrap();
+        let context = repo.provider_history_reset_context("RESET").unwrap();
+        diesel::sql_query(r#"UPDATE market_data_custom_providers SET config='{"changed":true}' WHERE id='unrelated'"#)
+            .execute(&mut conn).unwrap();
+        let result = repo
+            .replace_provider_history(
+                context,
+                vec![quote_with_source("RESET", date, "YAHOO", Decimal::TEN)],
+            )
+            .await
+            .unwrap();
+        assert_eq!((result.deleted_count, result.inserted_count), (1, 1));
+        let rows = raw_rows(&repo, "RESET");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].close, "10");
+    }
+
+    #[tokio::test]
+    async fn reset_rejects_empty_wrong_asset_and_changed_configuration() {
+        let (repo, _temp) = create_test_repository().await;
+        insert_test_asset(&repo, "CONFLICT");
+        let date = NaiveDate::from_ymd_opt(2025, 1, 4).unwrap();
+        let quote = quote_with_source("CONFLICT", date, "YAHOO", Decimal::ONE);
+        repo.save_quote(&quote).await.unwrap();
+        let context = repo.provider_history_reset_context("CONFLICT").unwrap();
+        assert!(repo
+            .replace_provider_history(context.clone(), vec![])
+            .await
+            .is_err());
+        let mut wrong_asset = quote.clone();
+        wrong_asset.asset_id = "WRONG".into();
+        assert!(repo
+            .replace_provider_history(context.clone(), vec![wrong_asset])
+            .await
+            .is_err());
+        diesel::sql_query("UPDATE assets SET instrument_symbol='CHANGED' WHERE id='CONFLICT'")
+            .execute(&mut get_connection(&repo.pool).unwrap())
+            .unwrap();
+        assert!(repo
+            .replace_provider_history(context, vec![quote.clone()])
+            .await
+            .is_err());
+        assert_eq!(raw_rows(&repo, "CONFLICT").len(), 1);
+        let context = repo.provider_history_reset_context("CONFLICT").unwrap();
+        diesel::sql_query("UPDATE market_data_providers SET priority=priority+1 WHERE id='YAHOO'")
+            .execute(&mut get_connection(&repo.pool).unwrap())
+            .unwrap();
+        assert!(repo
+            .replace_provider_history(context, vec![quote])
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn large_quote_batches_preserve_manual_prices_for_exact_asset_days() {
+        let (repo, _temp) = create_test_repository().await;
+        let assets = ["FIRST", "SECOND", "THIRD"];
+        let first_day = NaiveDate::from_ymd_opt(1930, 1, 1).unwrap();
+        let day_count = 32_767;
+        let override_offsets = [0, day_count / 2, day_count - 1];
+        for (asset, offset) in assets.iter().zip(override_offsets) {
+            insert_test_asset(&repo, asset);
+            repo.save_quote(&quote_with_source(
+                asset,
+                first_day + chrono::Duration::days(offset as i64),
+                "MANUAL",
+                Decimal::from(42),
+            ))
+            .await
+            .unwrap();
+        }
+        // Unique dates alone exceed SQLite's limit, so deduplication must be
+        // paired with chunking. Other assets share dates with manual overrides.
+        let mut incoming = Vec::new();
+        for asset in assets {
+            for offset in 0..day_count {
+                if asset != "FIRST" && !override_offsets.contains(&offset) {
+                    continue;
+                }
+                incoming.push(quote_with_source(
+                    asset,
+                    first_day + chrono::Duration::days(offset as i64),
+                    "YAHOO",
+                    Decimal::ONE,
+                ));
+            }
+        }
+        // A manual edit in the same batch must still update its existing row.
+        incoming.push(quote_with_source(
+            "FIRST",
+            first_day,
+            "MANUAL",
+            Decimal::from(77),
+        ));
+        assert_eq!(
+            repo.upsert_quotes(&incoming).await.unwrap(),
+            incoming.len() - assets.len()
+        );
+        for (asset, offset) in assets.iter().zip(override_offsets) {
+            let rows = raw_rows(&repo, asset);
+            let expected_days = if *asset == "FIRST" {
+                day_count
+            } else {
+                override_offsets.len()
+            };
+            assert_eq!(rows.len(), expected_days);
+            let override_day = (first_day + chrono::Duration::days(offset as i64)).to_string();
+            let manual = rows.iter().find(|row| row.source == "MANUAL").unwrap();
+            assert_eq!(manual.day, override_day);
+            assert_eq!(manual.close, if *asset == "FIRST" { "77" } else { "42" });
+            // The override applies only to this pair, not all dates or other assets.
+            assert_eq!(
+                rows.iter().filter(|row| row.source == "YAHOO").count(),
+                expected_days - 1
+            );
+            assert!(rows
+                .iter()
+                .all(|row| row.source != "YAHOO" || (row.day != override_day && row.close == "1")));
+        }
+    }
+
+    #[tokio::test]
+    async fn quote_batch_failure_rolls_back_earlier_writes_and_preserves_manual_prices() {
+        let (repo, _temp) = create_test_repository().await;
+        insert_test_asset(&repo, "ROLLBACK");
+        let first_day = NaiveDate::from_ymd_opt(2020, 1, 1).unwrap();
+        repo.save_quote(&quote_with_source(
+            "ROLLBACK",
+            first_day,
+            "MANUAL",
+            Decimal::from(42),
+        ))
+        .await
+        .unwrap();
+        repo.save_quote(&quote_with_source(
+            "ROLLBACK",
+            first_day + chrono::Duration::days(1000),
+            "YAHOO",
+            Decimal::ONE,
+        ))
+        .await
+        .unwrap();
+        let before = raw_rows(&repo, "ROLLBACK");
+        let mut incoming: Vec<_> = (0..2000)
+            .map(|offset| {
+                quote_with_source(
+                    "ROLLBACK",
+                    first_day + chrono::Duration::days(offset),
+                    "YAHOO",
+                    Decimal::TEN,
+                )
+            })
+            .collect();
+        incoming.last_mut().unwrap().data_source = "FAIL".to_string();
+        diesel::sql_query(
+            "CREATE TRIGGER reject_quote_batch BEFORE INSERT ON quotes \
+             WHEN NEW.source = 'FAIL' BEGIN SELECT RAISE(ABORT, 'injected failure'); END",
+        )
+        .execute(&mut get_connection(&repo.pool).unwrap())
+        .unwrap();
+        assert!(repo.upsert_quotes(&incoming).await.is_err());
+        assert_eq!(raw_rows(&repo, "ROLLBACK"), before);
+    }
+
     #[tokio::test]
     async fn quote_bounds_across_sources_use_earliest_and_latest_dates() {
         let (repo, _temp) = create_test_repository().await;
@@ -1670,6 +2330,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn range_batch_keeps_the_best_source_of_each_day() {
+        let (repo, _temp) = create_test_repository().await;
+        insert_test_asset(&repo, "RANK-A");
+        insert_test_asset(&repo, "RANK-B");
+        let day = |d: u32| NaiveDate::from_ymd_opt(2024, 6, d).unwrap();
+        let at = |d: u32, hour: u32, source: &str, close: i64| {
+            let mut quote = quote_with_source("RANK-A", day(d), source, Decimal::from(close));
+            quote.timestamp = Utc.from_utc_datetime(&day(d).and_hms_opt(hour, 0, 0).unwrap());
+            quote
+        };
+        for quote in [
+            // Day 3: manual beats the provider and the broker.
+            at(3, 16, "BROKER", 13),
+            at(3, 16, "YAHOO", 12),
+            at(3, 16, "MANUAL", 11),
+            // Day 4: between providers the later one wins; the broker last.
+            at(4, 12, "STOOQ", 21),
+            at(4, 16, "YAHOO", 22),
+            at(4, 20, "BROKER", 23),
+            // Day 5: a broker quote alone still counts.
+            at(5, 16, "BROKER", 33),
+        ] {
+            repo.save_quote(&quote).await.expect("save quote");
+        }
+        repo.save_quote(&quote_with_source(
+            "RANK-B",
+            day(3),
+            "YAHOO",
+            Decimal::from(41),
+        ))
+        .await
+        .expect("save quote");
+
+        let asset_ids = [AssetId::new("RANK-B"), AssetId::new("RANK-A")];
+        let quotes = repo
+            .range_batch(&asset_ids, Day::new(day(3)), Day::new(day(5)), None)
+            .expect("get batch range");
+        let closes: Vec<(String, Decimal)> = quotes
+            .iter()
+            .map(|q| (q.asset_id.clone(), q.close))
+            .collect();
+        assert_eq!(
+            closes,
+            vec![
+                ("RANK-A".to_string(), Decimal::from(11)),
+                ("RANK-A".to_string(), Decimal::from(22)),
+                ("RANK-A".to_string(), Decimal::from(33)),
+                ("RANK-B".to_string(), Decimal::from(41)),
+            ]
+        );
+        let mut single = Vec::new();
+        for asset_id in &asset_ids {
+            single.extend(
+                repo.range(asset_id, Day::new(day(3)), Day::new(day(5)), None)
+                    .expect("get single-asset range"),
+            );
+        }
+        single.sort_by(|left, right| {
+            left.asset_id
+                .cmp(&right.asset_id)
+                .then_with(|| left.timestamp.cmp(&right.timestamp))
+        });
+        assert_eq!(quotes, single);
+    }
+
+    #[tokio::test]
     async fn range_batch_matches_single_asset_range_and_source_filtering() {
         let (repo, _temp) = create_test_repository().await;
         let day = NaiveDate::from_ymd_opt(2024, 6, 3).unwrap();
@@ -1855,6 +2581,40 @@ mod tests {
         let quote = quotes.get(asset_id).expect("quote exists");
         assert_eq!(quote.data_source, "STOOQ");
         assert_eq!(quote.close, Decimal::from(52));
+    }
+
+    #[tokio::test]
+    async fn latest_quotes_as_of_prefers_the_latest_day_over_source_priority() {
+        let (repo, _temp) = create_test_repository().await;
+        insert_test_asset(&repo, "LATER-PROVIDER");
+        insert_test_asset(&repo, "ONLY-MANUAL");
+
+        let monday = NaiveDate::from_ymd_opt(2024, 6, 3).unwrap();
+        let tuesday = NaiveDate::from_ymd_opt(2024, 6, 4).unwrap();
+        for (asset_id, day, source, close) in [
+            ("LATER-PROVIDER", monday, "MANUAL", 50),
+            ("LATER-PROVIDER", tuesday, "YAHOO", 51),
+            ("ONLY-MANUAL", monday, "MANUAL", 70),
+        ] {
+            repo.save_quote(&quote_with_source(
+                asset_id,
+                day,
+                source,
+                Decimal::from(close),
+            ))
+            .await
+            .expect("save quote");
+        }
+
+        let quotes = repo
+            .get_latest_quotes_as_of(
+                &["LATER-PROVIDER".to_string(), "ONLY-MANUAL".to_string()],
+                tuesday,
+            )
+            .expect("get latest quotes as of");
+        assert_eq!(quotes.len(), 2);
+        assert_eq!(quotes["LATER-PROVIDER"].close, Decimal::from(51));
+        assert_eq!(quotes["ONLY-MANUAL"].close, Decimal::from(70));
     }
 
     #[tokio::test]

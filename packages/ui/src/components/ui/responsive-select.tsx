@@ -15,6 +15,8 @@ export interface ResponsiveSelectOption {
 }
 
 interface ResponsiveSelectProps {
+  "aria-label"?: string;
+  id?: string;
   value?: string;
   onValueChange?: (value: string) => void;
   options: ResponsiveSelectOption[];
@@ -30,6 +32,8 @@ interface ResponsiveSelectProps {
 }
 
 export function ResponsiveSelect({
+  "aria-label": ariaLabel,
+  id,
   value,
   onValueChange,
   options,
@@ -63,18 +67,23 @@ export function ResponsiveSelect({
     return (
       <>
         <Button
+          id={id}
+          aria-label={ariaLabel}
           type="button"
-          variant="outline"
+          role="combobox"
+          aria-expanded={open}
+          aria-haspopup="dialog"
+          variant="field"
           disabled={disabled}
           className={cn(
-            "w-full justify-between truncate rounded-md font-normal",
+            "w-full justify-between truncate",
             !selectedOption && "text-muted-foreground",
             triggerClassName,
           )}
           onClick={() => setOpen(true)}
         >
           <span className="truncate">{displayText}</span>
-          <Icons.ChevronDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+          <Icons.ChevronDown className="ms-2 h-4 w-4 shrink-0 opacity-50" />
         </Button>
 
         <Sheet open={open} onOpenChange={setOpen}>
@@ -95,7 +104,7 @@ export function ResponsiveSelect({
                         type="button"
                         onClick={() => handleSelect(option.value)}
                         className={cn(
-                          "card-mobile flex w-full items-center justify-between gap-3 border border-transparent px-4 py-3 text-left transition-colors",
+                          "card-mobile flex w-full items-center justify-between gap-3 border border-transparent px-4 py-3 text-start transition-colors",
                           isSelected
                             ? "border-primary bg-primary/10 text-primary"
                             : "hover:bg-accent active:bg-accent/80 focus:border-primary focus:outline-none",
@@ -128,8 +137,15 @@ export function ResponsiveSelect({
   }
 
   return (
-    <Select value={value} onValueChange={handleSelect} disabled={disabled}>
-      <SelectTrigger className={cn("w-full", triggerClassName)}>
+    <Select
+      value={value}
+      items={options}
+      onValueChange={(nextValue) => {
+        if (nextValue !== null) handleSelect(nextValue);
+      }}
+      disabled={disabled}
+    >
+      <SelectTrigger id={id} aria-label={ariaLabel} className={cn("w-full", triggerClassName)}>
         <SelectValue placeholder={placeholder} />
       </SelectTrigger>
       <SelectContent className={contentClassName}>

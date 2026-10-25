@@ -49,15 +49,15 @@
     "sync_broker_accounts": "Sincronizar cuentas de bróker",
     "sync_devices": "Sincronizar dispositivos",
     "update_prices": "Actualizar precios",
-    "rebuild_full_history": "Reconstruir historial completo",
+    "rebuild_full_history": "Actualizar historial completo",
     "verify_data": "Verificar datos"
   },
   "update": {
     "as_of": "A fecha de:",
-    "update_quotes": "Actualizar cotizaciones",
+    "update_quotes": "Actualizar precios",
     "updating_quotes": "Actualizando cotizaciones...",
-    "rebuild_history": "Reconstruir historial completo",
-    "rebuilding_history": "Reconstruyendo historial..."
+    "rebuild_history": "Actualizar historial completo",
+    "rebuilding_history": "Actualizar historial completo…"
   },
   "goals": {
     "no_goals_set": "No hay objetivos definidos.",
@@ -106,9 +106,17 @@
     "values_without_returns": "Los valores de las cuentas se muestran sin la rentabilidad del período.",
     "failed_to_load": "Error al cargar las cuentas",
     "failed_to_load_performance": "Error al cargar las métricas de rentabilidad",
-    "try_restarting": "Prueba a reiniciar la aplicación. Si el problema persiste, puede que sea necesario restablecer tu base de datos."
+    "try_restarting": "Inténtalo de nuevo. Si el problema persiste, reinicia Wealthfolio o contacta con el soporte."
   },
   "accounts_count_one": "{{count}} cuenta",
   "accounts_count_other": "{{count}} cuentas",
-  "accounts_count_many": "{{count}} cuentas"
+  "accounts_count_many": "{{count}} cuentas",
+  "portfolio_filter": {
+    "choose": "Elegir cartera",
+    "search": "Buscar carteras…",
+    "manage": "Gestionar carteras",
+    "unavailable": "La cartera seleccionada ya no está disponible. Se muestran todas las cuentas.",
+    "load_error": "No se pudo cargar la cartera seleccionada.",
+    "empty": "No hay cuentas para mostrar en esta cartera."
+  }
 }

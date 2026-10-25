@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+wealthfolio-http = { workspace = true }
 # Core (for SecretStore trait)
 wealthfolio-core = { path = "../core" }
 
@@ -14,6 +15,7 @@ urlencoding = "2"
 # Serialization
 serde = { workspace = true }
 serde_json = { workspace = true }
+flate2 = "1"
 chrono = { workspace = true }
 
 # Async
@@ -27,6 +29,7 @@ thiserror = { workspace = true }
 log = { workspace = true }
 
 # Crypto
+zeroize = { workspace = true }
 base64 = "0.22"
 chacha20poly1305 = "0.10"
 hmac = "0.12"
@@ -37,4 +40,7 @@ rand = "0.8"
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["full"] }
+tokio = { workspace = true, features = ["full", "test-util"] }
+
+[lints]
+workspace = true

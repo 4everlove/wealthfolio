@@ -237,4 +237,12 @@ export interface ImportRun {
 // Aggregated Sync Status (for navigation icon)
 // ─────────────────────────────────────────────────────────────────────────────
 
-export type AggregatedSyncStatus = "not_connected" | "idle" | "running" | "needs_review" | "failed";
+export type AggregatedSyncStatus =
+  | "restoring"
+  | "unavailable"
+  | "not_connected"
+  | "subscription_required"
+  | "idle"
+  | "running"
+  | "needs_review"
+  | "failed";

@@ -5,7 +5,9 @@
   },
   "currency": {
     "selectTitle": "Seleziona valuta",
-    "selectDescription": "Scegli la valuta del tuo movimento",
+    "selectDescription": "Scegli una valuta",
+    "placeholder": "Seleziona valuta",
+    "popular": "Popolari",
     "more": "Altro",
     "search": "Cerca valuta...",
     "searchAll": "Cerca tutte le valute...",
@@ -145,6 +147,7 @@
     "title": "Qualcosa è andato storto",
     "description": "Abbiamo riscontrato un errore imprevisto. I tuoi dati sono al sicuro — prova ad aggiornare per riprendere da dove eri.",
     "refresh": "Aggiorna pagina",
+    "goHome": "Vai alla Dashboard",
     "hideDetails": "Nascondi dettagli errore",
     "showDetails": "Mostra dettagli errore",
     "errorDetails": "Dettagli errore"
@@ -190,5 +193,9 @@
   },
   "sheet": {
     "close": "Chiudi"
-  }
+  },
+  "page": {
+    "back": "Indietro"
+  },
+  "remove": "Rimuovi {{label}}"
 }

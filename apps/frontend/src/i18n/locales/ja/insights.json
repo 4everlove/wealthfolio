@@ -64,10 +64,19 @@
       "holdings_count_one": "{{count}}銘柄",
       "holdings_count_other": "{{count}}銘柄",
       "accounts_count_one": "{{count}}口座",
-      "accounts_count_other": "{{count}}口座"
+      "accounts_count_other": "{{count}}口座",
+      "pnl_current_holdings": "現在の保有銘柄"
     }
   },
   "networth": {
+    "attention": {
+      "title": "確認が必要な項目",
+      "update_value": "評価額を更新",
+      "update_balance": "残高を更新",
+      "link_property": "{{name}}に不動産を関連付ける",
+      "add_property": "{{name}}の不動産を追加",
+      "link_explanation": "既存の不動産への関連付けでは純資産額は変わりません。"
+    },
     "failed_to_load": "純資産の読み込みに失敗しました",
     "stale_valuations_tooltip": "評価額が古い資産(90日以上):",
     "days_ago": "{{count}}日前",
@@ -75,9 +84,6 @@
     "breakdown": "内訳",
     "no_assets_found": "資産が見つかりません。",
     "add_first_asset": "最初の資産を追加",
-    "update_valuations": "評価額を更新",
-    "assets_count_one": "{{count}}件の資産",
-    "assets_count_other": "{{count}}件の資産",
     "not_updated_over_90_days": "90日以上更新されていません。",
     "chart": {
       "net_worth": "純資産",
@@ -113,15 +119,48 @@
     },
     "velocity": {
       "monthly_pace": "月次ペース",
-      "over_months_one": "{{count}}か月間",
-      "over_months_other": "{{count}}か月間",
-      "trailing_pace": " · 直近12か月ペースの{{multiple}}倍",
+      "since": "{{date}}以降",
+      "trailing_pace": " · 12か月平均の{{multiple}}倍",
       "drivers_of_change": "変動要因",
-      "market_returns": "市場リターン",
+      "investment_gains": "投資利益",
+      "investment_losses": "投資損失",
+      "other_assets": "その他の資産",
       "contributions": "入金",
-      "equity_built": "エクイティ増加",
+      "withdrawals": "出金",
+      "debt_paid_down": "負債の返済",
+      "debt_added": "新規負債",
       "per_month": "/月"
     },
     "days_ago_other": "{{count}}日前"
+  },
+  "highlights": {
+    "movers": "値動き上位",
+    "concentration": "集中度",
+    "daily": "日次変動 · 現在の保有銘柄",
+    "rank_by": "日次変動の並べ替え基準",
+    "gainers": "上昇銘柄",
+    "losers": "下落銘柄",
+    "no_moves": "値動きを表示できるデータがありません。",
+    "portfolio_share": "現金を含むポートフォリオ評価額に占める割合",
+    "largest": "最大の保有銘柄",
+    "top_five": "上位5銘柄",
+    "concentration_unavailable": "集中度を表示するには、保有銘柄の評価額が正で、空売りポジションがない必要があります。"
+  },
+  "customize": {
+    "edit": "カスタマイズ",
+    "widgets": "ウィジェット",
+    "reset": "レイアウトをリセット",
+    "cancel": "キャンセル",
+    "save": "レイアウトを保存",
+    "saving": "保存中…",
+    "hint": "ハンドルでウィジェットをドラッグするか、右端で幅を調整できます。",
+    "description": "表示するウィジェットを選択します。矢印で順序を変更できます。モバイルでも操作できます。",
+    "value": "ポートフォリオ概要",
+    "breakdown": "内訳",
+    "move_up": "{{widget}}を上に移動",
+    "move_down": "{{widget}}を下に移動",
+    "hide": "{{widget}}を非表示",
+    "drag": "{{widget}}をドラッグ",
+    "empty": "ウィジェットが選択されていません。このページをカスタマイズして追加してください。"
   }
 }

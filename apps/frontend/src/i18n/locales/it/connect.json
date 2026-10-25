@@ -1,4 +1,5 @@
 {
+  "opensInBrowser": "Si apre nel browser",
   "page": {
     "title": "Sincronizzazione e connessioni",
     "subtitle": "I tuoi dispositivi, tutti in un unico posto.",
@@ -13,7 +14,11 @@
     "noDevicesSyncing": "Ancora nessun dispositivo in sincronizzazione",
     "noDevicesDescription": "Configura la sincronizzazione tra dispositivi nelle impostazioni per mantenere i tuoi dati sincronizzati su più dispositivi.",
     "noActivity": "Ancora nessuna attività",
-    "noActivityDescription": "Gli aggiornamenti appariranno qui non appena i tuoi dati inizieranno a sincronizzarsi."
+    "noActivityDescription": "Gli aggiornamenti appariranno qui non appena i tuoi dati inizieranno a sincronizzarsi.",
+    "showMore_one": "Mostra altri {{count}}",
+    "showMore_many": "Mostra altri {{count}}",
+    "showMore_other": "Mostra altri {{count}}",
+    "showLess": "Mostra meno"
   },
   "emptyState": {
     "optional": "Facoltativo",
@@ -23,20 +28,21 @@
     "learnMore": "Scopri di più su Connect",
     "features": {
       "brokerageSync": {
-        "title": "Sincronizzazione broker",
-        "description": "Sincronizza automaticamente conti e transazioni ogni giorno."
+        "title": "Conti collegati",
+        "description": "Sincronizza automaticamente le transazioni dei tuoi broker."
       },
       "deviceSync": {
-        "title": "Sincronizzazione dispositivi",
-        "description": "Sincronizza tra dispositivi con crittografia end-to-end."
+        "title": "Sincronizzazione e backup",
+        "description": "Sincronizzazione crittografata end-to-end e backup automatici nel cloud."
       },
       "householdView": {
-        "title": "Vista nucleo familiare",
-        "description": "Condividi i conti con i membri della famiglia."
+        "title": "Portafogli familiari",
+        "description": "Una vista condivisa degli investimenti della tua famiglia."
       }
     }
   },
   "flow": {
+    "aggregatorExample": "(ad es. SnapTrade)",
     "yourDevice": "Il tuo dispositivo",
     "localDatabase": "Database locale",
     "dataStaysHere": "I dati restano qui",
@@ -69,7 +75,8 @@
     "noDataYet": "Ancora nessun dato",
     "dataAsOf": "Dati aggiornati al {{date}}",
     "emptyTitle": "Ancora nessun conto sincronizzato",
-    "emptyDescription": "Collega un broker per iniziare a sincronizzare i tuoi conti."
+    "emptyDescription": "Collega un broker per iniziare a sincronizzare i tuoi conti.",
+    "needsSetup": "Richiede configurazione"
   },
   "connections": {
     "title": "Connessioni broker",
@@ -88,7 +95,13 @@
     "accountsSyncing_other": "{{count}} conti in sincronizzazione",
     "partialSyncing_one": "{{syncing}} di {{total}} conti in sincronizzazione · {{excluded}} conto escluso",
     "partialSyncing_many": "{{syncing}} di {{total}} conti in sincronizzazione · {{excluded}} conti esclusi",
-    "partialSyncing_other": "{{syncing}} di {{total}} conti in sincronizzazione · {{excluded}} conti esclusi"
+    "partialSyncing_other": "{{syncing}} di {{total}} conti in sincronizzazione · {{excluded}} conti esclusi",
+    "accountCount_one": "{{count}} conto",
+    "accountCount_many": "{{count}} conti",
+    "accountCount_other": "{{count}} conti",
+    "excludedCount_one": "{{count}} escluso",
+    "excludedCount_many": "{{count}} esclusi",
+    "excludedCount_other": "{{count}} esclusi"
   },
   "sync": {
     "syncNow": "Sincronizza ora",
@@ -196,21 +209,36 @@
     "title": "La sincronizzazione del broker richiede attenzione",
     "description_one": "{{count}} conto necessita di un nuovo tentativo o di una revisione da parte del broker.",
     "description_many": "{{count}} conti necessitano di un nuovo tentativo o di una revisione da parte del broker.",
-    "description_other": "{{count}} conti necessitano di un nuovo tentativo o di una revisione da parte del broker."
+    "description_other": "{{count}} conti necessitano di un nuovo tentativo o di una revisione da parte del broker.",
+    "heading": "Richiede attenzione",
+    "connectionLost": "Connessione persa",
+    "accountsNotSyncing_one": "{{count}} conto non sincronizzato",
+    "accountsNotSyncing_many": "{{count}} conti non sincronizzati",
+    "accountsNotSyncing_other": "{{count}} conti non sincronizzati",
+    "syncFailed": "Ultima sincronizzazione non riuscita"
   },
   "setup": {
     "newAccountsTitle": "I nuovi conti richiedono configurazione",
     "newAccountsDescription_one": "{{count}} conto richiede una configurazione rapida prima di poter iniziare la sincronizzazione.",
     "newAccountsDescription_many": "{{count}} conti richiedono una configurazione rapida prima di poter iniziare la sincronizzazione.",
     "newAccountsDescription_other": "{{count}} conti richiedono una configurazione rapida prima di poter iniziare la sincronizzazione.",
-    "reviewAccounts": "Rivedi conti"
+    "reviewAccounts": "Rivedi conti",
+    "setUp": "Configura"
   },
   "devices": {
     "thisDevice": "Questo dispositivo",
     "activeNow": "Attivo ora",
     "lastSeen": "Ultimo accesso {{time}}",
     "online": "Online",
-    "never": "Mai"
+    "never": "Mai",
+    "showInactive_one": "Mostra {{count}} dispositivo inattivo",
+    "showInactive_many": "Mostra {{count}} dispositivi inattivi",
+    "showInactive_other": "Mostra {{count}} dispositivi inattivi",
+    "hideInactive": "Nascondi dispositivi inattivi",
+    "platforms": {
+      "server": "Server",
+      "web": "Web"
+    }
   },
   "deviceStatus": {
     "syncError": "Errore di sincronizzazione",
@@ -239,6 +267,10 @@
     "lastUsed": "Usato l'ultima volta"
   },
   "subscription": {
+    "copySupportEmail": "Copia l’indirizzo email di supporto",
+    "syncPausedTooltip": "Sincronizzazione in pausa — abbonamento attivo necessario",
+    "syncPausedTitle": "La sincronizzazione è in pausa",
+    "syncPausedDescription": "Per sincronizzare è necessario un abbonamento attivo. I dati locali e le modifiche in sospeso vengono conservati.",
     "comingSoon": "Prossimamente",
     "getStarted": "Inizia",
     "perMonthShort": "mese",
@@ -299,5 +331,16 @@
   },
   "errors": {
     "unknown": "Errore sconosciuto"
+  },
+  "session": {
+    "restoring": "Ripristino di Connect…",
+    "unavailable": "Connect è temporaneamente non disponibile",
+    "localAvailable": "Il portafoglio locale è disponibile. Riprova a connetterti."
+  },
+  "rebind": {
+    "title": "Cambiare la connessione Connect di questo profilo?",
+    "description": "Stai collegando un altro account o nucleo familiare. I dati locali del portafoglio verranno conservati, ma i collegamenti esistenti ai broker e la configurazione della sincronizzazione dei dispositivi verranno rimossi. Il nuovo account potrà aggiungere dati dei broker a questo profilo. Configura nuovamente la sincronizzazione dei dispositivi quando vuoi. Usa un nuovo profilo se preferisci mantenere separati i dati.",
+    "cancel": "Annulla",
+    "confirm": "Cambia connessione"
   }
 }

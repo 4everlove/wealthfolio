@@ -119,6 +119,11 @@ pub enum DatabaseError {
     #[error("Database restore failed: {0}")]
     RestoreFailed(String),
 
+    /// The database could not be opened with the available key, or key material
+    /// could not be read, written or parsed.
+    #[error("Database encryption error: {0}")]
+    Encryption(String),
+
     /// Internal/unexpected database error.
     #[error("Internal database error: {0}")]
     Internal(String),
@@ -177,6 +182,10 @@ pub enum ValidationError {
 
     #[error("Invalid input: {0}")]
     InvalidInput(String),
+
+    /// A loan action refused by the loan rules; the message is a stable code.
+    #[error("{0}")]
+    Loan(#[from] crate::assets::loan::LoanError),
 
     #[error("Required field '{0}' is missing")]
     MissingField(String),

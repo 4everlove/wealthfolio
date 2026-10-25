@@ -5,7 +5,7 @@ import { useSettingsContext } from "@/lib/settings-provider";
 import type { NewAsset, SymbolSearchResult } from "@/lib/types";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useQuery } from "@tanstack/react-query";
-import { CurrencyInput, SearchableSelect } from "@wealthfolio/ui";
+import { CurrencyInput, SearchableSelect, Spinner } from "@wealthfolio/ui";
 import { Button } from "@wealthfolio/ui/components/ui/button";
 import {
   Dialog,
@@ -23,7 +23,7 @@ import {
   FormLabel,
   FormMessage,
 } from "@wealthfolio/ui/components/ui/form";
-import { Icons } from "@wealthfolio/ui/components/ui/icons";
+
 import { Input } from "@wealthfolio/ui/components/ui/input";
 import {
   Select,
@@ -149,7 +149,7 @@ export function CreateSecurityDialog({
     () =>
       exchanges.map((e) => ({
         value: normalizeMic(e.mic),
-        label: `${e.longName} (${e.name})`,
+        label: `${e.longName} (${e.mic})`,
       })),
     [exchanges],
   );
@@ -227,6 +227,7 @@ export function CreateSecurityDialog({
         result.quoteType,
         result.providerId,
         provisionalCurrency,
+        result.providerSymbol,
       )
         .then((resolved) => {
           if (requestId !== resolveRequestSeq.current) return;
@@ -302,6 +303,7 @@ export function CreateSecurityDialog({
           selectedResult.quoteType,
           selectedResult.providerId,
           values.quoteCcy,
+          selectedResult.providerSymbol,
         );
         const confirmedCurrency = resolved?.currency?.trim();
         if (confirmedCurrency && !quoteCcyUserEditedAfterSelectionRef.current) {
@@ -338,7 +340,7 @@ export function CreateSecurityDialog({
     if (isPending || isResolvingSubmit) return;
     if ((e.target as HTMLElement).tagName === "TEXTAREA") return;
     // Don't submit when interacting with the ticker search popover
-    const inPopover = (e.target as HTMLElement).closest("[data-radix-popper-content-wrapper]");
+    const inPopover = (e.target as HTMLElement).closest('[data-slot="popover-content"]');
     if (inPopover) return;
     e.preventDefault();
     void form.handleSubmit(handleSubmit)();
@@ -411,7 +413,11 @@ export function CreateSecurityDialog({
                 render={({ field }) => (
                   <FormItem>
                     <FormLabel>{t("asset:createSecurity.type")}</FormLabel>
-                    <Select onValueChange={field.onChange} value={field.value}>
+                    <Select
+                      items={INSTRUMENT_TYPE_OPTIONS}
+                      onValueChange={field.onChange}
+                      value={field.value}
+                    >
                       <FormControl>
                         <SelectTrigger>
                           <SelectValue placeholder={t("asset:createSecurity.select_type")} />
@@ -477,7 +483,11 @@ export function CreateSecurityDialog({
                 render={({ field }) => (
                   <FormItem>
                     <FormLabel>{t("asset:createSecurity.quote_mode")}</FormLabel>
-                    <Select onValueChange={field.onChange} value={field.value}>
+                    <Select
+                      items={QUOTE_MODE_OPTIONS}
+                      onValueChange={field.onChange}
+                      value={field.value}
+                    >
                       <FormControl>
                         <SelectTrigger>
                           <SelectValue />
@@ -561,8 +571,7 @@ export function CreateSecurityDialog({
               >
                 {isPending || isResolvingSubmit ? (
                   <span className="flex items-center gap-2">
-                    <Icons.Spinner className="h-4 w-4 animate-spin" />{" "}
-                    {t("asset:createSecurity.creating")}
+                    <Spinner className="h-4 w-4" /> {t("asset:createSecurity.creating")}
                   </span>
                 ) : (
                   resolvedSubmitLabel

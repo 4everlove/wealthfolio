@@ -2,8 +2,14 @@ import { useMemo } from "react";
 
 import type { Activity } from "@/lib/types";
 
-import { getActivitySpendingAmount } from "../lib/constants";
+import { getVisibleSpendingAmount } from "../lib/constants";
 import type { EventSpendingSummary } from "../types/event";
+
+export interface BaselinePeriod {
+  from: string;
+  to: string;
+  days: number;
+}
 
 /**
  * Average daily outflow across the observation period, ignoring days falling
@@ -26,13 +32,20 @@ export function computeBaselinePace(
   periodDays: number,
   accountTypeById?: Map<string, string>,
   dailySpendByDate?: Map<string, number>,
+  observationPeriod?: BaselinePeriod,
 ): number {
   const exclude = new Set<string>();
   for (const ev of excludeEvents) {
     // Walk the date range using ISO-string arithmetic to avoid Date allocs in
     // the inner loop. startDate/endDate are stored as ISO strings.
-    const startKey = ev.startDate.slice(0, 10);
-    const endKey = ev.endDate.slice(0, 10);
+    const eventStart = ev.startDate.slice(0, 10);
+    const eventEnd = ev.endDate.slice(0, 10);
+    const startKey =
+      observationPeriod && observationPeriod.from > eventStart
+        ? observationPeriod.from
+        : eventStart;
+    const endKey =
+      observationPeriod && observationPeriod.to < eventEnd ? observationPeriod.to : eventEnd;
     const cursor = new Date(`${startKey}T12:00:00`);
     const endMs = new Date(`${endKey}T12:00:00`).getTime();
     while (cursor.getTime() <= endMs) {
@@ -49,7 +62,7 @@ export function computeBaselinePace(
     }
   } else {
     for (const a of activities) {
-      const spendingAmount = getActivitySpendingAmount(a, accountTypeById?.get(a.accountId));
+      const spendingAmount = getVisibleSpendingAmount(a, accountTypeById?.get(a.accountId));
       if (spendingAmount === 0) continue;
       const dayKey = a.activityDate.slice(0, 10);
       if (exclude.has(dayKey)) continue;

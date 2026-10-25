@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::panic, reason = "test code")]
 use std::net::SocketAddr;
 
 use argon2::{password_hash::SaltString, Argon2, PasswordHasher};
@@ -14,6 +15,7 @@ use wealthfolio_server::{api::app_router, build_state, config::Config};
 
 async fn build_test_router(password: &str) -> axum::Router {
     let tmp = tempdir().unwrap();
+    std::env::set_var("WF_DATA_DIR", "");
     std::env::set_var("WF_DB_PATH", tmp.path().join("test.db"));
 
     let salt = SaltString::generate(&mut OsRng);
@@ -29,9 +31,9 @@ async fn build_test_router(password: &str) -> axum::Router {
     std::env::set_var("WF_SECRET_KEY", secret_b64);
     std::env::set_var("WF_CORS_ALLOW_ORIGINS", "http://localhost:3000");
 
-    let config = Config::from_env();
+    let config = Config::from_env().unwrap();
     let state = build_state(&config).await.unwrap();
-    app_router(state, &config)
+    app_router(state, &config).unwrap()
 }
 
 fn cleanup_env() {

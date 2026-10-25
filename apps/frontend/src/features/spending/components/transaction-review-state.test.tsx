@@ -122,7 +122,8 @@ describe("needs-review state", () => {
   it("announces review state on a table row that needs it", () => {
     renderRow(true);
 
-    expect(screen.getByText("Review")).toBeInTheDocument();
+    // The row's review icon is a button; its name carries the state.
+    expect(screen.getByRole("button", { name: "Review" })).toBeInTheDocument();
   });
 
   it("says nothing about review on a row that does not need it", () => {
@@ -158,5 +159,51 @@ describe("needs-review state", () => {
     expect(labelledGenerics.map((element) => element.getAttribute("aria-label"))).not.toContain(
       "Review",
     );
+  });
+});
+
+describe("running balance", () => {
+  const balanced = { cashBalance: "850", cashBalanceCurrency: "USD" };
+
+  it("shows the balance in its own cell when the table shows the column", () => {
+    const { container } = render(
+      <Table>
+        <TableBody>
+          <TransactionRow row={toRowVM(activity(balanced), new Map())} {...shared} showBalance />
+        </TableBody>
+      </Table>,
+      { wrapper: withProviders },
+    );
+
+    const cells = container.querySelectorAll("td");
+    expect(cells).toHaveLength(7);
+    expect(cells[5]).toHaveTextContent("$850.00");
+  });
+
+  it("keeps the row's cells unchanged when the table has no Balance column", () => {
+    const { container } = render(
+      <Table>
+        <TableBody>
+          <TransactionRow row={toRowVM(activity({}), new Map())} {...shared} />
+        </TableBody>
+      </Table>,
+      { wrapper: withProviders },
+    );
+
+    expect(container.querySelectorAll("td")).toHaveLength(6);
+    expect(screen.queryByText("$850.00")).not.toBeInTheDocument();
+  });
+
+  it("shows the balance on a card", () => {
+    render(
+      <TransactionCard
+        row={toRowVM(activity(balanced), new Map())}
+        selectionMode={false}
+        {...shared}
+      />,
+      { wrapper: withProviders },
+    );
+
+    expect(screen.getByText(/Balance/)).toHaveTextContent("Balance $850.00");
   });
 });

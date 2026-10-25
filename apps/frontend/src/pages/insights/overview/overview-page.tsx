@@ -1,3 +1,4 @@
+import { TopMoversCard, ConcentrationCard } from "./holdings-highlight-cards";
 import { useAccounts } from "@/hooks/use-accounts";
 import { useCurrentValuation } from "@/hooks/use-current-account-valuations";
 import { useHoldings } from "@/hooks/use-holdings";
@@ -22,7 +23,17 @@ import { UnsavedTargetChangesDialog } from "@/pages/allocation-targets/component
 import { useAllocationTargetDrift } from "@/pages/allocation-targets/hooks/use-allocation-target-drift";
 import { useAllocationTargets } from "@/pages/allocation-targets/hooks/use-allocation-targets";
 import { AllocationDetailSheet } from "@/pages/holdings/components/allocation-detail-sheet";
-import { Button, EmptyPlaceholder, Icons, Skeleton } from "@wealthfolio/ui";
+import {
+  Button,
+  Icons,
+  Skeleton,
+  Empty,
+  EmptyHeader,
+  EmptyMedia,
+  EmptyTitle,
+  EmptyDescription,
+  EmptyContent,
+} from "@wealthfolio/ui";
 import { PortfolioComposition } from "@/pages/holdings/components/composition-chart";
 import { DrillableAccountChart } from "@/pages/holdings/components/drillable-account-chart";
 import { DrillableDonutChart } from "@/pages/holdings/components/drillable-donut-chart";
@@ -31,12 +42,14 @@ import { useTranslation } from "react-i18next";
 import { computeValueStrip, valueStripFromCurrentSummary } from "./allocation-derivations";
 import { PortfolioExplorer } from "./portfolio-explorer";
 import { TargetRailsCard } from "./target-rails-card";
-import { ValueStrip } from "./value-strip";
+import { ValueWidget } from "./value-strip";
+import { InsightsDashboard } from "./insights-dashboard";
 
 interface OverviewPageProps {
   filter?: AccountScope;
   onFilterChange?: (filter: AccountScope) => void;
   onToolbarActionsChange?: (actions: ReactNode | null) => void;
+  onCustomizeActionChange?: (action: ReactNode | null) => void;
 }
 
 type WorkspaceView = "current" | "details" | "targets" | "rebalance";
@@ -46,6 +59,7 @@ export function OverviewPage({
   filter: filterProp,
   onFilterChange,
   onToolbarActionsChange,
+  onCustomizeActionChange,
 }: OverviewPageProps) {
   const { t } = useTranslation();
   const { settings } = useSettingsContext();
@@ -280,14 +294,14 @@ export function OverviewPage({
               <Button
                 variant="ghost"
                 size="sm"
-                className="-ml-2"
+                className="-ms-2"
                 onClick={() => backTo(effectiveTargetId ? "details" : "current")}
               >
-                <Icons.ArrowLeft className="mr-1.5 h-4 w-4" />
+                <Icons.ArrowLeft className="me-1.5 h-4 w-4 rtl:rotate-180" />
                 {t("insights:insights.back_to_allocation")}
               </Button>
               <span className="bg-border hidden h-5 w-px sm:block" />
-              <h2 className="text-foreground text-[16px] font-semibold">
+              <h2 className="text-foreground text-base font-semibold">
                 {t("insights:insights.target_allocation")}
               </h2>
             </div>
@@ -336,14 +350,14 @@ export function OverviewPage({
           <Button
             variant="ghost"
             size="sm"
-            className="-ml-2 shrink-0"
+            className="-ms-2 shrink-0"
             onClick={() => backTo("details")}
           >
-            <Icons.ArrowLeft className="mr-1.5 h-4 w-4" />
+            <Icons.ArrowLeft className="me-1.5 h-4 w-4 rtl:rotate-180" />
             {t("insights:insights.back_to_overview")}
           </Button>
           <span className="bg-border hidden h-5 w-px sm:block" />
-          <h2 className="text-foreground min-w-0 text-[16px] font-semibold">
+          <h2 className="text-foreground min-w-0 text-base font-semibold">
             {t("insights:insights.rebalance")}
           </h2>
         </div>
@@ -390,15 +404,22 @@ export function OverviewPage({
             <Skeleton className="h-48 w-full" />
           </div>
         ) : (
-          <EmptyPlaceholder
-            icon={<Icons.Target className="text-muted-foreground h-10 w-10" />}
-            title={t("insights:insights.no_target_selected")}
-            description={t("insights:insights.no_target_selected_description")}
-          >
-            <Button size="sm" onClick={handleCreateTarget}>
-              {t("insights:insights.set_target_allocation")}
-            </Button>
-          </EmptyPlaceholder>
+          <Empty>
+            <EmptyHeader>
+              <EmptyMedia variant="icon">
+                {<Icons.Target className="text-muted-foreground size-10" />}
+              </EmptyMedia>
+              <EmptyTitle>{t("insights:insights.no_target_selected")}</EmptyTitle>
+              <EmptyDescription>
+                {t("insights:insights.no_target_selected_description")}
+              </EmptyDescription>
+            </EmptyHeader>
+            <EmptyContent>
+              <Button size="sm" onClick={handleCreateTarget}>
+                {t("insights:insights.set_target_allocation")}
+              </Button>
+            </EmptyContent>
+          </Empty>
         )}
       </div>
     );
@@ -406,73 +427,132 @@ export function OverviewPage({
 
   return (
     <>
-      <div className="space-y-4">
-        {/* Row 1 — compact value strip */}
-        <ValueStrip data={valueStrip} currency={baseCurrency} isLoading={isLoading} compact />
-
-        {/* Row 2 — exploration previews */}
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
-          <DrillableAccountChart
-            isLoading={isLoading}
-            accountIds={filteredAccountIds}
-            accountValuations={currentValuation?.accounts}
-          />
-          <DrillableDonutChart
-            title={t("insights:insights.chart_classes")}
-            allocation={allocations?.assetClasses}
-            baseCurrency={baseCurrency}
-            isLoading={isLoading}
-            onCategoryClick={(categoryId) =>
-              openAllocationSheet(allocations?.assetClasses, categoryId)
-            }
-            onCardClick={() => openAllocationSheet(allocations?.assetClasses)}
-          />
-          <DrillableDonutChart
-            title={t("insights:insights.chart_regions")}
-            allocation={allocations?.regions}
-            baseCurrency={baseCurrency}
-            isLoading={isLoading}
-            onCategoryClick={(categoryId) => openAllocationSheet(allocations?.regions, categoryId)}
-            onCardClick={() => openAllocationSheet(allocations?.regions)}
-          />
-          <DrillableDonutChart
-            title={t("insights:insights.chart_sectors")}
-            allocation={allocations?.sectors}
-            baseCurrency={baseCurrency}
-            isLoading={isLoading}
-            onCategoryClick={(categoryId) => openAllocationSheet(allocations?.sectors, categoryId)}
-            onCardClick={() => openAllocationSheet(allocations?.sectors)}
-          />
-        </div>
-
-        {/* Row 3 — treemap + target rails, aligned to the 4-column grid above */}
-        <div className="grid grid-cols-1 gap-4 xl:grid-cols-4">
-          <div className="xl:col-span-3">
-            <PortfolioComposition holdings={nonCashHoldings} isLoading={isLoading} />
-          </div>
-          <TargetRailsCard
-            targets={scopedLiveTargets}
-            selectedTargetId={effectiveTargetId}
-            onTargetChange={requestTargetChange}
-            driftReport={driftReport}
-            isLoading={driftLoading && !driftReport}
-            onCreateTarget={handleCreateTarget}
-            onViewDetails={() => setWorkspaceView("details")}
-          />
-        </div>
-
-        {/* Row 4 — breakdown */}
-        <PortfolioExplorer
-          allocations={allocations}
-          holdings={holdings ?? []}
-          accounts={accounts}
-          accountIds={filteredAccountIds}
-          accountValuations={currentValuation?.accounts}
-          currency={baseCurrency}
-          isLoading={isLoading}
-          onOpenAllocation={openAllocationSheet}
-        />
-      </div>
+      <InsightsDashboard
+        onCustomizeActionChange={onCustomizeActionChange}
+        widgets={{
+          value: (
+            <ValueWidget
+              metric="value"
+              data={valueStrip}
+              currency={baseCurrency}
+              isLoading={isLoading}
+            />
+          ),
+          cash: (
+            <ValueWidget
+              metric="cash"
+              data={valueStrip}
+              currency={baseCurrency}
+              isLoading={isLoading}
+            />
+          ),
+          invested: (
+            <ValueWidget
+              metric="invested"
+              data={valueStrip}
+              currency={baseCurrency}
+              isLoading={isLoading}
+            />
+          ),
+          bookCost: (
+            <ValueWidget
+              metric="bookCost"
+              data={valueStrip}
+              currency={baseCurrency}
+              isLoading={isLoading}
+            />
+          ),
+          pnl: (
+            <ValueWidget
+              metric="pnl"
+              data={valueStrip}
+              currency={baseCurrency}
+              isLoading={isLoading}
+            />
+          ),
+          accounts: (
+            <DrillableAccountChart
+              isLoading={isLoading}
+              accountIds={filteredAccountIds}
+              accountValuations={currentValuation?.accounts}
+            />
+          ),
+          classes: (
+            <DrillableDonutChart
+              title={t("insights:insights.chart_classes")}
+              allocation={allocations?.assetClasses}
+              baseCurrency={baseCurrency}
+              isLoading={isLoading}
+              onCategoryClick={(categoryId) =>
+                openAllocationSheet(allocations?.assetClasses, categoryId)
+              }
+              onCardClick={() => openAllocationSheet(allocations?.assetClasses)}
+            />
+          ),
+          regions: (
+            <DrillableDonutChart
+              title={t("insights:insights.chart_regions")}
+              allocation={allocations?.regions}
+              baseCurrency={baseCurrency}
+              isLoading={isLoading}
+              onCategoryClick={(categoryId) =>
+                openAllocationSheet(allocations?.regions, categoryId)
+              }
+              onCardClick={() => openAllocationSheet(allocations?.regions)}
+            />
+          ),
+          sectors: (
+            <DrillableDonutChart
+              title={t("insights:insights.chart_sectors")}
+              allocation={allocations?.sectors}
+              baseCurrency={baseCurrency}
+              isLoading={isLoading}
+              onCategoryClick={(categoryId) =>
+                openAllocationSheet(allocations?.sectors, categoryId)
+              }
+              onCardClick={() => openAllocationSheet(allocations?.sectors)}
+            />
+          ),
+          composition: <PortfolioComposition holdings={nonCashHoldings} isLoading={isLoading} />,
+          targets: (
+            <TargetRailsCard
+              targets={scopedLiveTargets}
+              selectedTargetId={effectiveTargetId}
+              onTargetChange={requestTargetChange}
+              driftReport={driftReport}
+              isLoading={driftLoading && !driftReport}
+              onCreateTarget={handleCreateTarget}
+              onViewDetails={() => setWorkspaceView("details")}
+            />
+          ),
+          movers: (
+            <TopMoversCard
+              holdings={portfolioHoldings}
+              currency={baseCurrency}
+              isLoading={isLoading}
+            />
+          ),
+          concentration: (
+            <ConcentrationCard
+              holdings={portfolioHoldings}
+              currency={baseCurrency}
+              isLoading={isLoading}
+            />
+          ),
+          breakdown: (
+            <PortfolioExplorer
+              allocations={allocations}
+              holdings={holdings ?? []}
+              accounts={accounts}
+              accountIds={filteredAccountIds}
+              accountValuations={currentValuation?.accounts}
+              currency={baseCurrency}
+              isLoading={isLoading}
+              onOpenAllocation={openAllocationSheet}
+            />
+          ),
+        }}
+      />
 
       <AllocationDetailSheet
         isOpen={isSheetOpen}

@@ -1,3 +1,4 @@
+import { getTransferRate } from "../../hooks/use-internal-transfer-currencies";
 import { logger } from "@/adapters";
 import { buildAssetResolutionInput } from "@/lib/asset-resolution-input";
 import { Button } from "@wealthfolio/ui/components/ui/button";
@@ -23,8 +24,9 @@ import {
   isSecuritiesTransfer,
   isSymbolRequired,
 } from "@/lib/activity-utils";
-import { buildOccSymbol, parseOccSymbol } from "@/lib/occ-symbol";
+import { buildOccSymbol, isValidOptionExpiration, parseOccSymbol } from "@/lib/occ-symbol";
 import { generateId } from "@/lib/id";
+import { normalizeCurrency } from "@/lib/utils";
 import type { ActivityCreate, ActivityDetails, ActivityUpdate } from "@/lib/types";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -37,6 +39,7 @@ import { showValidationToast, type AccountSelectOption } from "../forms/fields";
 import { newActivitySchema, type NewActivityFormValues } from "../forms/schemas";
 import { MobileActivitySteps } from "./mobile-activity-steps";
 import { getMobileActivityAssetId, hasStoredCustomTradeAmount } from "./mobile-activity-utils";
+import { Spinner } from "@wealthfolio/ui";
 
 interface MobileActivityFormProps {
   accounts: AccountSelectOption[];
@@ -53,6 +56,7 @@ interface MobileActivityFormProps {
 
 export interface TransferValidationInput {
   activityType: string;
+  accountId?: string;
   transferMode?: string;
   isExternal?: boolean;
   direction?: string;
@@ -189,6 +193,40 @@ export function validateTransferFields(
     };
   }
 
+  if (isCash && !isExternal) {
+    for (const field of ["sourceCurrency", "destinationCurrency"] as const) {
+      if (!input[field]?.trim())
+        return {
+          field,
+          message: tr("activity:form.err_currency_required", "Currency is required."),
+        };
+    }
+  }
+
+  if (!isExternal && input.accountId && input.accountId === input.toAccountId) {
+    if (!isCash) {
+      return {
+        field: "toAccountId",
+        message: tr(
+          "activity:form.err_accounts_different",
+          "Source and destination accounts must be different.",
+        ),
+      };
+    }
+    if (
+      normalizeCurrency(input.sourceCurrency ?? undefined) ===
+      normalizeCurrency(input.destinationCurrency ?? undefined)
+    ) {
+      return {
+        field: "destinationCurrency",
+        message: tr(
+          "activity:form.err_same_account_currencies",
+          "Choose different currencies for a same-account transfer.",
+        ),
+      };
+    }
+  }
+
   return null;
 }
 
@@ -196,7 +234,7 @@ export function validateTransferFields(
  * Validates trade fields that the Zod schema can't enforce in a discriminatedUnion.
  * For options: requires all structured fields. For stocks/bonds: requires assetId.
  */
-function validateTradeFields(
+export function validateTradeFields(
   data: Record<string, unknown>,
   t: TFunction,
 ): TransferValidationError | null {
@@ -214,6 +252,9 @@ function validateTradeFields(
     }
     if (!(data.expirationDate as string)?.trim()) {
       return { field: "expirationDate", message: t("activity:form.err_expiration_required") };
+    }
+    if (!isValidOptionExpiration(data.expirationDate)) {
+      return { field: "expirationDate", message: t("activity:form.err_expiration_invalid") };
     }
     if (!data.optionType) {
       return { field: "optionType", message: t("activity:form.err_option_type_required") };
@@ -342,8 +383,9 @@ export function MobileActivityForm({
         : activity?.amount
           ? Number(activity.amount)
           : undefined;
-    const pairFxRate = activity?.fxRate ?? activity?.counterpartFxRate;
-    const fxRate = pairFxRate ? Number(pairFxRate) : undefined;
+    const valuationRate =
+      activity?.fxRate ?? (isSecurityTransferActivity ? activity?.counterpartFxRate : undefined);
+    const fxRate = valuationRate ? Number(valuationRate) : undefined;
 
     // Detect option/bond activities for editing
     const isOptionActivity = activity?.instrumentType === "OPTION";
@@ -362,6 +404,7 @@ export function MobileActivityForm({
       amount: activity?.amount != null ? Number(activity.amount) : undefined,
       sourceAmount,
       destinationAmount,
+      transferRate: getTransferRate(sourceAmount, destinationAmount),
       sourceCurrency: editingTransferIn
         ? (activity?.counterpartCurrency ?? activity?.currency)
         : activity?.currency,
@@ -394,6 +437,8 @@ export function MobileActivityForm({
       quoteMode:
         activity?.assetQuoteMode === QuoteMode.MANUAL ? QuoteMode.MANUAL : QuoteMode.MARKET,
       exchangeMic: activity?.exchangeMic,
+      symbolInstrumentType: activity?.instrumentType ?? undefined,
+      symbolQuoteCcy: activity?.assetQuoteCcy ?? activity?.currency ?? undefined,
       showCurrencySelect: false,
       ...(isTransferType && {
         transferMode: initialTransferMode,
@@ -409,7 +454,6 @@ export function MobileActivityForm({
       ...(isOptionActivity && {
         assetType: "option" as const,
         assetKind: "OPTION",
-        symbolQuoteCcy: activity?.currency ?? undefined,
         underlyingSymbol: parsedOcc?.underlying ?? "",
         strikePrice: parsedOcc?.strikePrice,
         expirationDate: parsedOcc?.expiration,
@@ -420,7 +464,6 @@ export function MobileActivityForm({
       ...(isBondActivity && {
         assetType: "bond" as const,
         assetKind: "BOND",
-        symbolQuoteCcy: activity?.currency ?? undefined,
       }),
     };
   }, [activity]);
@@ -485,6 +528,7 @@ export function MobileActivityForm({
         isExternal: _isExternal,
         direction: _direction,
         toAccountId: _toAccountId,
+        transferRate: _transferRate,
         // Strip option-internal fields (not sent to backend)
         assetType: _assetType,
         underlyingSymbol: _underlying,
@@ -548,6 +592,7 @@ export function MobileActivityForm({
       const transferError = validateTransferFields(
         {
           activityType: submitData.activityType,
+          accountId: submitData.accountId,
           transferMode: _tm,
           isExternal: _isExternal,
           direction: _direction,
@@ -584,7 +629,7 @@ export function MobileActivityForm({
             sourceCurrency === destinationCurrency
               ? sourceAmount
               : (submitData.destinationAmount ??
-                (sourceAmount && submitData.fxRate ? sourceAmount * submitData.fxRate : undefined));
+                (sourceAmount && _transferRate ? sourceAmount * _transferRate : undefined));
 
           if (!sourceAmount || !destinationAmount || !sourceCurrency || !destinationCurrency) {
             throw new Error(t("activity:mobile_form.err_transfer_amount_currencies"));
@@ -606,6 +651,7 @@ export function MobileActivityForm({
           }
 
           await saveInternalTransferPairMutation.mutateAsync({
+            editedActivityId: id,
             transferOutId: id ? transferOutId : undefined,
             transferInId: id ? transferInId : undefined,
             fromAccountId: submitData.accountId,
@@ -615,8 +661,6 @@ export function MobileActivityForm({
             destinationAmount,
             sourceCurrency,
             destinationCurrency,
-            fxRate:
-              sourceCurrency === destinationCurrency ? undefined : (submitData.fxRate ?? null),
             notes: submitData.comment ?? null,
             transferMode: "cash",
           });
@@ -886,7 +930,7 @@ export function MobileActivityForm({
             const sourceCurrency = form.getValues("sourceCurrency" as any);
             const destinationCurrency = form.getValues("destinationCurrency" as any);
             return sourceCurrency && destinationCurrency && sourceCurrency !== destinationCurrency
-              ? [...baseFields, "toAccountId", "sourceAmount", "destinationAmount", "fxRate"]
+              ? [...baseFields, "toAccountId", "sourceAmount", "destinationAmount", "transferRate"]
               : [...baseFields, "toAccountId", "sourceAmount"];
           }
           return [...baseFields, "amount", "fee"];
@@ -977,7 +1021,7 @@ export function MobileActivityForm({
                 onClick={handleBack}
                 className="flex-1"
               >
-                <Icons.ArrowLeft className="mr-2 h-4 w-4" />
+                <Icons.ArrowLeft className="me-2 h-4 w-4 rtl:rotate-180" />
                 {t("activity:mobile_back")}
               </Button>
             )}
@@ -991,7 +1035,7 @@ export function MobileActivityForm({
                 disabled={!form.watch("activityType") && currentStep === 1}
               >
                 {t("activity:mobile_next")}
-                <Icons.ArrowRight className="ml-2 h-4 w-4" />
+                <Icons.ArrowRight className="ms-2 h-4 w-4 rtl:rotate-180" />
               </Button>
             ) : (
               <Button
@@ -1002,9 +1046,9 @@ export function MobileActivityForm({
                 disabled={isLoading}
               >
                 {isLoading ? (
-                  <Icons.Spinner className="mr-2 h-4 w-4 animate-spin" />
+                  <Spinner className="me-2 h-4 w-4" />
                 ) : (
-                  <Icons.Check className="mr-2 h-4 w-4" />
+                  <Icons.Check className="me-2 h-4 w-4" />
                 )}
                 {activity?.id
                   ? t("activity:mobile_update_activity")

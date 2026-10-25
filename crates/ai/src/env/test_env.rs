@@ -1,6 +1,7 @@
 //! Test/eval-only mock implementations of the AiEnvironment trait and
 //! every service it returns. Gated behind the `test-utils` feature so the
 //! eval binary (`cargo run --bin eval --features eval`) can construct one.
+#![allow(clippy::unwrap_used, clippy::panic, reason = "test fixture")]
 
 use super::*;
 use async_trait::async_trait;
@@ -13,10 +14,11 @@ use wealthfolio_core::{
     activities::{
         Activity, ActivityBulkMutationRequest, ActivityBulkMutationResult, ActivityDetails,
         ActivityImport, ActivitySearchResponse, ActivitySearchResponseMeta, ActivityServiceTrait,
-        ActivityUpdate, BrokerSyncProfileData, ImportAssetCandidate, ImportAssetPreviewItem,
-        ImportMappingData, ImportTemplateData, ImportTemplateScope, InternalTransferPairRequest,
-        InternalTransferPairResponse, NewActivity, SaveBrokerSyncProfileRulesRequest, Sort,
-        TransferMatchCandidate, TransferMatchCandidateRequest,
+        ActivityUpdate, ActivityUpdatePreview, BrokerSyncProfileData, ImportAssetCandidate,
+        ImportAssetPreviewItem, ImportMappingData, ImportTemplateData, ImportTemplateScope,
+        InternalTransferPairRequest, InternalTransferPairResponse, NewActivity,
+        SaveBrokerSyncProfileRulesRequest, Sort, TransferMatchCandidate,
+        TransferMatchCandidateRequest, UnlinkedTransfers, UnlinkedTransfersRequest,
     },
     assets::{
         Asset, AssetMetadata, AssetResolutionInput, AssetResolutionOutput, AssetServiceTrait,
@@ -29,9 +31,9 @@ use wealthfolio_core::{
     },
     health::{
         checks::{
-            AssetHoldingInfo, ConsistencyIssueInfo, FxPairInfo, InvalidTransferGroupInfo,
-            LegacyMigrationInfo, QuoteSyncErrorInfo, UnclassifiedAssetInfo,
-            UnconfiguredAccountInfo,
+            AssetHoldingInfo, ConsistencyIssueInfo, FxConflictInfo, FxPairInfo,
+            InvalidTransferGroupInfo, LegacyMigrationInfo, QuoteSyncErrorInfo,
+            UnclassifiedAssetInfo, UnconfiguredAccountInfo,
         },
         FixAction, HealthConfig, HealthServiceTrait, HealthStatus,
     },
@@ -60,9 +62,7 @@ use wealthfolio_core::{
         AssetTaxonomyAssignment, Category, NewAssetTaxonomyAssignment, NewCategory, NewTaxonomy,
         Taxonomy, TaxonomyServiceTrait, TaxonomyWithCategories,
     },
-    valuation::{
-        DailyAccountValuation, NegativeBalanceInfo, ValuationRecalcMode, ValuationServiceTrait,
-    },
+    valuation::{DailyAccountValuation, NegativeBalanceInfo, ValuationServiceTrait},
     Error as CoreError, Result as CoreResult,
 };
 use wealthfolio_spending::cash_activities::CashActivityServiceTrait;
@@ -392,16 +392,41 @@ impl TaxonomyServiceTrait for MockTaxonomyService {
 #[derive(Default)]
 pub struct MockActivityService {
     pub activities: Vec<ActivityDetails>,
+    /// Balance, currency and scope `attach_cash_balances` fills in, by
+    /// activity id.
+    pub cash_balances: std::collections::HashMap<
+        String,
+        (
+            String,
+            String,
+            wealthfolio_core::activities::CashBalanceScope,
+        ),
+    >,
 }
 
 #[async_trait]
 impl ActivityServiceTrait for MockActivityService {
+    async fn attach_cash_balances(&self, response: &mut ActivitySearchResponse) -> CoreResult<()> {
+        for row in &mut response.data {
+            if let Some((balance, currency, scope)) = self.cash_balances.get(&row.id) {
+                row.cash_balance = Some(balance.clone());
+                row.cash_balance_currency = Some(currency.clone());
+                row.cash_balance_scope = Some(*scope);
+            }
+        }
+        Ok(())
+    }
+
     fn get_activity(&self, _activity_id: &str) -> CoreResult<Activity> {
         unimplemented!("MockActivityService::get_activity")
     }
 
     fn get_activities(&self) -> CoreResult<Vec<Activity>> {
         unimplemented!("MockActivityService::get_activities")
+    }
+
+    fn get_activities_including_archived_accounts(&self) -> CoreResult<Vec<Activity>> {
+        unimplemented!("MockActivityService::get_activities_including_archived_accounts")
     }
 
     fn get_activities_by_account_id(&self, _account_id: &str) -> CoreResult<Vec<Activity>> {
@@ -449,6 +474,13 @@ impl ActivityServiceTrait for MockActivityService {
         Ok(Vec::new())
     }
 
+    async fn find_unlinked_transfers(
+        &self,
+        _request: UnlinkedTransfersRequest,
+    ) -> CoreResult<UnlinkedTransfers> {
+        Ok(UnlinkedTransfers::default())
+    }
+
     fn get_first_activity_date(
         &self,
         _account_ids: Option<&[String]>,
@@ -476,6 +508,13 @@ impl ActivityServiceTrait for MockActivityService {
         unimplemented!("MockActivityService::update_activity")
     }
 
+    fn preview_activity_update(
+        &self,
+        _activity: ActivityUpdate,
+    ) -> CoreResult<ActivityUpdatePreview> {
+        unimplemented!("MockActivityService::preview_activity_update")
+    }
+
     async fn delete_activity(&self, _activity_id: String) -> CoreResult<Activity> {
         unimplemented!("MockActivityService::delete_activity")
     }
@@ -483,7 +522,7 @@ impl ActivityServiceTrait for MockActivityService {
     fn get_transfer_pair_for_activity(
         &self,
         _activity_id: String,
-    ) -> CoreResult<InternalTransferPairResponse> {
+    ) -> CoreResult<Option<InternalTransferPairResponse>> {
         unimplemented!("MockActivityService::get_transfer_pair_for_activity")
     }
 
@@ -660,6 +699,14 @@ pub struct MockHoldingsService {
 
 #[async_trait]
 impl HoldingsServiceTrait for MockHoldingsService {
+    async fn get_asset_lot_view(
+        &self,
+        _asset_id: &str,
+        _include_snapshot_positions: bool,
+    ) -> CoreResult<Vec<wealthfolio_core::lots::AssetLotView>> {
+        Ok(Vec::new())
+    }
+
     async fn get_holdings(
         &self,
         _account_id: &str,
@@ -719,7 +766,18 @@ impl ValuationServiceTrait for MockValuationService {
         Ok(self.valuations.clone())
     }
 
-    fn get_historical_valuations_for_accounts(
+    async fn get_historical_valuations_for_accounts(
+        &self,
+        _scope_id: &str,
+        _account_ids: &[String],
+        _base_currency: &str,
+        _start_date: Option<NaiveDate>,
+        _end_date: Option<NaiveDate>,
+    ) -> CoreResult<Vec<DailyAccountValuation>> {
+        Ok(self.valuations.clone())
+    }
+
+    async fn get_historical_valuation_totals_for_accounts(
         &self,
         _scope_id: &str,
         _account_ids: &[String],
@@ -743,14 +801,6 @@ impl ValuationServiceTrait for MockValuationService {
         _account_ids: &[String],
     ) -> CoreResult<Vec<NegativeBalanceInfo>> {
         Ok(Vec::new())
-    }
-
-    async fn calculate_valuation_history(
-        &self,
-        _account_id: &str,
-        _mode: ValuationRecalcMode,
-    ) -> CoreResult<()> {
-        Ok(())
     }
 }
 
@@ -863,10 +913,6 @@ impl SettingsServiceTrait for MockSettingsService {
 
     fn get_base_currency(&self) -> CoreResult<Option<String>> {
         Ok(Some("USD".to_string()))
-    }
-
-    async fn update_base_currency(&self, _new_base_currency: &str) -> CoreResult<()> {
-        Ok(())
     }
 
     fn is_auto_update_check_enabled(&self) -> CoreResult<bool> {
@@ -1444,7 +1490,6 @@ fn mock_performance_result(id: &str) -> PerformanceResult {
         series: Vec::new(),
         is_holdings_mode: false,
         is_mixed_tracking_mode: false,
-        holdings_flows_unavailable: false,
     }
 }
 
@@ -1551,6 +1596,14 @@ pub struct MockCashActivityService {
 
 #[async_trait]
 impl CashActivityServiceTrait for MockCashActivityService {
+    async fn bulk_assign_categories(
+        &self,
+        _: &[wealthfolio_spending::activity_assignments::BulkCategoryAssignment],
+    ) -> anyhow::Result<Vec<wealthfolio_spending::activity_assignments::ActivityTaxonomyAssignment>>
+    {
+        anyhow::bail!("Category commits are not supported by assistant fixtures")
+    }
+
     async fn search(
         &self,
         req: wealthfolio_spending::cash_activities::CashActivitySearchRequest,
@@ -1592,6 +1645,13 @@ impl CategorizationRulesServiceTrait for MockCategorizationRulesService {
         &self,
     ) -> anyhow::Result<Vec<wealthfolio_spending::categorization_rules::CategorizationRule>> {
         Ok(self.rules.clone())
+    }
+
+    async fn create(
+        &self,
+        _new_rule: wealthfolio_spending::categorization_rules::NewCategorizationRule,
+    ) -> anyhow::Result<wealthfolio_spending::categorization_rules::CategorizationRule> {
+        unimplemented!("MockCategorizationRulesService::create")
     }
 }
 
@@ -1689,19 +1749,19 @@ impl AgentEnvironment for MockEnvironment {
     }
 
     fn portfolio_service(&self) -> Arc<dyn wealthfolio_core::portfolios::PortfolioServiceTrait> {
-        unimplemented!("portfolio_service not used in AI mock environment")
+        Arc::new(EmptyPortfolioService)
     }
 
     fn net_worth_service(
         &self,
     ) -> Arc<dyn wealthfolio_core::portfolio::net_worth::NetWorthServiceTrait> {
-        unimplemented!("net_worth_service not used in AI mock environment")
+        Arc::new(EmptyNetWorthService)
     }
 
     fn contribution_limit_service(
         &self,
     ) -> Arc<dyn wealthfolio_core::limits::ContributionLimitServiceTrait> {
-        unimplemented!("contribution_limit_service not used in AI mock environment")
+        Arc::new(EmptyContributionLimitService)
     }
 
     fn cash_activity_service(&self) -> Arc<dyn CashActivityServiceTrait> {
@@ -1748,6 +1808,7 @@ impl HealthServiceTrait for MockHealthService {
         _latest_quote_times: &std::collections::HashMap<String, chrono::DateTime<chrono::Utc>>,
         _quote_sync_errors: &[QuoteSyncErrorInfo],
         _fx_pairs: &[FxPairInfo],
+        _fx_conflicts: &[FxConflictInfo],
         _unclassified_assets: &[UnclassifiedAssetInfo],
         _consistency_issues: &[ConsistencyIssueInfo],
         _legacy_migration_info: &Option<LegacyMigrationInfo>,
@@ -1808,6 +1869,104 @@ impl HealthServiceTrait for MockHealthService {
     }
 }
 
+struct EmptyPortfolioService;
+#[async_trait::async_trait]
+impl wealthfolio_core::portfolios::PortfolioServiceTrait for EmptyPortfolioService {
+    async fn create_portfolio(
+        &self,
+        _: wealthfolio_core::portfolios::NewPortfolio,
+    ) -> wealthfolio_core::errors::Result<wealthfolio_core::portfolios::PortfolioWithAccounts> {
+        unimplemented!("read-only fixture")
+    }
+    async fn update_portfolio(
+        &self,
+        _: wealthfolio_core::portfolios::PortfolioUpdate,
+    ) -> wealthfolio_core::errors::Result<wealthfolio_core::portfolios::PortfolioWithAccounts> {
+        unimplemented!("read-only fixture")
+    }
+    async fn delete_portfolio(&self, _: &str) -> wealthfolio_core::errors::Result<()> {
+        unimplemented!("read-only fixture")
+    }
+    fn get_portfolio(
+        &self,
+        _: &str,
+    ) -> wealthfolio_core::errors::Result<wealthfolio_core::portfolios::PortfolioWithAccounts> {
+        unimplemented!("read-only fixture")
+    }
+    fn list_portfolios(
+        &self,
+    ) -> wealthfolio_core::errors::Result<Vec<wealthfolio_core::portfolios::PortfolioWithAccounts>>
+    {
+        Ok(vec![])
+    }
+    fn resolve_account_filter(
+        &self,
+        _: &wealthfolio_core::portfolios::AccountScope,
+    ) -> wealthfolio_core::errors::Result<Vec<String>> {
+        Ok(vec![])
+    }
+    fn resolve_account_scope_for_purpose(
+        &self,
+        filter: &wealthfolio_core::portfolios::AccountScope,
+        currency: &str,
+        _: wealthfolio_core::accounts::AccountPurpose,
+    ) -> wealthfolio_core::errors::Result<wealthfolio_core::portfolios::ResolvedAccountScope> {
+        self.resolve_account_scope(filter, currency)
+    }
+}
+struct EmptyNetWorthService;
+#[async_trait::async_trait]
+impl wealthfolio_core::portfolio::net_worth::NetWorthServiceTrait for EmptyNetWorthService {
+    async fn get_net_worth(
+        &self,
+        date: chrono::NaiveDate,
+    ) -> wealthfolio_core::errors::Result<wealthfolio_core::portfolio::net_worth::NetWorthResponse>
+    {
+        Ok(wealthfolio_core::portfolio::net_worth::NetWorthResponse::empty(date, "USD".into()))
+    }
+    async fn get_net_worth_history(
+        &self,
+        _: chrono::NaiveDate,
+        _: chrono::NaiveDate,
+    ) -> wealthfolio_core::errors::Result<
+        Vec<wealthfolio_core::portfolio::net_worth::NetWorthHistoryPoint>,
+    > {
+        Ok(vec![])
+    }
+}
+struct EmptyContributionLimitService;
+#[async_trait::async_trait]
+impl wealthfolio_core::limits::ContributionLimitServiceTrait for EmptyContributionLimitService {
+    fn get_contribution_limits(
+        &self,
+    ) -> wealthfolio_core::errors::Result<Vec<wealthfolio_core::limits::ContributionLimit>> {
+        Ok(vec![])
+    }
+    async fn create_contribution_limit(
+        &self,
+        _: wealthfolio_core::limits::NewContributionLimit,
+    ) -> wealthfolio_core::errors::Result<wealthfolio_core::limits::ContributionLimit> {
+        unimplemented!("read-only fixture")
+    }
+    async fn update_contribution_limit(
+        &self,
+        _: &str,
+        _: wealthfolio_core::limits::NewContributionLimit,
+    ) -> wealthfolio_core::errors::Result<wealthfolio_core::limits::ContributionLimit> {
+        unimplemented!("read-only fixture")
+    }
+    async fn delete_contribution_limit(&self, _: &str) -> wealthfolio_core::errors::Result<()> {
+        unimplemented!("read-only fixture")
+    }
+    fn calculate_deposits_for_contribution_limit(
+        &self,
+        _: &str,
+        _: &str,
+    ) -> wealthfolio_core::errors::Result<wealthfolio_core::limits::DepositsCalculation> {
+        unimplemented!("empty fixture")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1842,3 +2001,5 @@ mod tests {
         assert_eq!(ids, vec!["visible"]);
     }
 }
+
+// Empty read fixtures for assistant tools added after the original mock environment.

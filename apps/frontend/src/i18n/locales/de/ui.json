@@ -5,7 +5,9 @@
   },
   "currency": {
     "selectTitle": "Währung auswählen",
-    "selectDescription": "Wählen Sie die Währung Ihrer Aktivität",
+    "selectDescription": "Wählen Sie eine Währung aus",
+    "placeholder": "Währung auswählen",
+    "popular": "Beliebt",
     "more": "Mehr",
     "search": "Währung suchen...",
     "searchAll": "Alle Währungen durchsuchen...",
@@ -145,6 +147,7 @@
     "title": "Etwas ist schiefgelaufen",
     "description": "Ein unerwarteter Fehler ist aufgetreten. Ihre Daten sind sicher — versuchen Sie zu aktualisieren, um fortzufahren.",
     "refresh": "Seite aktualisieren",
+    "goHome": "Zur Übersicht",
     "hideDetails": "Fehlerdetails ausblenden",
     "showDetails": "Fehlerdetails anzeigen",
     "errorDetails": "Fehlerdetails"
@@ -190,5 +193,9 @@
   },
   "sheet": {
     "close": "Schließen"
-  }
+  },
+  "page": {
+    "back": "Zurück"
+  },
+  "remove": "{{label}} entfernen"
 }

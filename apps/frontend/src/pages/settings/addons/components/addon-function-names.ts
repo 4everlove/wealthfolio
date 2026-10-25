@@ -26,6 +26,7 @@ export const FUNCTION_DISPLAY_NAMES: Record<string, string> = {
   // ActivitiesAPI functions
   "activities.getAll": "View all transactions",
   "activities.search": "Search transactions with filters",
+  "activities.searchCashActivities": "Search categorized spending transactions",
   "activities.create": "Add new transactions",
   "activities.update": "Modify transactions",
   "activities.saveMany": "Save multiple transactions",
@@ -33,6 +34,11 @@ export const FUNCTION_DISPLAY_NAMES: Record<string, string> = {
   "activities.checkImport": "Validate import data",
   "activities.getImportMapping": "View import settings",
   "activities.saveImportMapping": "Save import settings",
+  "activities.getTransferPair": "View linked transfer pairs",
+  "activities.findTransferMatchCandidates": "Find matching transfer candidates",
+  "activities.saveTransferPair": "Link transactions as a transfer",
+  "activities.linkTransfer": "Link transactions as a transfer",
+  "activities.unlinkTransfer": "Unlink transfer transactions",
 
   // MarketDataAPI functions
   "market.searchTicker": "Search for stocks/funds",
@@ -67,6 +73,7 @@ export const FUNCTION_DISPLAY_NAMES: Record<string, string> = {
   // SpendingAPI functions
   "spending.isEnabled": "Check whether Spending is enabled",
   "spending.getCategories": "View your spend categories",
+  "spending.getReport": "View aggregate spending reports",
   "spending.getRules": "View its own auto-categorization rules",
   "spending.saveRule": "Create or update auto-categorization rules",
   "spending.deleteRule": "Delete auto-categorization rules",

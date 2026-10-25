@@ -103,7 +103,7 @@ describe("useSettingsMutation", () => {
    * The timezone travels in no request and appears in no query key, so nothing
    * else would evict the pages computed under the old one.
    */
-  it("refetches spending caches when the timezone changes", async () => {
+  it("refetches spending and planning caches when the timezone changes", async () => {
     vi.mocked(updateSettings).mockResolvedValue({
       timezone: "America/New_York",
       onboardingCompleted: true,
@@ -123,6 +123,13 @@ describe("useSettingsMutation", () => {
 
     const invalidated = invalidate.mock.calls.flatMap((call) => call[0]?.queryKey ?? []);
     expect(invalidated).toContain(QueryKeys.SPENDING_TRANSACTIONS);
+    expect(invalidated).toContain(QueryKeys.RETIREMENT_OVERVIEW);
+    expect(invalidated).toContain(QueryKeys.SAVE_UP_OVERVIEW);
+    expect(invalidated).toContain(QueryKeys.SAVE_UP_PREVIEW);
+    // Loan payments and activity searches are dated in the zone too.
+    expect(invalidated).toContain(QueryKeys.ALTERNATIVE_HOLDINGS);
+    expect(invalidated).toContain(QueryKeys.ASSET_DATA);
+    expect(invalidated).toContain(QueryKeys.ACTIVITIES);
   });
 
   it("leaves spending caches alone for an unrelated setting", async () => {
@@ -144,5 +151,36 @@ describe("useSettingsMutation", () => {
 
     const invalidated = invalidate.mock.calls.flatMap((call) => call[0]?.queryKey ?? []);
     expect(invalidated).not.toContain(QueryKeys.SPENDING_TRANSACTIONS);
+    expect(invalidated).not.toContain(QueryKeys.RETIREMENT_OVERVIEW);
+    expect(invalidated).not.toContain(QueryKeys.SAVE_UP_OVERVIEW);
+    expect(invalidated).not.toContain(QueryKeys.SAVE_UP_PREVIEW);
+    expect(invalidated).not.toContain(QueryKeys.ALTERNATIVE_HOLDINGS);
+  });
+
+  it("saves appearance changes without a confirmation toast", async () => {
+    vi.mocked(updateSettings).mockResolvedValue({
+      language: "en",
+      onboardingCompleted: true,
+    } as Settings);
+    const queryClient = new QueryClient({
+      defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
+    });
+    const wrapper = ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+    );
+    const { result } = renderHook(() => useSettingsMutation(vi.fn(), vi.fn()), { wrapper });
+
+    // Mode, font and menu bar show the moment they apply.
+    await act(async () => {
+      await result.current.mutateAsync({ theme: "dark", font: "font-mono" });
+      await result.current.mutateAsync({ menuBarVisible: false });
+    });
+    expect(toast).not.toHaveBeenCalled();
+
+    // Any other setting still confirms.
+    await act(async () => {
+      await result.current.mutateAsync({ theme: "dark", language: "en" });
+    });
+    expect(toast).toHaveBeenCalledOnce();
   });
 });

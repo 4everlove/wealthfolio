@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -9,48 +8,6 @@ use super::{
     run_background_loop, run_sync_cycle, CredentialStore, OutboxStore, ReplayStore,
     SyncCycleResult, SyncTransport,
 };
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Pairing Flow Coordinator Types
-// ─────────────────────────────────────────────────────────────────────────────
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct OverwriteTableInfo {
-    pub table: String,
-    pub rows: i64,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct OverwriteInfo {
-    pub local_rows: i64,
-    pub non_empty_tables: Vec<OverwriteTableInfo>,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "phase", rename_all = "snake_case")]
-pub enum PairingFlowPhase {
-    OverwriteRequired { info: OverwriteInfo },
-    Syncing { detail: String },
-    Success,
-    Error { message: String },
-}
-
-#[derive(Debug)]
-pub struct PairingFlowState {
-    pub phase: PairingFlowPhase,
-    pub pairing_id: String,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PairingFlowResponse {
-    pub flow_id: String,
-    pub phase: PairingFlowPhase,
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
 pub struct DeviceSyncWakeHandle {
@@ -81,11 +38,12 @@ impl Default for DeviceSyncWakeHandle {
 
 #[derive(Debug)]
 pub struct DeviceSyncRuntimeState {
-    cycle_mutex: Mutex<()>,
+    pub(super) cycle_mutex: Mutex<()>,
     background_task: Mutex<Option<JoinHandle<()>>>,
     wake_handle: DeviceSyncWakeHandle,
     pub snapshot_upload_cancelled: AtomicBool,
-    pairing_flows: std::sync::Mutex<HashMap<String, PairingFlowState>>,
+    /// The profile's single restore operation; see `restore.rs`.
+    pub(super) restore: std::sync::Mutex<super::restore::RestoreSlot>,
 }
 
 impl DeviceSyncRuntimeState {
@@ -99,7 +57,7 @@ impl DeviceSyncRuntimeState {
             background_task: Mutex::new(None),
             wake_handle,
             snapshot_upload_cancelled: AtomicBool::new(false),
-            pairing_flows: std::sync::Mutex::new(HashMap::new()),
+            restore: std::sync::Mutex::new(Default::default()),
         }
     }
 }
@@ -165,6 +123,7 @@ impl DeviceSyncRuntimeState {
         let mut guard = self.background_task.lock().await;
         if let Some(handle) = guard.take() {
             handle.abort();
+            let _ = handle.await;
         }
     }
 
@@ -172,35 +131,27 @@ impl DeviceSyncRuntimeState {
         let guard = self.background_task.lock().await;
         guard.as_ref().is_some_and(|handle| !handle.is_finished())
     }
+}
 
-    // ─── Pairing flow store ──────────────────────────────────────────────
+#[cfg(test)]
+mod shutdown_tests {
+    use super::*;
 
-    pub fn create_flow(&self, pairing_id: String, phase: PairingFlowPhase) -> String {
-        let flow_id = uuid::Uuid::new_v4().to_string();
-        let mut flows = self.pairing_flows.lock().unwrap();
-        flows.insert(flow_id.clone(), PairingFlowState { phase, pairing_id });
-        flow_id
-    }
-
-    pub fn get_flow_phase(&self, flow_id: &str) -> Option<PairingFlowPhase> {
-        let flows = self.pairing_flows.lock().unwrap();
-        flows.get(flow_id).map(|s| s.phase.clone())
-    }
-
-    pub fn get_flow_pairing_id(&self, flow_id: &str) -> Option<String> {
-        let flows = self.pairing_flows.lock().unwrap();
-        flows.get(flow_id).map(|s| s.pairing_id.clone())
-    }
-
-    pub fn set_flow_phase(&self, flow_id: &str, phase: PairingFlowPhase) {
-        let mut flows = self.pairing_flows.lock().unwrap();
-        if let Some(state) = flows.get_mut(flow_id) {
-            state.phase = phase;
-        }
-    }
-
-    pub fn remove_flow(&self, flow_id: &str) {
-        let mut flows = self.pairing_flows.lock().unwrap();
-        flows.remove(flow_id);
+    #[tokio::test]
+    async fn stopping_background_waits_for_captured_resources_to_drop() {
+        let runtime = DeviceSyncRuntimeState::new();
+        let resource = Arc::new(());
+        let captured = resource.clone();
+        let (started, ready) = tokio::sync::oneshot::channel();
+        *runtime.background_task.lock().await = Some(tokio::spawn(async move {
+            let _resource = captured;
+            let _ = started.send(());
+            std::future::pending::<()>().await;
+        }));
+        ready.await.unwrap();
+        runtime.ensure_background_stopped().await;
+        assert_eq!(Arc::strong_count(&resource), 1);
+        assert!(!runtime.is_background_running().await);
+        runtime.ensure_background_stopped().await;
     }
 }

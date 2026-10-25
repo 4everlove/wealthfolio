@@ -1,27 +1,24 @@
-use std::sync::Arc;
+use crate::profiles::ProfileAccess;
 
-use tauri::State;
 use wealthfolio_ai::{
     AiProvidersResponse, ListModelsResponse, ProviderApiError, SetDefaultProviderRequest,
     UpdateProviderSettingsRequest,
 };
 
-use crate::context::ServiceContext;
-
 use super::error::CommandResult;
 
 #[tauri::command]
-pub async fn get_ai_providers(
-    context: State<'_, Arc<ServiceContext>>,
-) -> CommandResult<AiProvidersResponse> {
+pub async fn get_ai_providers(context: ProfileAccess) -> CommandResult<AiProvidersResponse> {
+    let context = context.context()?;
     Ok(context.ai_provider_service().get_ai_providers()?)
 }
 
 #[tauri::command]
 pub async fn update_ai_provider_settings(
-    context: State<'_, Arc<ServiceContext>>,
+    context: ProfileAccess,
     request: UpdateProviderSettingsRequest,
 ) -> CommandResult<()> {
+    let context = context.context()?;
     context
         .ai_provider_service()
         .update_provider_settings(request)
@@ -31,9 +28,10 @@ pub async fn update_ai_provider_settings(
 
 #[tauri::command]
 pub async fn set_default_ai_provider(
-    context: State<'_, Arc<ServiceContext>>,
+    context: ProfileAccess,
     request: SetDefaultProviderRequest,
 ) -> CommandResult<()> {
+    let context = context.context()?;
     context
         .ai_provider_service()
         .set_default_provider(request)
@@ -46,9 +44,10 @@ pub async fn set_default_ai_provider(
 /// Frontend never needs to send API keys - they are retrieved internally.
 #[tauri::command]
 pub async fn list_ai_models(
-    context: State<'_, Arc<ServiceContext>>,
+    context: ProfileAccess,
     provider_id: String,
 ) -> Result<ListModelsResponse, ProviderApiError> {
+    let context = context.context()?;
     context
         .ai_provider_service()
         .list_models(&provider_id)

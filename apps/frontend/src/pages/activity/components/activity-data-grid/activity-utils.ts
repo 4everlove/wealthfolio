@@ -1,3 +1,4 @@
+import { getActivityCurrencyPatch } from "../../activity-currency";
 import {
   isAssetBackedIncomeSubtype,
   isAssetIdentityRequired,
@@ -18,7 +19,28 @@ import type {
   TransactionUpdateParams,
 } from "./types";
 import { generateTempActivityId } from "./use-activity-grid-state";
+import { isSameAccountCashFxConversion } from "../transfer-link-utils";
 import { calculateIncomeFinalAmount, calculateTradeFinalAmount } from "@/lib/activity-final-amount";
+
+export function isPairedInternalCashTransfer(transaction: LocalTransaction): boolean {
+  return Boolean(
+    !transaction.isNew &&
+    transaction.sourceGroupId &&
+    transaction.counterpartActivityId &&
+    transaction.counterpartAccountId &&
+    transaction.isExternal !== true &&
+    (transaction.activityType === ActivityType.TRANSFER_IN ||
+      transaction.activityType === ActivityType.TRANSFER_OUT) &&
+    !isSecuritiesTransfer(transaction.activityType, transaction.assetSymbol, transaction.assetId),
+  );
+}
+
+export function requiresTransferPairEditor(previous: LocalTransaction, next: LocalTransaction) {
+  return (
+    isPairedInternalCashTransfer(previous) &&
+    (previous.accountId !== next.accountId || previous.currency !== next.currency)
+  );
+}
 
 /**
  * Set of numeric field names for value comparison
@@ -363,6 +385,38 @@ export function applyTransactionUpdate(params: TransactionUpdateParams): LocalTr
     // For existing activities, assetId is preserved from the original data
     updated = { ...updated, assetSymbol: upper };
 
+    // A new symbol (pasted, filled or cleared) is another asset than the one picked,
+    // so drop the pick's name, kind, quote currency and provider, and the quote mode:
+    // a manual mode lets the server create the symbol without a quote currency. The
+    // exchange stays, for matching an asset held there. A search pick sets these
+    // again right after (handleSymbolSelect).
+    if (upper !== (transaction.assetSymbol ?? "").trim().toUpperCase()) {
+      updated = {
+        ...updated,
+        assetQuoteMode: undefined,
+        pendingAssetName: undefined,
+        pendingAssetKind: undefined,
+        pendingQuoteCcy: undefined,
+        pendingProviderId: undefined,
+        pendingProviderSymbol: undefined,
+      };
+      // A new row also drops the picked id and instrument type; a type the user
+      // set stays. A saved row keeps both: the server prices an update with the
+      // asset id it gets before it resolves the new symbol, and the type decides
+      // whether it accepts that symbol.
+      if (transaction.isNew === true) {
+        updated = { ...updated, pendingAssetId: undefined };
+        if (transaction._instrumentTypeFromPick) {
+          updated = {
+            ...updated,
+            instrumentType: undefined,
+            pendingInstrumentType: undefined,
+            _instrumentTypeFromPick: undefined,
+          };
+        }
+      }
+    }
+
     // Auto-fill currency only if not already set (e.g., by handleSymbolSelect
     // which sets the correct currency from search result / quote resolution).
     // This avoids overriding minor currencies like GBp with the account's GBP.
@@ -407,15 +461,34 @@ export function applyTransactionUpdate(params: TransactionUpdateParams): LocalTr
     updated = { ...updated, accountId: newAccountId };
     const account = accountLookup.get(newAccountId);
     if (account) {
-      updated = { ...updated, accountName: account.name, accountCurrency: account.currency };
-
-      // Auto-fill currency: account currency (users enter prices in account currency)
-      updated = { ...updated, currency: account.currency };
+      updated = {
+        ...updated,
+        ...getActivityCurrencyPatch({
+          currency: updated.currency,
+          previousCurrency: updated.currency,
+          accountCurrency: account.currency,
+          previousAccountCurrency: updated.accountCurrency,
+          useAccountDefault: Boolean(updated.isNew || !updated.currency),
+        }),
+        accountName: account.name,
+        accountCurrency: account.currency,
+      };
     }
     updated = applyCashDefaults(updated, resolveTransactionCurrency, fallbackCurrency);
     updated = applySplitDefaults(updated);
   } else if (field === "currency") {
-    updated = { ...updated, currency: typeof value === "string" ? value : updated.currency };
+    const currency = typeof value === "string" ? value : updated.currency;
+    updated = {
+      ...updated,
+      currency,
+      ...getActivityCurrencyPatch({
+        currency,
+        previousCurrency: updated.currency,
+        accountCurrency: updated.accountCurrency,
+        previousAccountCurrency: updated.accountCurrency,
+        useAccountDefault: false,
+      }),
+    };
     updated = applyCashDefaults(updated, resolveTransactionCurrency, fallbackCurrency);
     updated = applySplitDefaults(updated);
   } else if (field === "comment") {
@@ -447,7 +520,12 @@ export function applyTransactionUpdate(params: TransactionUpdateParams): LocalTr
   } else if (field === "instrumentType") {
     // Instrument type (EQUITY, OPTION, BOND, etc.) — also set pendingInstrumentType for save payload
     const instrumentType = typeof value === "string" && value ? value : undefined;
-    updated = { ...updated, instrumentType, pendingInstrumentType: instrumentType };
+    updated = {
+      ...updated,
+      instrumentType,
+      pendingInstrumentType: instrumentType,
+      _instrumentTypeFromPick: undefined,
+    };
   }
 
   if (FINAL_AMOUNT_INPUT_FIELDS.has(field)) {
@@ -625,6 +703,7 @@ export function buildSavePayload(
 
     if (isNew) {
       const createPayload: ActivityCreatePayload = {
+        sourceGroupId: transaction.sourceGroupId,
         ...basePayload,
         amount: sendsAmount ? basePayload.amount : undefined,
         ...(attestsCustomTotal && { needsReview: false }),
@@ -766,7 +845,7 @@ export const TRACKED_FIELDS: (keyof LocalTransaction)[] = [
  * Column IDs that should be pinned to the left/right of the grid
  */
 export const PINNED_COLUMNS = {
-  left: ["select", "status", "date", "accountName", "activityType"] as const,
+  left: ["select", "date", "accountName", "activityType"] as const,
   right: ["actions"] as const,
 };
 
@@ -895,6 +974,24 @@ function validateTransaction(transaction: LocalTransaction): TransactionValidati
 }
 
 /**
+ * A duplicated transfer pair is two new rows sharing a group: deleting either
+ * deletes both, as deleting one leg of a saved pair does.
+ */
+export function withNewPairPartners(
+  rows: LocalTransaction[],
+  localTransactions: LocalTransaction[],
+): LocalTransaction[] {
+  const ids = new Set(rows.map((row) => row.id));
+  const groups = new Set(
+    rows.filter((row) => row.isNew && row.sourceGroupId).map((row) => row.sourceGroupId),
+  );
+  const partners = localTransactions.filter(
+    (row) => row.isNew && row.sourceGroupId && groups.has(row.sourceGroupId) && !ids.has(row.id),
+  );
+  return [...rows, ...partners];
+}
+
+/**
  * Validates all dirty transactions before save
  */
 export function validateTransactionsForSave(
@@ -910,6 +1007,35 @@ export function validateTransactionsForSave(
   for (const transaction of dirtyTransactions) {
     const transactionErrors = validateTransaction(transaction);
     errors.push(...transactionErrors);
+  }
+
+  // A duplicated transfer pair is saved as two new rows sharing a group. Edits
+  // or a partial delete must not store an orphan leg, or a same-account pair
+  // in one currency.
+  const newGroups = new Map<string, LocalTransaction[]>();
+  for (const transaction of dirtyTransactions) {
+    if (!transaction.isNew || !transaction.sourceGroupId) continue;
+    newGroups.set(transaction.sourceGroupId, [
+      ...(newGroups.get(transaction.sourceGroupId) ?? []),
+      transaction,
+    ]);
+  }
+  for (const legs of newGroups.values()) {
+    const [first, second] = legs;
+    const isPair =
+      legs.length === 2 &&
+      [first.activityType, second.activityType].sort().join() ===
+        [ActivityType.TRANSFER_IN, ActivityType.TRANSFER_OUT].join() &&
+      (first.accountId !== second.accountId || isSameAccountCashFxConversion(first, second));
+    if (!isPair) {
+      for (const leg of legs) {
+        errors.push({
+          transactionId: leg.id,
+          field: "activityType",
+          message: "A transfer pair needs both legs, in two currencies when they share an account",
+        });
+      }
+    }
   }
 
   return {

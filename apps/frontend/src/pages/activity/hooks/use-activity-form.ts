@@ -142,8 +142,8 @@ export function useActivityForm({
                 sourceCurrency === destinationCurrency
                   ? sourceAmount
                   : (transferData.destinationAmount ??
-                    (sourceAmount && transferData.fxRate
-                      ? sourceAmount * transferData.fxRate
+                    (sourceAmount && transferData.transferRate
+                      ? sourceAmount * transferData.transferRate
                       : undefined));
 
               if (!sourceAmount || !destinationAmount || !sourceCurrency || !destinationCurrency) {
@@ -159,6 +159,7 @@ export function useActivityForm({
               }
 
               await saveInternalTransferPairMutation.mutateAsync({
+                editedActivityId: isEditing ? activity?.id : undefined,
                 transferOutId: isEditing ? transferOutId : undefined,
                 transferInId: isEditing ? transferInId : undefined,
                 fromAccountId: transferData.fromAccountId,
@@ -168,10 +169,6 @@ export function useActivityForm({
                 destinationAmount,
                 sourceCurrency,
                 destinationCurrency,
-                fxRate:
-                  sourceCurrency === destinationCurrency
-                    ? undefined
-                    : (transferData.fxRate ?? null),
                 notes: transferData.comment ?? null,
                 transferMode: "cash",
               });
@@ -306,8 +303,10 @@ export function useActivityForm({
             if (activity.sourceGroupId && (!transferOutId || !transferInId)) {
               try {
                 const pair = await getTransferPairForActivity(activity.id);
-                transferOutId = pair.transferOut.id;
-                transferInId = pair.transferIn.id;
+                if (pair) {
+                  transferOutId = pair.transferOut.id;
+                  transferInId = pair.transferIn.id;
+                }
               } catch {
                 // Invalid/orphan groups are cleared by the single-row external update below.
               }

@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::panic, reason = "test code")]
 use axum::{body::Body, http::Request};
 use tempfile::tempdir;
 use tower::ServiceExt;
@@ -6,12 +7,13 @@ use wealthfolio_server::{api::app_router, build_state, config::Config};
 #[tokio::test]
 async fn healthz_works() {
     let tmp = tempdir().unwrap();
+    std::env::set_var("WF_DATA_DIR", "");
     std::env::set_var("WF_DB_PATH", tmp.path().join("test.db"));
     std::env::set_var("WF_SECRET_KEY", "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
     std::env::set_var("WF_LISTEN_ADDR", "127.0.0.1:0");
-    let config = Config::from_env();
+    let config = Config::from_env().unwrap();
     let state = build_state(&config).await.unwrap();
-    let app = app_router(state, &config);
+    let app = app_router(state, &config).unwrap();
 
     let response = app
         .oneshot(

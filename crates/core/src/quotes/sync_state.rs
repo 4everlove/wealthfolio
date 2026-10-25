@@ -36,7 +36,7 @@ pub enum SyncMode {
         days: i64,
     },
 
-    /// Rebuild full history from activity start.
+    /// Refetch and merge full history from activity start.
     /// Used for manual resync or when history needs to be rebuilt.
     /// - Start: first_activity_date - BUFFER_DAYS (or today - days as fallback)
     /// - End: today
@@ -336,9 +336,6 @@ pub struct SymbolSyncPlan {
     /// Provider-specific symbol for quote fetching (may differ from canonical symbol).
     pub quote_symbol: Option<String>,
     pub currency: String,
-    /// When true, delete all non-manual quotes before upserting fresh data.
-    /// Set for BackfillHistory mode to remove stale/wrong dates.
-    pub purge_provider_quotes: bool,
     /// When true, tolerate provider "no data" style failures for closed positions.
     /// Broad history jobs use this to keep old closed/delisted assets best-effort;
     /// targeted user requests keep errors visible.

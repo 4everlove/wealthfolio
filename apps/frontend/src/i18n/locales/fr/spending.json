@@ -37,6 +37,11 @@
     "transactionCount_many": "{{count}} transactions",
     "editCategoryTitle": "Modifier la catégorie",
     "deleteCategoryTitle": "Supprimer la catégorie",
+    "excludeLabel": "Exclure des dépenses",
+    "excludeDescription": "Masquée des totaux, graphiques, analyses et budgets",
+    "excludeDisabledParent": "Exclue car sa catégorie parente est exclue",
+    "excludedTooltip": "Exclue des dépenses",
+    "excludedWithParent": "Exclue avec {{name}}",
     "categoryActions": "Actions de catégorie",
     "deleteTitle": "Supprimer la catégorie",
     "deleteConfirm": "Voulez-vous vraiment supprimer « {{name}} » ?",
@@ -45,6 +50,13 @@
     "searchCategories": "Rechercher des catégories...",
     "noCategoriesFound": "Aucune catégorie trouvée.",
     "clearCategory": "Effacer la catégorie"
+  },
+  "activityTypes": {
+    "balanceTransferCashAdvance": "Transfert de solde / Avance de fonds",
+    "charge": "Dépense",
+    "interestCharge": "Intérêts débiteurs",
+    "refundCredit": "Remboursement / Crédit",
+    "reimbursementRefund": "Remboursement"
   },
   "rules": {
     "editTitle": "Modifier la règle",
@@ -226,7 +238,13 @@
     "viewingMonth": "Affichage de {{label}}, cliquez pour modifier",
     "pickMonth": "Choisir un mois précis",
     "selectMonth": "Sélectionner un mois",
-    "clearMonth": "Effacer la sélection du mois"
+    "clearMonth": "Effacer la sélection du mois",
+    "chooseMonth": "Choisir un mois",
+    "selectDates": "Sélectionner les dates",
+    "startDate": "Date de début",
+    "chooseCustomDates": "Choisir des dates personnalisées",
+    "invalidRange": "La date de fin doit être égale ou postérieure à la date de début",
+    "endDate": "Date de fin"
   },
   "presets": {
     "loading": "Chargement des préréglages…",
@@ -413,7 +431,8 @@
     "largest": "Plus élevée",
     "noSpending": "Aucune dépense sur ce créneau.",
     "outlier": "Anomalie",
-    "weekOf": "Semaine du {{date}}"
+    "weekOf": "Semaine du {{date}}",
+    "customSubtitle": "Transactions sur la période sélectionnée"
   },
   "split": {
     "title": "Ventiler la transaction",
@@ -570,7 +589,11 @@
     "brighter": "Plus clair",
     "moreSpend": "= plus de dépenses.",
     "less": "moins",
-    "more": "plus"
+    "more": "plus",
+    "customSubtitleShort": "Période sélectionnée",
+    "customNoActivity": "Aucun mouvement de trésorerie sur la période sélectionnée.",
+    "customLegendIntro": "Chaque cellule représente une heure d’un jour de la semaine sur la période sélectionnée.",
+    "customSubtitle": "Période sélectionnée · intensité des dépenses par jour de la semaine et par heure."
   },
   "eventDetail": {
     "previousEvent": "Événement précédent",
@@ -734,12 +757,7 @@
     "noIncome": "Aucun revenu dans les comptes sélectionnés pour cette période.",
     "spent": "Dépensé",
     "saved": "Épargné",
-    "incomeSaving": "Revenus et épargne",
-    "nonSpendingCashflow": "Flux hors dépenses pour {{period}}.",
-    "moneyIn": "Entrées",
-    "incomeSources": "Sources de revenus",
     "setAside": "Mis de côté",
-    "savingDestinations": "Destinations d'épargne",
     "sortSpent": "dépensé",
     "sortChange": "évolution",
     "sortName": "nom",
@@ -754,10 +772,56 @@
     "categoriesShown_one": "{{shown}} sur {{total}} catégorie affichée",
     "categoriesShown_other": "{{shown}} sur {{total}} catégories affichées",
     "categoriesShown_many": "{{shown}} sur {{total}} catégories affichées",
+    "excludedInSettings_one": "{{count}} exclue dans les paramètres",
+    "excludedInSettings_other": "{{count}} exclues dans les paramètres",
+    "excludedInSettings_many": "{{count}} exclues dans les paramètres",
     "openTransactions": "Ouvrir les transactions →",
     "moreCount_one": "+{{count}} de plus",
     "moreCount_other": "+{{count}} de plus",
-    "moreCount_many": "+{{count}} de plus"
+    "moreCount_many": "+{{count}} de plus",
+    "vsRange": "par rapport à {{from}} – {{to}}"
+  },
+  "moneyFlow": {
+    "title": "Flux d'argent",
+    "subtitle": "D'où vient votre argent et où il est allé pour {{period}}.",
+    "focusSubtitle": "Toutes les catégories pour {{period}}.",
+    "focusSubcategoriesSubtitle": "Toutes les sous-catégories pour {{period}}.",
+    "back": "Tous les flux",
+    "backTo": "Retour à {{name}}",
+    "chartLabel": "Diagramme des flux d'argent. Utilisez les flèches pour passer d'un flux à l'autre.",
+    "nodeAria": "{{name}}, {{amount}}",
+    "nodeActionAria": "{{name}}, {{amount}}. {{action}}",
+    "shareOfIncome": "{{pct}} des revenus",
+    "shareOfTotal": "{{pct}} du total",
+    "clickTransactions": "Cliquez pour voir les transactions",
+    "clickCategories": "Cliquez pour voir toutes les catégories",
+    "clickSubcategories": "Cliquez pour voir les sous-catégories",
+    "action": {
+      "categories": "Voir toutes les catégories",
+      "subcategories": "Voir les sous-catégories",
+      "transactions": "Voir les transactions"
+    },
+    "node": {
+      "total": "Total",
+      "shortfall": "Déficit",
+      "refunds": "Remboursements nets",
+      "surplus": "Reste",
+      "uncategorizedIncome": "Revenus non catégorisés",
+      "netSpending": "Dépenses nettes"
+    },
+    "hint": {
+      "total": "Les entrées, plus les remboursements nets et un éventuel déficit. Toujours égal aux sorties.",
+      "totalOut": "Tout ce qui a été dépensé et mis de côté, avant remboursements.",
+      "shortfall": "Dépenses et épargne au-delà de ce qui est entré.",
+      "refunds": "Catégories où les remboursements ont dépassé les dépenses.",
+      "saved": "Transféré vers des comptes d'épargne et d'investissement.",
+      "surplus": "Entré, mais ni dépensé ni mis de côté.",
+      "uncategorized": "Dépenses qui n'ont pas encore de catégorie.",
+      "net": "Ce que cette catégorie a coûté après remboursements.",
+      "direct": "Attribué à la catégorie elle-même, pas à une sous-catégorie."
+    },
+    "groupRefunds": "Avant déduction de {{amount}} de remboursements nets.",
+    "categoryRefunds": "Avant déduction de {{refunds}} de remboursements nets. Dépenses nettes : {{net}}."
   },
   "budgetChart": {
     "overBudget": "Budget dépassé",
@@ -901,6 +965,9 @@
     "automateMatching": "Automatiser la correspondance pour les marchands récurrents",
     "loadError": "Impossible de charger les données de dépenses.",
     "spentLabel": "Dépensé",
+    "excludedCategoriesHint_one": "{{count}} catégorie exclue",
+    "excludedCategoriesHint_other": "{{count}} catégories exclues",
+    "excludedCategoriesHint_many": "{{count}} catégories exclues",
     "noSpendingInPeriod": "Aucune dépense sur cette période",
     "whereItWent": "Où est passé l'argent",
     "whereItWentView": "Vue de la répartition",
@@ -1021,6 +1088,7 @@
     "addSource_many": "Ajouter une source ({{count}} disponibles)",
     "overridesTitle_one": "Ajustement · {{count}}",
     "overridesTitle_other": "Ajustements · {{count}}",
-    "overridesTitle_many": "Ajustements · {{count}}"
+    "overridesTitle_many": "Ajustements · {{count}}",
+    "sourceMonth": "Mois source"
   }
 }

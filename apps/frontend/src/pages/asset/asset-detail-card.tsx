@@ -231,7 +231,7 @@ const AssetDetailCard: React.FC<AssetDetailProps> = ({ assetData, className }) =
             <div className="text-xl font-extrabold">
               <AmountDisplay value={marketValue} currency={currency} isHidden={isBalanceHidden} />
             </div>
-            <div className="text-muted-foreground text-right text-sm font-normal">{currency}</div>
+            <div className="text-muted-foreground text-end text-sm font-normal">{currency}</div>
           </div>
         </CardTitle>
       </CardHeader>

@@ -22,10 +22,10 @@ const SPENDING_TAXONOMY = "spending_categories";
 const INCOME_TAXONOMY = "income_sources";
 const SAVINGS_TAXONOMY = "savings_categories";
 
-export type QuickCategorizeScope = "expense" | "income" | "saving" | "both";
+export type QuickCategorizeScope = "expense" | "income" | "saving" | "both" | "all";
 
 export interface QuickCategorizePopoverProps {
-  trigger: React.ReactNode;
+  trigger: React.ReactElement;
   selectedCategoryId?: string | null;
   /** Category bucket to show. Categories label the cash-flow bucket; they do not change it. */
   scope?: QuickCategorizeScope;
@@ -79,13 +79,13 @@ export function QuickCategorizePopover({
 
   const options = useMemo<FlatOption[]>(() => {
     const out: FlatOption[] = [];
-    if (scope === "expense" || scope === "both") {
+    if (scope === "expense" || scope === "both" || scope === "all") {
       out.push(...flattenTaxonomy(SPENDING_TAXONOMY, spending.data?.categories ?? [], "Expense"));
     }
-    if (scope === "saving") {
+    if (scope === "saving" || scope === "all") {
       out.push(...flattenTaxonomy(SAVINGS_TAXONOMY, savings.data?.categories ?? [], "Savings"));
     }
-    if (scope === "income" || scope === "both") {
+    if (scope === "income" || scope === "both" || scope === "all") {
       out.push(...flattenTaxonomy(INCOME_TAXONOMY, income.data?.categories ?? [], "Income"));
     }
     return out;
@@ -113,7 +113,7 @@ export function QuickCategorizePopover({
 
   return (
     <Popover open={open} onOpenChange={setOpen}>
-      <PopoverTrigger asChild>{trigger}</PopoverTrigger>
+      <PopoverTrigger render={trigger} />
       <PopoverContent className="w-70 p-0" align={align}>
         <Command>
           <CommandInput placeholder={t("spending:category.searchCategories")} />
@@ -144,7 +144,7 @@ export function QuickCategorizePopover({
                         />
                         <span className="truncate">{label}</span>
                         {isSelected && (
-                          <Icons.Check className="text-muted-foreground ml-auto h-3.5 w-3.5" />
+                          <Icons.Check className="text-muted-foreground ms-auto h-3.5 w-3.5" />
                         )}
                       </CommandItem>
                     );
@@ -158,7 +158,7 @@ export function QuickCategorizePopover({
                 <CommandGroup>
                   <CommandItem
                     onSelect={handleClear}
-                    className="text-destructive hover:bg-destructive/10 justify-center text-center text-sm"
+                    className="text-destructive hover:bg-destructive-subtle hover:text-destructive-subtle-foreground justify-center text-center text-sm"
                   >
                     {t("spending:category.clearCategory")}
                   </CommandItem>

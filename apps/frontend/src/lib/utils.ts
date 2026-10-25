@@ -22,11 +22,10 @@ export type DateOrder = "DMY" | "MDY";
 
 /**
  * Numeric dates the formats below can actually parse: two small fields, a
- * repeated separator, four-digit year. Detection deliberately matches no more
- * than parsing supports — claiming an order for "03/08/26" would be useless,
- * since no pattern here reads a two-digit year.
+ * repeated separator, and a two- or four-digit year. Detection deliberately
+ * matches no more than parsing supports.
  */
-const NUMERIC_DATE_RE = /^(\d{1,2})([/.-])(\d{1,2})\2(\d{4})(?:\D|$)/;
+const NUMERIC_DATE_RE = /^(\d{1,2})([/.-])(\d{1,2})\2(\d{4}|\d{2})(?:\D|$)/;
 
 /**
  * The two field orders NUMERIC_DATE_RE can report, each covering every
@@ -40,6 +39,9 @@ export const MONTH_FIRST_NUMERIC_FORMATS = [
   "M.d.yyyy", // "5.1.2024"
   "MM-dd-yyyy", // "05-01-2024"
   "M-d-yyyy", // "5-1-2024"
+  "MM/dd/yy", // "05/01/24"
+  "MM.dd.yy", // "05.01.24"
+  "MM-dd-yy", // "05-01-24"
 ];
 
 export const DAY_FIRST_NUMERIC_FORMATS = [
@@ -49,6 +51,9 @@ export const DAY_FIRST_NUMERIC_FORMATS = [
   "d.M.yyyy", // "1.5.2024" - German/Swiss Relaxed
   "dd-MM-yyyy", // "01-05-2024" - Dutch/Danish
   "d-M-yyyy", // "1-5-2024"
+  "dd/MM/yy", // "01/05/24"
+  "dd.MM.yy", // "01.05.24"
+  "dd-MM-yy", // "01-05-24"
 ];
 
 /**
@@ -65,6 +70,12 @@ const NUMERIC_FORMATS_BY_ORDER = {
     "dd.MM.yyyy",
     "d.M.yyyy",
     "dd-MM-yyyy",
+    "MM/dd/yy",
+    "dd/MM/yy",
+    "dd.MM.yy",
+    "MM.dd.yy",
+    "dd-MM-yy",
+    "MM-dd-yy",
   ],
   DMY: [...DAY_FIRST_NUMERIC_FORMATS, ...MONTH_FIRST_NUMERIC_FORMATS],
   MDY: [...MONTH_FIRST_NUMERIC_FORMATS, ...DAY_FIRST_NUMERIC_FORMATS],
@@ -171,6 +182,7 @@ export function tryParseDate(dateStr: string, order?: DateOrder): Date | null {
 
     // Additional Banking Formats
     "dd-MMM-yyyy", // "01-MAY-2024" - Legacy Banking
+    "dd-MMM-yy", // "01-MAY-24" - Short Year (J.P. Morgan Personal Investing)
     "ddMMMyyyy", // "01MAY2024" - Swift/Wire
     "dd MMM yy", // "01 MAY 24" - Short Year
     "MMM dd, yy", // "MAY 01, 24" - US Short
@@ -194,9 +206,11 @@ export function tryParseDate(dateStr: string, order?: DateOrder): Date | null {
     } catch {}
   }
 
-  // Try Unix timestamp (in seconds or milliseconds)
-  const num = parseInt(cleaned);
-  if (!isNaN(num)) {
+  // Try Unix timestamp (in seconds or milliseconds). Only a bare number is one:
+  // parseInt would read the leading digits of "09/16/2026 AS OF 09/15/2026" as
+  // 9 seconds after the epoch.
+  if (/^\d+$/.test(cleaned)) {
+    const num = Number(cleaned);
     const timestampDate = new Date(num > 1000000000000 ? num : num * 1000);
     if (isValid(timestampDate) && isDateInRange(timestampDate)) {
       return timestampDate;
@@ -207,7 +221,7 @@ export function tryParseDate(dateStr: string, order?: DateOrder): Date | null {
 }
 
 // Helper to check if date is within reasonable range (1900-2100)
-function isDateInRange(date: Date): boolean {
+export function isDateInRange(date: Date): boolean {
   const year = date.getFullYear();
   return year >= 1900 && year <= 2100;
 }
@@ -299,6 +313,12 @@ export const formatDateTime = (
   date: string | Date,
   formatting: Pick<FormattingApi, "formatDate" | "formatTime">,
   timezone?: string,
+  options?: {
+    /** Adds the weekday to `date`, for a heading over that day's rows. */
+    weekday?: Intl.DateTimeFormatOptions["weekday"];
+    /** Leaves seconds out of `time`, for a row whose day is shown above it. */
+    omitSeconds?: boolean;
+  },
 ) => {
   if (!date) return { date: "-", time: "-" };
 
@@ -325,6 +345,7 @@ export const formatDateTime = (
   const effectiveTimezone = explicitTimezone ? resolveDisplayTimezone(explicitTimezone) : undefined;
 
   const dateOptions: Intl.DateTimeFormatOptions = {
+    ...(options?.weekday ? { weekday: options.weekday } : {}),
     year: "numeric",
     month: "short",
     day: "numeric",
@@ -334,7 +355,7 @@ export const formatDateTime = (
   const timeOptions: Intl.DateTimeFormatOptions = {
     hour: "numeric",
     minute: "numeric",
-    second: "numeric",
+    ...(options?.omitSeconds ? {} : { second: "numeric" }),
     ...(effectiveTimezone ? { timeZone: effectiveTimezone } : {}),
   };
   return {
@@ -343,20 +364,30 @@ export const formatDateTime = (
   };
 };
 
-export function resolveDisplayTimezone(timezone?: string | null): string {
-  const fallback = Intl.DateTimeFormat().resolvedOptions().timeZone;
-  const candidate = timezone?.trim();
-  if (!candidate) {
-    return fallback;
-  }
+/**
+ * Whether each timezone name passed validation. A list formats every row's
+ * date, and building a formatter to check the same name each time costs more
+ * than the formatting itself.
+ */
+const timezoneValidity = new Map<string, boolean>();
 
-  try {
-    // Validate timezone string before passing it to formatters.
-    new Intl.DateTimeFormat("en-US", { timeZone: candidate }).format(new Date());
-    return candidate;
-  } catch {
-    return fallback;
+export function resolveDisplayTimezone(timezone?: string | null): string {
+  const candidate = timezone?.trim();
+  if (candidate) {
+    let isValid = timezoneValidity.get(candidate);
+    if (isValid === undefined) {
+      try {
+        // Validate timezone string before passing it to formatters.
+        new Intl.DateTimeFormat("en-US", { timeZone: candidate }).format(new Date());
+        isValid = true;
+      } catch {
+        isValid = false;
+      }
+      timezoneValidity.set(candidate, isValid);
+    }
+    if (isValid) return candidate;
   }
+  return Intl.DateTimeFormat().resolvedOptions().timeZone;
 }
 
 /**

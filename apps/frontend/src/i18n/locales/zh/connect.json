@@ -1,4 +1,5 @@
 {
+  "opensInBrowser": "在浏览器中打开",
   "page": {
     "title": "同步与连接",
     "subtitle": "您的所有设备,尽在一处。",
@@ -13,7 +14,10 @@
     "noDevicesSyncing": "尚无设备在同步",
     "noDevicesDescription": "在设置中配置设备同步,以在各设备间保持数据同步。",
     "noActivity": "暂无活动",
-    "noActivityDescription": "数据开始同步后,更新将显示在此处。"
+    "noActivityDescription": "数据开始同步后,更新将显示在此处。",
+    "showMore_one": "再显示 {{count}} 个",
+    "showMore_other": "再显示 {{count}} 个",
+    "showLess": "收起"
   },
   "emptyState": {
     "optional": "可选",
@@ -23,20 +27,21 @@
     "learnMore": "了解有关 Connect 的更多信息",
     "features": {
       "brokerageSync": {
-        "title": "券商同步",
-        "description": "每日自动同步账户和交易。"
+        "title": "已连接的账户",
+        "description": "自动同步券商的交易记录。"
       },
       "deviceSync": {
-        "title": "设备同步",
-        "description": "通过端到端加密在各设备间同步。"
+        "title": "设备同步与备份",
+        "description": "端到端加密同步和自动云备份。"
       },
       "householdView": {
-        "title": "家庭视图",
-        "description": "与家庭成员共享账户。"
+        "title": "家庭投资组合",
+        "description": "共同查看家庭成员的投资。"
       }
     }
   },
   "flow": {
+    "aggregatorExample": "（例如 SnapTrade）",
     "yourDevice": "您的设备",
     "localDatabase": "本地数据库",
     "dataStaysHere": "数据保留在此",
@@ -69,7 +74,8 @@
     "noDataYet": "暂无数据",
     "dataAsOf": "数据截至 {{date}}",
     "emptyTitle": "尚未同步任何账户",
-    "emptyDescription": "连接一家券商以开始同步您的账户。"
+    "emptyDescription": "连接一家券商以开始同步您的账户。",
+    "needsSetup": "需要设置"
   },
   "connections": {
     "title": "券商连接",
@@ -86,7 +92,11 @@
     "accountsSyncing_one": "{{count}} 个账户正在同步",
     "accountsSyncing_other": "{{count}} 个账户正在同步",
     "partialSyncing_one": "{{total}} 个账户中有 {{syncing}} 个正在同步 · {{excluded}} 个账户已排除",
-    "partialSyncing_other": "{{total}} 个账户中有 {{syncing}} 个正在同步 · {{excluded}} 个账户已排除"
+    "partialSyncing_other": "{{total}} 个账户中有 {{syncing}} 个正在同步 · {{excluded}} 个账户已排除",
+    "accountCount_one": "{{count}} 个账户",
+    "accountCount_other": "{{count}} 个账户",
+    "excludedCount_one": "已排除 {{count}} 个",
+    "excludedCount_other": "已排除 {{count}} 个"
   },
   "sync": {
     "syncNow": "立即同步",
@@ -178,20 +188,33 @@
   "attention": {
     "title": "券商同步需要关注",
     "description_one": "{{count}} 个账户需要重试或券商审核。",
-    "description_other": "{{count}} 个账户需要重试或券商审核。"
+    "description_other": "{{count}} 个账户需要重试或券商审核。",
+    "heading": "需要处理",
+    "connectionLost": "连接已断开",
+    "accountsNotSyncing_one": "{{count}} 个账户未同步",
+    "accountsNotSyncing_other": "{{count}} 个账户未同步",
+    "syncFailed": "上次同步失败"
   },
   "setup": {
     "newAccountsTitle": "新账户需要设置",
     "newAccountsDescription_one": "{{count}} 个账户在开始同步前需要快速设置。",
     "newAccountsDescription_other": "{{count}} 个账户在开始同步前需要快速设置。",
-    "reviewAccounts": "审核账户"
+    "reviewAccounts": "审核账户",
+    "setUp": "设置"
   },
   "devices": {
     "thisDevice": "此设备",
     "activeNow": "当前活跃",
     "lastSeen": "上次活跃 {{time}}",
     "online": "在线",
-    "never": "从未"
+    "never": "从未",
+    "showInactive_one": "显示 {{count}} 台不活跃的设备",
+    "showInactive_other": "显示 {{count}} 台不活跃的设备",
+    "hideInactive": "隐藏不活跃的设备",
+    "platforms": {
+      "server": "服务器",
+      "web": "网页"
+    }
   },
   "deviceStatus": {
     "syncError": "同步错误",
@@ -220,6 +243,10 @@
     "lastUsed": "上次使用"
   },
   "subscription": {
+    "copySupportEmail": "复制支持邮箱地址",
+    "syncPausedTooltip": "同步已暂停 — 需要有效订阅",
+    "syncPausedTitle": "同步已暂停",
+    "syncPausedDescription": "同步需要有效订阅。您的本地数据和待同步的更改会保留。",
     "comingSoon": "敬请期待",
     "getStarted": "开始使用",
     "perMonthShort": "月",
@@ -280,5 +307,16 @@
   },
   "errors": {
     "unknown": "未知错误"
+  },
+  "session": {
+    "restoring": "正在恢复 Connect…",
+    "unavailable": "Connect 暂时无法使用",
+    "localAvailable": "本地投资组合仍可使用。请重试连接。"
+  },
+  "rebind": {
+    "title": "更改此个人资料的 Connect 连接？",
+    "description": "你正在连接其他账户或家庭。你的本地投资组合数据将被保留，但现有的券商关联和设备同步设置将被移除。新账户可以向此个人资料添加券商数据。你可以在准备好后重新设置设备同步。如果希望分别管理数据，请使用新的个人资料。",
+    "cancel": "取消",
+    "confirm": "更改连接"
   }
 }

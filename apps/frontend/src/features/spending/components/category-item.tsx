@@ -30,11 +30,17 @@ export interface CategoryNode extends TaxonomyCategory {
 interface CategoryItemProps {
   category: CategoryNode;
   children?: CategoryNode[];
-  onEdit: (category: CategoryNode) => void;
+  /** `parentExcluded` lets the edit dialog show inherited exclusion. */
+  onEdit: (category: CategoryNode, parentExcluded: boolean) => void;
   onDelete: (category: CategoryNode) => void;
   onAddSubcategory: (parentCategory: CategoryNode) => void;
   isSubcategory?: boolean;
   activityCounts?: Record<string, number>;
+  /** Raw `spending.excludedCategoryIds` from settings (spending taxonomy only). */
+  excludedIds?: Set<string>;
+  /** Set on child rows when an ancestor is excluded — exclusion is inherited. */
+  parentExcluded?: boolean;
+  parentName?: string;
 }
 
 export function CategoryItem({
@@ -45,6 +51,9 @@ export function CategoryItem({
   onAddSubcategory,
   isSubcategory = false,
   activityCounts,
+  excludedIds,
+  parentExcluded = false,
+  parentName,
 }: CategoryItemProps) {
   const { t } = useTranslation();
   const [isExpanded, setIsExpanded] = useState(false);
@@ -52,6 +61,7 @@ export function CategoryItem({
   const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
   const hasChildren = children && children.length > 0;
   const activityCount = activityCounts?.[category.id] ?? 0;
+  const isExcluded = parentExcluded || (excludedIds?.has(category.id) ?? false);
 
   const paletteGroups: ActionPaletteGroup[] = [
     {
@@ -68,7 +78,7 @@ export function CategoryItem({
         {
           icon: Icons.Pencil,
           label: t("common:edit"),
-          onClick: () => onEdit(category),
+          onClick: () => onEdit(category, parentExcluded),
         },
       ],
     },
@@ -85,20 +95,24 @@ export function CategoryItem({
   ];
 
   return (
-    <div className={isSubcategory ? "ml-6 border-l pl-4" : ""}>
+    <div className={isSubcategory ? "ms-6 border-s ps-4" : ""}>
       <div className="flex items-center justify-between gap-2 py-2.5">
-        <div className="flex min-w-0 flex-1 items-center gap-2.5">
+        <div
+          className={`flex min-w-0 flex-1 items-center gap-2.5 ${isExcluded ? "opacity-60" : ""}`}
+        >
           {hasChildren && !isSubcategory && (
             <Button
               variant="ghost"
               size="sm"
               className="h-6 w-6 shrink-0 p-0"
               onClick={() => setIsExpanded(!isExpanded)}
+              aria-label={category.name}
+              aria-expanded={isExpanded}
             >
               {isExpanded ? (
                 <Icons.ChevronDown className="h-4 w-4" />
               ) : (
-                <Icons.ChevronRight className="h-4 w-4" />
+                <Icons.ChevronRight className="h-4 w-4 rtl:rotate-180" />
               )}
             </Button>
           )}
@@ -124,13 +138,40 @@ export function CategoryItem({
           {activityCount > 0 && (
             <TooltipProvider>
               <Tooltip>
-                <TooltipTrigger asChild>
-                  <span className="text-muted-foreground shrink-0 cursor-default text-xs">
-                    ({activityCount})
-                  </span>
+                <TooltipTrigger
+                  render={
+                    <span className="text-muted-foreground shrink-0 cursor-default text-xs" />
+                  }
+                >
+                  ({activityCount})
                 </TooltipTrigger>
                 <TooltipContent>
                   <p>{t("spending:category.transactionCount", { count: activityCount })}</p>
+                </TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
+          )}
+          {isExcluded && (
+            <TooltipProvider>
+              <Tooltip>
+                <TooltipTrigger
+                  render={
+                    <span className="text-muted-foreground flex shrink-0 items-center gap-1.5" />
+                  }
+                >
+                  <Icons.EyeOff className="h-3.5 w-3.5" />
+                  {parentExcluded && (
+                    <span className="hidden text-xs sm:inline">
+                      {t("spending:category.excludedWithParent", { name: parentName })}
+                    </span>
+                  )}
+                </TooltipTrigger>
+                <TooltipContent>
+                  <p>
+                    {parentExcluded
+                      ? t("spending:category.excludedWithParent", { name: parentName })
+                      : t("spending:category.excludedTooltip")}
+                  </p>
                 </TooltipContent>
               </Tooltip>
             </TooltipProvider>
@@ -152,7 +193,7 @@ export function CategoryItem({
           <Button
             variant="ghost"
             size="sm"
-            onClick={() => onEdit(category)}
+            onClick={() => onEdit(category, parentExcluded)}
             title={t("spending:category.editCategoryTitle")}
           >
             <Icons.Pencil className="h-4 w-4" />
@@ -202,10 +243,7 @@ export function CategoryItem({
             </AlertDialogHeader>
             <AlertDialogFooter>
               <AlertDialogCancel>{t("common:cancel")}</AlertDialogCancel>
-              <AlertDialogAction
-                onClick={() => onDelete(category)}
-                className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-              >
+              <AlertDialogAction onClick={() => onDelete(category)} variant="destructive">
                 {t("common:delete")}
               </AlertDialogAction>
             </AlertDialogFooter>
@@ -225,6 +263,9 @@ export function CategoryItem({
               onAddSubcategory={onAddSubcategory}
               isSubcategory
               activityCounts={activityCounts}
+              excludedIds={excludedIds}
+              parentExcluded={isExcluded}
+              parentName={category.name}
             />
           ))}
         </div>

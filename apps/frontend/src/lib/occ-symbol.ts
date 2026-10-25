@@ -1,4 +1,5 @@
 import type { FormattingApi } from "@wealthfolio/ui";
+import { z } from "zod";
 
 /**
  * OCC (Options Clearing Corporation) symbol parser.
@@ -14,6 +15,20 @@ export interface ParsedOccSymbol {
   strikePrice: number;
 }
 
+// Both this parser and the Rust OCC parser interpret YY as 20YY. Dates outside
+// this century cannot round-trip through the contract identifier.
+const OCC_YEAR_PREFIX = "20";
+const optionExpirationSchema = z.string().date().startsWith(OCC_YEAR_PREFIX);
+
+export function isValidOptionExpiration(value: unknown): value is string {
+  return optionExpirationSchema.safeParse(value).success;
+}
+
+function parseOccExpiration(date: string): string | null {
+  const expiration = `${OCC_YEAR_PREFIX}${date.slice(0, 2)}-${date.slice(2, 4)}-${date.slice(4, 6)}`;
+  return isValidOptionExpiration(expiration) ? expiration : null;
+}
+
 export function formatOptionExpiration(
   expiration: string,
   formatting: Pick<FormattingApi, "formatCalendarDate">,
@@ -24,15 +39,15 @@ export function formatOptionExpiration(
   });
 }
 
+/** The strike is formatted in `currency`, the option's quote currency. */
 export function formatOptionSubtitle(
   option: ParsedOccSymbol,
-  formatting: Pick<FormattingApi, "formatCalendarDate" | "formatDecimal">,
+  currency: string,
+  formatting: Pick<FormattingApi, "formatCalendarDate" | "formatPrice">,
 ): string {
   const expiration = formatOptionExpiration(option.expiration, formatting);
-  const strike = formatting.formatDecimal(option.strikePrice, {
-    maximumFractionDigits: 3,
-  });
-  return `${expiration} $${strike} ${option.optionType}`;
+  const strike = formatting.formatPrice(option.strikePrice, currency);
+  return `${expiration} ${strike} ${option.optionType}`;
 }
 
 /**
@@ -63,16 +78,8 @@ export function parseOccSymbol(symbol: string): ParsedOccSymbol | null {
   // Validate strike (all digits)
   if (!/^\d{8}$/.test(strikeStr)) return null;
 
-  // Parse date
-  const year = 2000 + parseInt(dateStr.slice(0, 2), 10);
-  const month = parseInt(dateStr.slice(2, 4), 10);
-  const day = parseInt(dateStr.slice(4, 6), 10);
-
-  // Date validation: construct a Date and verify components match (catches invalid dates like Feb 30)
-  const dateCheck = new Date(year, month - 1, day);
-  if (dateCheck.getMonth() !== month - 1 || dateCheck.getDate() !== day) return null;
-
-  const expiration = `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+  const expiration = parseOccExpiration(dateStr);
+  if (!expiration) return null;
 
   // Parse strike: 5 integer + 3 decimal digits → divide by 1000
   const strikePrice = parseInt(strikeStr, 10) / 1000;
@@ -88,6 +95,7 @@ export function parseOccSymbol(symbol: string): ParsedOccSymbol | null {
 /**
  * Build an OCC symbol from components.
  * Format: {UNDERLYING}{YYMMDD}{C|P}{strike×1000 padded to 8 digits}
+ * Rejects expiration dates that would decode to a different date.
  */
 export function buildOccSymbol(
   underlying: string,
@@ -95,6 +103,7 @@ export function buildOccSymbol(
   optionType: "CALL" | "PUT",
   strikePrice: number,
 ): string {
+  optionExpirationSchema.parse(expiration);
   const sym = underlying.toUpperCase();
   const yymmdd = expiration.slice(2, 4) + expiration.slice(5, 7) + expiration.slice(8, 10);
   const typeChar = optionType === "CALL" ? "C" : "P";
@@ -122,12 +131,7 @@ export function normalizeOptionSymbol(symbol: string): string | null {
 
   const [, underlying, dateStr, typeChar, strikeStr] = result;
 
-  // Date validation (reject impossible dates like Feb 30)
-  const year = parseInt(dateStr.slice(0, 2), 10);
-  const month = parseInt(dateStr.slice(2, 4), 10);
-  const day = parseInt(dateStr.slice(4, 6), 10);
-  const dateCheck = new Date(2000 + year, month - 1, day);
-  if (dateCheck.getMonth() !== month - 1 || dateCheck.getDate() !== day) return null;
+  if (!parseOccExpiration(dateStr)) return null;
 
   // Strike: plain integer dollars → ×1000, pad to 8 digits
   const strikeScaled = parseInt(strikeStr, 10) * 1000;

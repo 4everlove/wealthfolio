@@ -5,7 +5,9 @@
   },
   "currency": {
     "selectTitle": "Select Currency",
-    "selectDescription": "Choose your activity currency",
+    "selectDescription": "Choose a currency",
+    "placeholder": "Select currency",
+    "popular": "Popular",
     "more": "More",
     "search": "Search currency...",
     "searchAll": "Search all currencies...",
@@ -145,6 +147,7 @@
     "title": "Something went wrong",
     "description": "We hit an unexpected error. Your data is safe — try refreshing to get back on track.",
     "refresh": "Refresh page",
+    "goHome": "Go to Dashboard",
     "hideDetails": "Hide error details",
     "showDetails": "Show error details",
     "errorDetails": "Error details"
@@ -190,5 +193,9 @@
   },
   "sheet": {
     "close": "Close"
-  }
+  },
+  "page": {
+    "back": "Back"
+  },
+  "remove": "Remove {{label}}"
 }

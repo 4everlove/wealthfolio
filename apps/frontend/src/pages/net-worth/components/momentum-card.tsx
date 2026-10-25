@@ -1,5 +1,5 @@
 import { DashboardCard } from "@/components/dashboard-card";
-import { useDateFormatting, type FormattingApi, useNumberFormatting } from "@wealthfolio/ui";
+import { useAmountFormatting, useDateFormatting, type FormattingApi } from "@wealthfolio/ui";
 import { useTranslation } from "react-i18next";
 import { CompactAmount } from "./compact-amount";
 import { toneClass, toneFill, type Momentum } from "./utils";
@@ -21,13 +21,10 @@ interface MomentumCardProps {
 }
 
 export function MomentumCard({ momentum, currency, periodLabel }: MomentumCardProps) {
-  const numberFormatting = useNumberFormatting();
+  const amountFormatting = useAmountFormatting();
   const { t } = useTranslation();
   const dateFormatting = useDateFormatting();
 
-  const formatting = { ...dateFormatting, ...numberFormatting };
-
-  const { formatDecimal } = formatting;
   const { currentChange, beatBy, bars } = momentum;
   const changeSign = Math.abs(currentChange) < 0.005 ? "" : currentChange > 0 ? "+" : "-";
 
@@ -50,7 +47,7 @@ export function MomentumCard({ momentum, currency, periodLabel }: MomentumCardPr
           : t("insights:networth.momentum.vs_prior", { period: periodLabel })
       }
     >
-      <div className={`text-lg font-bold tabular-nums ${toneClass(currentChange)}`}>
+      <div className={`text-2xl font-bold tabular-nums ${toneClass(currentChange)}`}>
         {changeSign}
         <CompactAmount value={Math.abs(currentChange)} currency={currency} />
       </div>
@@ -77,7 +74,7 @@ export function MomentumCard({ momentum, currency, periodLabel }: MomentumCardPr
             )}
             <div className="flex h-full items-stretch gap-1">
               {bars.map((bar) => {
-                const title = `${monthLabel(bar.month, dateFormatting)}: ${bar.value >= 0 ? "+" : ""}${formatDecimal(bar.value, { maximumFractionDigits: 0 })}`;
+                const title = `${monthLabel(bar.month, dateFormatting)}: ${bar.value >= 0 ? "+" : ""}${amountFormatting.formatDecimalAmount(bar.value, currency, { maximumFractionDigits: 0 })}`;
                 return (
                   <div key={bar.month} className="flex flex-1 flex-col" title={title}>
                     {/* above-zero zone */}

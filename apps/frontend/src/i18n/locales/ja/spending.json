@@ -36,6 +36,11 @@
     "transactionCount_other": "取引{{count}}件",
     "editCategoryTitle": "カテゴリを編集",
     "deleteCategoryTitle": "カテゴリを削除",
+    "excludeLabel": "支出から除外",
+    "excludeDescription": "合計、グラフ、インサイト、予算に含めません",
+    "excludeDisabledParent": "親カテゴリが除外されているため除外されています",
+    "excludedTooltip": "支出から除外済み",
+    "excludedWithParent": "{{name}} と一緒に除外",
     "categoryActions": "カテゴリの操作",
     "deleteTitle": "カテゴリを削除",
     "deleteConfirm": "「{{name}}」を削除してもよろしいですか?",
@@ -44,6 +49,13 @@
     "searchCategories": "カテゴリを検索...",
     "noCategoriesFound": "カテゴリが見つかりません。",
     "clearCategory": "カテゴリをクリア"
+  },
+  "activityTypes": {
+    "balanceTransferCashAdvance": "残高移行 / キャッシング",
+    "charge": "カード利用",
+    "interestCharge": "支払利息",
+    "refundCredit": "返金 / クレジット",
+    "reimbursementRefund": "払い戻し / 返金"
   },
   "rules": {
     "editTitle": "ルールを編集",
@@ -217,7 +229,13 @@
     "viewingMonth": "{{label}}を表示中。クリックで変更",
     "pickMonth": "特定の月を選択",
     "selectMonth": "月を選択",
-    "clearMonth": "月の選択をクリア"
+    "clearMonth": "月の選択をクリア",
+    "chooseMonth": "月を選択",
+    "selectDates": "日付を選択",
+    "startDate": "開始日",
+    "chooseCustomDates": "任意の日付を選択",
+    "invalidRange": "終了日は開始日以降にしてください",
+    "endDate": "終了日"
   },
   "presets": {
     "loading": "プリセットを読み込み中…",
@@ -388,7 +406,8 @@
     "largest": "最大",
     "noSpending": "この枠に支出はありません。",
     "outlier": "外れ値",
-    "weekOf": "{{date}}の週"
+    "weekOf": "{{date}}の週",
+    "customSubtitle": "選択した期間の取引"
   },
   "split": {
     "title": "取引を分割",
@@ -536,7 +555,11 @@
     "brighter": "明るい",
     "moreSpend": "= 支出が多い。",
     "less": "少ない",
-    "more": "多い"
+    "more": "多い",
+    "customSubtitleShort": "選択した期間",
+    "customNoActivity": "選択した期間に現金の取引はありません。",
+    "customLegendIntro": "各セルは、選択した期間における曜日ごとの1時間を表します。",
+    "customSubtitle": "選択した期間 · 曜日と時間帯ごとの支出の集中度。"
   },
   "eventDetail": {
     "previousEvent": "前のイベント",
@@ -688,12 +711,7 @@
     "noIncome": "この期間、選択中の口座に収入はありません。",
     "spent": "支出",
     "saved": "貯蓄",
-    "incomeSaving": "収入と貯蓄",
-    "nonSpendingCashflow": "{{period}}の支出以外のキャッシュフロー。",
-    "moneyIn": "入金",
-    "incomeSources": "収入源",
     "setAside": "積立",
-    "savingDestinations": "貯蓄先",
     "sortSpent": "支出額",
     "sortChange": "変化",
     "sortName": "名前",
@@ -707,8 +725,53 @@
     "sortByLabel": "{{label}}で並び替え",
     "categoriesShown_one": "{{total}}カテゴリ中{{shown}}件を表示",
     "categoriesShown_other": "{{total}}カテゴリ中{{shown}}件を表示",
+    "excludedInSettings_one": "{{count}}件を設定で除外",
+    "excludedInSettings_other": "{{count}}件を設定で除外",
     "openTransactions": "取引一覧を開く →",
-    "moreCount_other": "他{{count}}件"
+    "moreCount_other": "他{{count}}件",
+    "vsRange": "{{from}} – {{to}} と比較"
+  },
+  "moneyFlow": {
+    "title": "お金の流れ",
+    "subtitle": "{{period}}のお金の出どころと行き先。",
+    "focusSubtitle": "{{period}}のすべてのカテゴリ。",
+    "focusSubcategoriesSubtitle": "{{period}}のすべてのサブカテゴリ。",
+    "back": "すべての流れ",
+    "backTo": "{{name}}に戻る",
+    "chartLabel": "お金の流れの図。矢印キーで項目を移動できます。",
+    "nodeAria": "{{name}}、{{amount}}",
+    "nodeActionAria": "{{name}}、{{amount}}。{{action}}",
+    "shareOfIncome": "収入の{{pct}}",
+    "shareOfTotal": "合計の{{pct}}",
+    "clickTransactions": "クリックして取引を表示",
+    "clickCategories": "クリックしてすべてのカテゴリを表示",
+    "clickSubcategories": "クリックしてサブカテゴリを表示",
+    "action": {
+      "categories": "すべてのカテゴリを表示",
+      "subcategories": "サブカテゴリを表示",
+      "transactions": "取引を表示"
+    },
+    "node": {
+      "total": "合計",
+      "shortfall": "不足",
+      "refunds": "純返金",
+      "surplus": "残り",
+      "uncategorizedIncome": "未分類の収入",
+      "netSpending": "純支出"
+    },
+    "hint": {
+      "total": "入金に純返金と不足分を加えた合計。常に出金と一致します。",
+      "totalOut": "返金前の、支出と積立の合計です。",
+      "shortfall": "入金を超えた支出と貯蓄。",
+      "refunds": "返金が支出を上回ったカテゴリ。",
+      "saved": "貯蓄口座や投資口座へ移したお金。",
+      "surplus": "入金のうち、支出も積立もしていない分。",
+      "uncategorized": "まだカテゴリがない支出。",
+      "net": "返金後にこのカテゴリにかかった金額。",
+      "direct": "サブカテゴリではなく、カテゴリ自体に割り当てられた金額。"
+    },
+    "groupRefunds": "純返金{{amount}}を差し引く前の金額です。",
+    "categoryRefunds": "純返金{{refunds}}を差し引く前の金額です。純支出：{{net}}。"
   },
   "budgetChart": {
     "overBudget": "予算超過",
@@ -844,6 +907,8 @@
     "automateMatching": "繰り返し利用する店舗のマッチングを自動化",
     "loadError": "支出データを読み込めませんでした。",
     "spentLabel": "支出",
+    "excludedCategoriesHint_one": "{{count}}件のカテゴリを除外",
+    "excludedCategoriesHint_other": "{{count}}件のカテゴリを除外",
     "noSpendingInPeriod": "この期間に支出はありません",
     "whereItWent": "支出の内訳",
     "whereItWentView": "支出の内訳ビュー",
@@ -955,6 +1020,7 @@
     "dataUnavailable": "予算データを利用できません",
     "migrationNeeded": "現在のローカルデータベースは、支出機能の更新マイグレーション適用前に作成されています。",
     "addSource_other": "収入源を追加({{count}}件利用可能)",
-    "overridesTitle_other": "個別設定 · {{count}}"
+    "overridesTitle_other": "個別設定 · {{count}}",
+    "sourceMonth": "コピー元の月"
   }
 }

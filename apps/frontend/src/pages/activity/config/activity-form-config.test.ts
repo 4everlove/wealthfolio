@@ -1,7 +1,93 @@
 import { describe, expect, it } from "vitest";
-import { ActivityType } from "@/lib/constants";
+import { ActivityType, InstrumentType } from "@/lib/constants";
 import { mapActivityTypeToPicker } from "../utils/activity-form-utils";
-import { hasActivityForm } from "./activity-form-config";
+import { ACTIVITY_FORM_CONFIG, hasActivityForm } from "./activity-form-config";
+
+describe("trade asset identity defaults", () => {
+  it.each(["BUY", "SELL"] as const)(
+    "preserves the stored %s instrument type and quote currency without reselection",
+    (type) => {
+      const defaults = ACTIVITY_FORM_CONFIG[type].getDefaults(
+        {
+          assetId: "asset-usdt",
+          assetSymbol: "USDT",
+          instrumentType: InstrumentType.CRYPTO,
+          assetQuoteCcy: "USD",
+          currency: "CAD",
+        },
+        [],
+      );
+
+      expect(defaults).toMatchObject({
+        assetId: "USDT",
+        symbolInstrumentType: InstrumentType.CRYPTO,
+        symbolQuoteCcy: "USD",
+        currency: "CAD",
+      });
+    },
+  );
+});
+
+describe("cash transfer defaults", () => {
+  it.each([ActivityType.TRANSFER_OUT, ActivityType.TRANSFER_IN])(
+    "derives the execution rate from actual amounts when editing %s",
+    (activityType) => {
+      const incoming = activityType === ActivityType.TRANSFER_IN;
+      const defaults = ACTIVITY_FORM_CONFIG.TRANSFER.getDefaults(
+        {
+          activityType,
+          accountId: incoming ? "b" : "a",
+          counterpartAccountId: incoming ? "a" : "b",
+          amount: incoming ? "100" : "780",
+          counterpartAmount: incoming ? "780" : "100",
+          currency: incoming ? "USD" : "HKD",
+          counterpartCurrency: incoming ? "HKD" : "USD",
+          fxRate: "0.13",
+          counterpartFxRate: "7.8",
+        },
+        [],
+      );
+      expect(defaults).toMatchObject({
+        fromAccountId: "a",
+        toAccountId: "b",
+        sourceCurrency: "HKD",
+        destinationCurrency: "USD",
+        sourceAmount: 780,
+        destinationAmount: 100,
+        transferRate: 0.12820513,
+        fxRate: 0.13,
+      });
+    },
+  );
+});
+
+describe("option defaults", () => {
+  const option = {
+    activityType: ActivityType.BUY,
+    instrumentType: "OPTION",
+    assetSymbol: "AAPL270618C01234500",
+    currency: "CAD",
+  };
+
+  it.each(["BUY", "SELL"] as const)(
+    "starts the %s quote currency from the option's, not the activity's",
+    (type) => {
+      const defaults = ACTIVITY_FORM_CONFIG[type].getDefaults(
+        { ...option, assetQuoteCcy: "USD" },
+        [],
+      );
+      expect(defaults).toMatchObject({ currency: "CAD", symbolQuoteCcy: "USD" });
+    },
+  );
+
+  it.each(["BUY", "SELL"] as const)(
+    "starts the %s quote currency from the activity's when the option's is unknown",
+    (type) => {
+      const defaults = ACTIVITY_FORM_CONFIG[type].getDefaults(option, []);
+      expect(defaults).toMatchObject({ symbolQuoteCcy: "CAD" });
+    },
+  );
+});
 
 describe("hasActivityForm", () => {
   it("accepts every type the picker can offer", () => {

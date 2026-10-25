@@ -8,12 +8,16 @@ use std::sync::Arc;
 use tokio::time::{interval, Duration};
 #[cfg(not(feature = "connect-sync"))]
 use tracing::info;
+#[cfg(all(feature = "device-sync", not(feature = "connect-sync")))]
+use tracing::warn;
 #[cfg(feature = "connect-sync")]
 use tracing::{debug, info, warn};
 
 #[cfg(feature = "connect-sync")]
 use crate::api::connect::{has_broker_sync, perform_broker_sync};
 use crate::main_lib::AppState;
+#[cfg(feature = "connect-sync")]
+use wealthfolio_connect::CLOUD_REFRESH_TOKEN_KEY;
 
 /// Sync interval: 4 hours (not user-configurable to prevent API abuse)
 #[cfg(feature = "connect-sync")]
@@ -26,7 +30,8 @@ const INITIAL_DELAY_SECS: u64 = 60;
 /// Starts the background broker sync scheduler.
 #[cfg(feature = "connect-sync")]
 pub fn start_broker_sync_scheduler(state: Arc<AppState>) {
-    tokio::spawn(async move {
+    let runtime = state.clone();
+    let worker = tokio::spawn(async move {
         info!("Broker sync scheduler started (4-hour interval)");
 
         // Initial delay before first sync
@@ -37,9 +42,14 @@ pub fn start_broker_sync_scheduler(state: Arc<AppState>) {
 
         loop {
             sync_interval.tick().await;
-            run_scheduled_sync(&state).await;
+            run_scheduled_sync(&runtime).await;
         }
     });
+    state
+        .workers
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .push(worker);
 }
 
 /// Starts the background broker sync scheduler.
@@ -56,7 +66,7 @@ async fn run_scheduled_sync(state: &Arc<AppState>) {
     // Check if user has a refresh token configured (indicates they've logged in)
     let has_token = state
         .secret_store
-        .get_secret("sync_refresh_token")
+        .get_secret(CLOUD_REFRESH_TOKEN_KEY)
         .map(|t| t.is_some())
         .unwrap_or(false);
 
@@ -110,5 +120,113 @@ async fn run_scheduled_sync(state: &Arc<AppState>) {
                 warn!("Scheduled broker sync failed: {}", e);
             }
         }
+    }
+}
+
+#[cfg(feature = "device-sync")]
+fn is_expected_startup_token_warmup_error(err: &crate::error::ApiError) -> bool {
+    match err {
+        crate::error::ApiError::Unauthorized(_) | crate::error::ApiError::Forbidden(_) => true,
+        crate::error::ApiError::Internal(message) => {
+            message.contains("No refresh token configured")
+                || message.contains("Auth refresh configuration is missing")
+                || message.contains("CONNECT_AUTH_URL or CONNECT_AUTH_PUBLISHABLE_KEY")
+        }
+        _ => false,
+    }
+}
+
+/// Start background jobs after server construction succeeds.
+pub fn start_background_workers(state: Arc<AppState>) {
+    #[cfg(any(feature = "connect-sync", feature = "device-sync"))]
+    state
+        .workers
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .push(crate::api::cloud_backups::start_scheduler(state.clone()));
+    #[cfg(feature = "device-sync")]
+    #[allow(clippy::collapsible_if)]
+    if crate::features::device_sync_enabled() {
+        let startup_state = state.clone();
+        let worker = tokio::spawn(async move {
+            match crate::api::connect::mint_access_token(&startup_state).await {
+                Ok(token) => {
+                    if startup_state
+                        .device_enroll_service
+                        .get_sync_state(&token)
+                        .await
+                        .map(|sync_state| {
+                            sync_state.state == wealthfolio_device_sync::SyncState::Ready
+                        })
+                        .unwrap_or(false)
+                    {
+                        if let Err(err) =
+                            crate::api::device_sync_engine::ensure_background_engine_started(
+                                startup_state.clone(),
+                            )
+                            .await
+                        {
+                            warn!(
+                                "Failed to auto-start device sync background engine: {}",
+                                err
+                            );
+                        }
+                    }
+                }
+                Err(err) => {
+                    if is_expected_startup_token_warmup_error(&err) {
+                        info!(
+                            "Skipping startup device sync token warmup (expected state): {}",
+                            err
+                        );
+                    } else {
+                        warn!("Device sync token warmup failed during startup: {}", err);
+                    }
+                }
+            }
+        });
+        state
+            .workers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(worker);
+    }
+
+    // Start background broker sync scheduler (4-hour interval)
+    start_broker_sync_scheduler(state.clone());
+
+    // Periodic market data sync plus portfolio update (6h interval, 2min
+    // initial delay): the coordinator rebuilds whatever the sync made stale.
+    let worker = crate::api::shared::spawn_periodic_update(state.clone());
+    state
+        .workers
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .push(worker);
+}
+
+#[cfg(all(test, feature = "device-sync"))]
+mod tests {
+    use super::*;
+    use crate::error::ApiError;
+
+    #[test]
+    fn startup_token_warmup_treats_unauthorized_as_expected() {
+        let err = ApiError::Forbidden("No refresh token configured".to_string());
+        assert!(is_expected_startup_token_warmup_error(&err));
+    }
+
+    #[test]
+    fn startup_token_warmup_treats_missing_config_as_expected() {
+        let err = ApiError::Internal(
+            "CONNECT_AUTH_URL or CONNECT_AUTH_PUBLISHABLE_KEY is not configured".to_string(),
+        );
+        assert!(is_expected_startup_token_warmup_error(&err));
+    }
+
+    #[test]
+    fn startup_token_warmup_treats_unexpected_internal_as_warning_candidate() {
+        let err = ApiError::Internal("Upstream refresh timeout".to_string());
+        assert!(!is_expected_startup_token_warmup_error(&err));
     }
 }

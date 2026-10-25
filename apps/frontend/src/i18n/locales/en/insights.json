@@ -59,6 +59,7 @@
       "cash_balance": "Cash balance",
       "invested": "Invested",
       "book_cost": "Book cost",
+      "pnl_current_holdings": "Current holdings",
       "no_cash_balance": "No cash balance",
       "of_portfolio": "{{percent}} of portfolio",
       "available_cash": "Available cash",
@@ -69,6 +70,14 @@
     }
   },
   "networth": {
+    "attention": {
+      "title": "Needs attention",
+      "update_value": "Update value",
+      "update_balance": "Update balance",
+      "link_property": "Link a property to {{name}}",
+      "add_property": "Add a property for {{name}}",
+      "link_explanation": "Linking an existing property does not change your net worth."
+    },
     "failed_to_load": "Failed to load net worth",
     "stale_valuations_tooltip": "Stale valuations (90+ days):",
     "days_ago": "{{count}}d ago",
@@ -76,9 +85,6 @@
     "breakdown": "Breakdown",
     "no_assets_found": "No assets found.",
     "add_first_asset": "Add your first asset",
-    "update_valuations": "Update your valuations",
-    "assets_count_one": "{{count}} asset",
-    "assets_count_other": "{{count}} assets",
     "not_updated_over_90_days": "Not updated in over 90 days.",
     "chart": {
       "net_worth": "Net Worth",
@@ -114,16 +120,49 @@
     },
     "velocity": {
       "monthly_pace": "Monthly pace",
-      "over_months_one": "over {{count}} month",
-      "over_months_other": "over {{count}} months",
-      "trailing_pace": " · {{multiple}}× trailing-12mo pace",
+      "since": "since {{date}}",
+      "trailing_pace": " · {{multiple}}× your 12-month average",
       "drivers_of_change": "Drivers of change",
-      "market_returns": "Market returns",
+      "investment_gains": "Investment gains",
+      "investment_losses": "Investment losses",
+      "other_assets": "Other assets",
       "contributions": "Contributions",
-      "equity_built": "Equity built",
+      "withdrawals": "Withdrawals",
+      "debt_paid_down": "Debt paid down",
+      "debt_added": "New debt",
       "per_month": "/mo"
     },
     "days_ago_one": "{{count}}d ago",
     "days_ago_other": "{{count}}d ago"
+  },
+  "highlights": {
+    "movers": "Top movers",
+    "concentration": "Concentration",
+    "daily": "Daily change · current holdings",
+    "rank_by": "Rank daily movers by",
+    "gainers": "Gainers",
+    "losers": "Losers",
+    "no_moves": "No moves with available data.",
+    "portfolio_share": "Share of portfolio value, including cash",
+    "largest": "Largest holding",
+    "top_five": "Top five holdings",
+    "concentration_unavailable": "Concentration needs positive holdings values and a portfolio without short positions."
+  },
+  "customize": {
+    "edit": "Customize",
+    "widgets": "Widgets",
+    "reset": "Reset layout",
+    "cancel": "Cancel",
+    "save": "Save layout",
+    "saving": "Saving…",
+    "hint": "Drag widgets by their handles or adjust their width from the right edge.",
+    "description": "Choose which widgets to show. Use the arrows to change their order, including on mobile.",
+    "value": "Portfolio summary",
+    "breakdown": "Breakdown",
+    "move_up": "Move {{widget}} up",
+    "move_down": "Move {{widget}} down",
+    "hide": "Hide {{widget}}",
+    "drag": "Drag {{widget}}",
+    "empty": "No widgets selected. Customize this page to add widgets."
   }
 }

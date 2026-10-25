@@ -87,11 +87,21 @@ pub struct YahooProvider {
 impl YahooProvider {
     /// Create a new Yahoo Finance provider.
     pub async fn new() -> Result<Self, MarketDataError> {
-        let connector =
-            yahoo::YahooConnector::new().map_err(|e| MarketDataError::ProviderError {
+        let client = wealthfolio_http::client_builder()
+            .https_only(true)
+            .user_agent("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .map_err(|e| MarketDataError::ProviderError {
+                provider: "YAHOO".to_string(),
+                message: format!("Failed to initialize Yahoo HTTP client: {}", e),
+            })?;
+        let connector = yahoo::YahooConnectorBuilder::build_with_client(client).map_err(|e| {
+            MarketDataError::ProviderError {
                 provider: "YAHOO".to_string(),
                 message: format!("Failed to initialize Yahoo connector: {}", e),
-            })?;
+            }
+        })?;
         Ok(Self { connector })
     }
 
@@ -154,7 +164,9 @@ impl YahooProvider {
     async fn ensure_crumb(&self) -> Result<CrumbData, MarketDataError> {
         // Check if we have a cached crumb
         {
-            let guard = YAHOO_CRUMB.read().unwrap();
+            let guard = YAHOO_CRUMB
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             if let Some(crumb) = guard.as_ref() {
                 return Ok(crumb.clone());
             }
@@ -166,7 +178,7 @@ impl YahooProvider {
 
     /// Fetch a new Yahoo authentication crumb.
     async fn fetch_crumb(&self) -> Result<CrumbData, MarketDataError> {
-        let client = reqwest::Client::new();
+        let client = wealthfolio_http::client();
 
         // Step 1: Get cookie from fc.yahoo.com
         let response = client
@@ -212,7 +224,9 @@ impl YahooProvider {
         let crumb_data = CrumbData { cookie, crumb };
 
         // Cache it
-        let mut guard = YAHOO_CRUMB.write().unwrap();
+        let mut guard = YAHOO_CRUMB
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         *guard = Some(crumb_data.clone());
 
         Ok(crumb_data)
@@ -220,7 +234,9 @@ impl YahooProvider {
 
     /// Clear the cached crumb (used when authentication fails)
     fn clear_crumb(&self) {
-        let mut guard = YAHOO_CRUMB.write().unwrap();
+        let mut guard = YAHOO_CRUMB
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         *guard = None;
     }
 
@@ -248,7 +264,7 @@ impl YahooProvider {
             urlencoding::encode(&crumb_data.crumb)
         );
 
-        let client = reqwest::Client::new();
+        let client = wealthfolio_http::client();
         let resp = client
             .get(&url)
             .header(header::ACCEPT, "application/json")
@@ -477,7 +493,7 @@ impl YahooProvider {
             encoded_query
         );
 
-        let payload = reqwest::Client::new()
+        let payload = wealthfolio_http::client()
             .get(&url)
             .header(
                 header::USER_AGENT,
@@ -540,7 +556,7 @@ impl YahooProvider {
             encode(&crumb.crumb)
         );
 
-        let client = reqwest::Client::new();
+        let client = wealthfolio_http::client();
         let response = client
             .get(&url)
             .header(
@@ -644,7 +660,7 @@ impl YahooProvider {
             encode(&crumb.crumb)
         );
 
-        let client = reqwest::Client::new();
+        let client = wealthfolio_http::client();
         let response = client
             .get(&url)
             .header(
@@ -682,7 +698,7 @@ impl YahooProvider {
                     "[YAHOO] Failed to parse quoteSummary for {}: {}. Response: {}",
                     symbol,
                     e,
-                    &response_text[..response_text.len().min(1000)]
+                    &response_text[..response_text.floor_char_boundary(1000)]
                 );
                 MarketDataError::ProviderError {
                     provider: "YAHOO".to_string(),
@@ -844,7 +860,7 @@ impl YahooProvider {
             profile.name,
             profile.quote_type,
             profile.sector,
-            profile.sectors.as_ref().map(|s| if s.len() > 100 { format!("{}...", &s[..100]) } else { s.clone() }),
+            profile.sectors.as_ref().map(|s| if s.len() > 100 { format!("{}...", &s[..s.floor_char_boundary(100)]) } else { s.clone() }),
             profile.industry,
             profile.country,
             profile.description.as_ref().map(|d| d.len())
@@ -1197,8 +1213,8 @@ fn format_name(
     // Special handling for futures - strip date suffix
     if quote_type.to_uppercase() == "FUTURE" {
         if let Some(sn) = short_name {
-            if sn.len() >= 7 {
-                return sn[..sn.len() - 7].to_string();
+            if let Some(base) = sn.len().checked_sub(7).and_then(|end| sn.get(..end)) {
+                return base.to_string();
             }
         }
     }
@@ -1322,6 +1338,15 @@ mod tests {
     }
 
     #[test]
+    fn test_format_name_future_non_ascii_short_name() {
+        // 15 bytes, with byte 8 (seven from the end) inside the second 'é'
+        assert_eq!(
+            format_name(None, "FUTURE", Some("Café Déc 2024"), "KC=F"),
+            "Café Déc 2024"
+        );
+    }
+
+    #[test]
     fn test_format_sector() {
         assert_eq!(format_sector("technology"), "Technology");
         assert_eq!(format_sector("basic_materials"), "Basic Materials");
@@ -1351,6 +1376,31 @@ mod tests {
         assert_eq!(allocation[1]["weight"].as_f64(), Some(0.30));
         assert_eq!(allocation[2]["name"], "other");
         assert_eq!(allocation[2]["weight"].as_f64(), Some(0.10));
+    }
+
+    #[test]
+    fn test_asset_allocation_json_preserves_leveraged_fractions() {
+        // Yahoo raw values are fractions even when a position exceeds 100%.
+        let holdings: YahooTopHoldings = serde_json::from_str(
+            r#"{
+                "stockPosition": {"raw": 0.6381, "fmt": "63.81%"},
+                "bondPosition": {"raw": 1.157, "fmt": "115.70%"},
+                "cashPosition": {"raw": -1.1242, "fmt": "-112.42%"},
+                "otherPosition": {"raw": 0.32919997, "fmt": "32.92%"}
+            }"#,
+        )
+        .unwrap();
+
+        let allocation: serde_json::Value =
+            serde_json::from_str(&asset_allocation_json(&holdings).unwrap()).unwrap();
+        assert_eq!(
+            allocation,
+            serde_json::json!([
+                {"name": "stock", "weight": 0.6381},
+                {"name": "bond", "weight": 1.157},
+                {"name": "other", "weight": 0.32919997}
+            ])
+        );
     }
 
     fn create_test_context() -> QuoteContext {
@@ -1597,6 +1647,10 @@ mod tests {
         assert_eq!(
             yahoo_equity_search_queries("AAPL"),
             vec!["AAPL".to_string()]
+        );
+        assert_eq!(
+            yahoo_equity_search_queries("BAC.PB"),
+            vec!["BAC.PB".to_string()]
         );
     }
 

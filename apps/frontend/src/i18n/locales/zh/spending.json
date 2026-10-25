@@ -36,6 +36,11 @@
     "transactionCount_other": "{{count}} 笔交易",
     "editCategoryTitle": "编辑类别",
     "deleteCategoryTitle": "删除类别",
+    "excludeLabel": "从支出中排除",
+    "excludeDescription": "不计入总额、图表、洞察和预算",
+    "excludeDisabledParent": "因父类别已排除而一并排除",
+    "excludedTooltip": "已从支出中排除",
+    "excludedWithParent": "随 {{name}} 一并排除",
     "categoryActions": "类别操作",
     "deleteTitle": "删除类别",
     "deleteConfirm": "确定要删除“{{name}}”吗？",
@@ -44,6 +49,13 @@
     "searchCategories": "搜索类别……",
     "noCategoriesFound": "未找到类别。",
     "clearCategory": "清除类别"
+  },
+  "activityTypes": {
+    "balanceTransferCashAdvance": "余额转移 / 预借现金",
+    "charge": "消费",
+    "interestCharge": "利息费用",
+    "refundCredit": "退款 / 入账",
+    "reimbursementRefund": "补偿 / 退款"
   },
   "rules": {
     "editTitle": "编辑规则",
@@ -217,7 +229,13 @@
     "viewingMonth": "正在查看 {{label}}，点击可更改",
     "pickMonth": "选择特定月份",
     "selectMonth": "选择月份",
-    "clearMonth": "清除月份选择"
+    "clearMonth": "清除月份选择",
+    "chooseMonth": "选择月份",
+    "selectDates": "选择日期",
+    "startDate": "开始日期",
+    "chooseCustomDates": "选择自定义日期",
+    "invalidRange": "结束日期必须等于或晚于开始日期",
+    "endDate": "结束日期"
   },
   "presets": {
     "loading": "正在加载预设……",
@@ -388,7 +406,8 @@
     "largest": "最大",
     "noSpending": "此时段内无支出。",
     "outlier": "异常值",
-    "weekOf": "{{date}} 所在周"
+    "weekOf": "{{date}} 所在周",
+    "customSubtitle": "所选期间内的交易"
   },
   "split": {
     "title": "拆分交易",
@@ -536,7 +555,11 @@
     "brighter": "更亮",
     "moreSpend": "= 支出更多。",
     "less": "更少",
-    "more": "更多"
+    "more": "更多",
+    "customSubtitleShort": "所选期间",
+    "customNoActivity": "所选期间内没有现金交易。",
+    "customLegendIntro": "每个单元格代表所选期间内一周中某天的一个小时。",
+    "customSubtitle": "所选期间 · 按星期和小时显示支出强度。"
   },
   "eventDetail": {
     "previousEvent": "上一个事件",
@@ -688,12 +711,7 @@
     "noIncome": "此周期内所选账户没有收入。",
     "spent": "已花费",
     "saved": "已储蓄",
-    "incomeSaving": "收入与储蓄",
-    "nonSpendingCashflow": "{{period}} 的非支出现金流。",
-    "moneyIn": "流入",
-    "incomeSources": "收入来源",
     "setAside": "预留",
-    "savingDestinations": "储蓄去向",
     "sortSpent": "支出",
     "sortChange": "变化",
     "sortName": "名称",
@@ -707,8 +725,53 @@
     "sortByLabel": "按 {{label}} 排序",
     "categoriesShown_one": "显示 {{shown}} 个类别，共 {{total}} 个",
     "categoriesShown_other": "显示 {{shown}} 个类别，共 {{total}} 个",
+    "excludedInSettings_one": "设置中已排除 {{count}} 个",
+    "excludedInSettings_other": "设置中已排除 {{count}} 个",
     "openTransactions": "打开交易 →",
-    "moreCount_other": "+{{count}} 项"
+    "moreCount_other": "+{{count}} 项",
+    "vsRange": "对比 {{from}} – {{to}}"
+  },
+  "moneyFlow": {
+    "title": "资金流向",
+    "subtitle": "{{period}} 的资金来源与去向。",
+    "focusSubtitle": "{{period}} 的所有类别。",
+    "focusSubcategoriesSubtitle": "{{period}} 的所有子类别。",
+    "back": "全部流向",
+    "backTo": "返回{{name}}",
+    "chartLabel": "资金流向图。使用方向键在各项之间移动。",
+    "nodeAria": "{{name}}，{{amount}}",
+    "nodeActionAria": "{{name}}，{{amount}}。{{action}}",
+    "shareOfIncome": "占收入的 {{pct}}",
+    "shareOfTotal": "占总额的 {{pct}}",
+    "clickTransactions": "点击查看交易",
+    "clickCategories": "点击查看所有类别",
+    "clickSubcategories": "点击查看子类别",
+    "action": {
+      "categories": "查看所有类别",
+      "subcategories": "查看子类别",
+      "transactions": "查看交易"
+    },
+    "node": {
+      "total": "总额",
+      "shortfall": "缺口",
+      "refunds": "净退款",
+      "surplus": "剩余",
+      "uncategorizedIncome": "未归类收入",
+      "netSpending": "净支出"
+    },
+    "hint": {
+      "total": "流入加上净退款和任何缺口，始终等于流出。",
+      "totalOut": "退款前的全部支出与预留金额。",
+      "shortfall": "超出流入的支出与储蓄。",
+      "refunds": "退款超过支出的类别。",
+      "saved": "转入储蓄和投资账户的资金。",
+      "surplus": "已流入但未支出或预留的资金。",
+      "uncategorized": "尚未归类的支出。",
+      "net": "扣除退款后该类别的花费。",
+      "direct": "直接归入该类别本身，而非子类别。"
+    },
+    "groupRefunds": "未扣除 {{amount}} 净退款。",
+    "categoryRefunds": "未扣除 {{refunds}} 净退款。净支出：{{net}}。"
   },
   "budgetChart": {
     "overBudget": "超出预算",
@@ -844,6 +907,8 @@
     "automateMatching": "为经常性商户自动匹配",
     "loadError": "无法加载支出数据。",
     "spentLabel": "已花费",
+    "excludedCategoriesHint_one": "已排除 {{count}} 个类别",
+    "excludedCategoriesHint_other": "已排除 {{count}} 个类别",
     "noSpendingInPeriod": "此周期内没有支出",
     "whereItWent": "支出去向",
     "whereItWentView": "支出去向视图",
@@ -955,6 +1020,7 @@
     "dataUnavailable": "预算数据不可用",
     "migrationNeeded": "当前的本地数据库是在更新后的支出迁移之前创建的。",
     "addSource_other": "添加来源（{{count}} 个可用）",
-    "overridesTitle_other": "覆盖设置 · {{count}}"
+    "overridesTitle_other": "覆盖设置 · {{count}}",
+    "sourceMonth": "源月份"
   }
 }

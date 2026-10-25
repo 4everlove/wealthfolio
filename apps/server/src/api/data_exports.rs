@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use axum::{
     body::Body,
-    extract::{Path, State},
+    extract::Path,
     http::{header, Response, StatusCode},
     response::IntoResponse,
     routing::get,
@@ -38,29 +38,35 @@ async fn build_data_export_content(
             Ok(format_records(&records, format)?)
         }
         ExportDataType::Activities => {
-            let records = state
+            let mut response = state.activity_service.search_activities(
+                0,
+                EXPORT_ACTIVITY_PAGE_SIZE,
+                None,
+                None,
+                None,
+                Some(Sort {
+                    id: "date".to_string(),
+                    desc: true,
+                }),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )?;
+            // Rows of cash and credit-card accounts carry their running balance.
+            state
                 .activity_service
-                .search_activities(
-                    0,
-                    EXPORT_ACTIVITY_PAGE_SIZE,
-                    None,
-                    None,
-                    None,
-                    Some(Sort {
-                        id: "date".to_string(),
-                        desc: true,
-                    }),
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                )?
-                .data;
-            Ok(format_records(&records, format)?)
+                .attach_cash_balances(&mut response)
+                .await?;
+            Ok(format_records(&response.data, format)?)
         }
         ExportDataType::Holdings => {
-            let base = state.base_currency.read().unwrap().clone();
+            let base = state
+                .base_currency
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone();
             let resolved = state
                 .portfolio_service
                 .resolve_account_scope(&AccountScope::All, &base)?;
@@ -91,7 +97,11 @@ async fn build_data_export_content(
             Ok(format_records(&records, format)?)
         }
         ExportDataType::PortfolioHistory => {
-            let base = state.base_currency.read().unwrap().clone();
+            let base = state
+                .base_currency
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone();
             let resolved = state
                 .portfolio_service
                 .resolve_account_scope(&AccountScope::All, &base)?;
@@ -103,14 +113,15 @@ async fn build_data_export_content(
                     &resolved.base_currency,
                     None,
                     None,
-                )?;
+                )
+                .await?;
             Ok(format_records(&records, format)?)
         }
     }
 }
 
 async fn export_data_route(
-    State(state): State<Arc<AppState>>,
+    axum::Extension(state): axum::Extension<Arc<AppState>>,
     Path((data_type, format)): Path<(String, String)>,
 ) -> ApiResult<Response<Body>> {
     let data_type = ExportDataType::parse(&data_type)?;
@@ -132,7 +143,7 @@ async fn export_data_route(
         .map_err(|e| ApiError::Internal(format!("Failed to build export response: {}", e)))
 }
 
-pub fn router() -> Router<Arc<AppState>> {
+pub fn router<S: Clone + Send + Sync + 'static>() -> Router<S> {
     Router::new().route(
         "/utilities/export/{data_type}/{format}",
         get(export_data_route),

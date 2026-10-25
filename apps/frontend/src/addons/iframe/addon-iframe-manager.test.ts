@@ -17,7 +17,11 @@ vi.mock("@/addons/addons-runtime-context", () => ({
 vi.mock("sonner", () => ({ toast: { error: vi.fn() } }));
 
 import { ALLOWED_API_METHODS, AddonIframeManager } from "./addon-iframe-manager";
-import { createSDKHostAPIBridge, type InternalHostAPI } from "../type-bridge";
+import {
+  createPermissionGuard,
+  createSDKHostAPIBridge,
+  type InternalHostAPI,
+} from "../type-bridge";
 import { resetAddonSandboxRuntimeAssetsForTest } from "./addon-sandbox-assets";
 import { setAddonLocalizationSnapshot } from "./addon-sandbox-localization";
 import { loadAddonAsset } from "@/adapters";
@@ -90,6 +94,102 @@ describe("AddonIframeManager", () => {
     vi.unstubAllGlobals();
   });
 
+  it("generates a secure nonce without randomUUID", async () => {
+    const getRandomValues = vi.fn((bytes: Uint8Array) => bytes.fill(0x12));
+    vi.stubGlobal("crypto", { getRandomValues });
+    const manager = new AddonIframeManager();
+    const starting = manager.startAddon(input);
+    const cancelled = expect(starting).rejects.toMatchObject({ name: "AddonLoadCancelled" });
+    await vi.waitFor(() => expect(document.querySelector("iframe")).not.toBeNull());
+    expect(getNonce(getSandboxFrame())).toBe("12121212-1212-4212-9212-121212121212");
+    expect(getRandomValues).toHaveBeenCalledWith(expect.any(Uint8Array));
+    await manager.stopAllAddons();
+    await cancelled;
+  });
+
+  it.each([undefined, {}])(
+    "creates distinct event subscription IDs without crypto (%j)",
+    async (crypto) => {
+      vi.stubGlobal("crypto", crypto);
+      const manager = new AddonIframeManager();
+      const postMessage = vi.fn();
+      const runtime = {
+        addonId: input.addonId,
+        nonce: "nonce-1",
+        iframe: { contentWindow: { postMessage } },
+        api: { events: { portfolio: { onUpdateStart: vi.fn().mockResolvedValue(vi.fn()) } } },
+        subscriptions: new Map(),
+      };
+      const internals = manager as unknown as {
+        dispatchMessage: (runtime: unknown, message: unknown) => Promise<void>;
+      };
+      for (const requestId of ["first", "second"]) {
+        await internals.dispatchMessage(runtime, {
+          type: "eventSubscribe",
+          method: "events.portfolio.onUpdateStart",
+          requestId,
+        });
+      }
+      expect(runtime.subscriptions.size).toBe(2);
+      expect(postMessage).toHaveBeenCalledTimes(2);
+      expect(postMessage.mock.calls[0][0].result.subscriptionId).not.toBe(
+        postMessage.mock.calls[1][0].result.subscriptionId,
+      );
+    },
+  );
+
+  it.each([undefined, {}])(
+    "does not bootstrap an addon without secure randomness (%j)",
+    async (crypto) => {
+      vi.stubGlobal("crypto", crypto);
+      const fetchMock = vi.fn();
+      vi.stubGlobal("fetch", fetchMock);
+      const manager = new AddonIframeManager();
+      await expect(manager.startAddon(input)).rejects.toThrow("Secure randomness");
+      expect(document.querySelector("iframe")).toBeNull();
+      expect(manager.hasRuntime(input.addonId)).toBe(false);
+      expect(fetchMock).not.toHaveBeenCalled();
+      await manager.stopAllAddons();
+    },
+  );
+
+  it("awaits resource cleanup after failed boot before starting a replacement", async () => {
+    const manager = new AddonIframeManager();
+    let releaseCleanup!: () => void;
+    const cleanup = new Promise<void>((resolve) => {
+      releaseCleanup = resolve;
+    });
+    const onStopped = vi.fn(() => cleanup);
+    const starting = manager.startAddon({ ...input, onStopped });
+    const rejected = expect(starting).rejects.toThrow("broken build");
+    await vi.waitFor(() => expect(document.querySelector("iframe")).not.toBeNull());
+    dispatchFromSandbox(getSandboxFrame(), "loadError", { error: "broken build" });
+    await vi.waitFor(() => expect(onStopped).toHaveBeenCalledTimes(1));
+    expect(manager.hasRuntime(input.addonId)).toBe(false);
+
+    const replacing = manager.startAddon(input);
+    const cancelled = expect(replacing).rejects.toMatchObject({ name: "AddonLoadCancelled" });
+    await Promise.resolve();
+    expect(document.querySelector("iframe")).toBeNull();
+    releaseCleanup();
+    await rejected;
+    await vi.waitFor(() => expect(document.querySelector("iframe")).not.toBeNull());
+    await manager.stopAllAddons();
+    await cancelled;
+    expect(onStopped).toHaveBeenCalledTimes(1);
+  });
+
+  it("releases runtime resources during global teardown", async () => {
+    const manager = new AddonIframeManager();
+    const onStopped = vi.fn().mockResolvedValue(undefined);
+    const starting = manager.startAddon({ ...input, onStopped });
+    const cancelled = expect(starting).rejects.toMatchObject({ name: "AddonLoadCancelled" });
+    await vi.waitFor(() => expect(document.querySelector("iframe")).not.toBeNull());
+    await manager.stopAllAddons();
+    await cancelled;
+    expect(onStopped).toHaveBeenCalledTimes(1);
+  });
+
   it("rejects a stale boot before it can touch the current runtime", async () => {
     const manager = new AddonIframeManager();
     const isCurrent = vi.fn(() => false);
@@ -101,7 +201,12 @@ describe("AddonIframeManager", () => {
   });
 
   it("passes host localization into the sandbox and broadcasts updates", async () => {
-    setAddonLocalizationSnapshot({ locale: "ja-JP", uiLocale: "en", timezone: "Asia/Tokyo" });
+    setAddonLocalizationSnapshot({
+      locale: "ja-JP",
+      uiLocale: "en",
+      direction: "rtl",
+      timezone: "Asia/Tokyo",
+    });
     const manager = new AddonIframeManager();
     const starting = manager.startAddon(input);
     const cancelled = expect(starting).rejects.toMatchObject({ name: "AddonLoadCancelled" });
@@ -111,6 +216,7 @@ describe("AddonIframeManager", () => {
     const bootstrap = new URLSearchParams(iframe.name);
     expect(bootstrap.get("locale")).toBe("ja-JP");
     expect(bootstrap.get("uiLocale")).toBe("en");
+    expect(bootstrap.get("direction")).toBe("rtl");
     expect(bootstrap.get("timezone")).toBe("Asia/Tokyo");
 
     const postMessage = vi.spyOn(iframe.contentWindow!, "postMessage").mockImplementation(() => {});
@@ -119,6 +225,48 @@ describe("AddonIframeManager", () => {
     expect(postMessage).toHaveBeenCalledWith(
       expect.objectContaining({
         localization: { locale: "ko-KR", uiLocale: "fr", timezone: "Asia/Seoul" },
+        type: "localizationUpdate",
+      }),
+      "*",
+    );
+
+    const withCurrencyFormats = {
+      locale: "ko-KR",
+      uiLocale: "fr",
+      timezone: "Asia/Seoul",
+      currencyFormattingRegions: { INR: "IN", USD: "DE" },
+    };
+    postMessage.mockClear();
+    setAddonLocalizationSnapshot(withCurrencyFormats);
+    expect(postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ localization: withCurrencyFormats, type: "localizationUpdate" }),
+      "*",
+    );
+
+    // Settings refetches may rebuild the same map in a different insertion order.
+    postMessage.mockClear();
+    setAddonLocalizationSnapshot({
+      ...withCurrencyFormats,
+      currencyFormattingRegions: { USD: "DE", INR: "IN" },
+    });
+    expect(postMessage).not.toHaveBeenCalled();
+
+    const changedCurrencyFormats = {
+      ...withCurrencyFormats,
+      currencyFormattingRegions: { USD: "US", INR: "IN" },
+    };
+    setAddonLocalizationSnapshot(changedCurrencyFormats);
+    expect(postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ localization: changedCurrencyFormats, type: "localizationUpdate" }),
+      "*",
+    );
+
+    // A direction switch alone reaches the sandbox, so addons mirror with the host.
+    postMessage.mockClear();
+    setAddonLocalizationSnapshot({ ...changedCurrencyFormats, direction: "ltr" });
+    expect(postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        localization: { ...changedCurrencyFormats, direction: "ltr" },
         type: "localizationUpdate",
       }),
       "*",
@@ -531,6 +679,128 @@ describe("AddonIframeManager", () => {
       "Sandbox failed during loading runtime stylesheet: Sandbox runtime stylesheet failed to load",
     );
     await vi.waitFor(() => expect(document.querySelector("iframe")).toBeNull());
+  });
+
+  it.each([
+    [
+      "getReport",
+      "spending",
+      "getSpendingReport",
+      { baseCurrency: "CAD", current: { outflow: 120 } },
+    ],
+    [
+      "searchCashActivities",
+      "activities",
+      "searchCashActivities",
+      { baseCurrency: "CAD", items: [], totalCount: 0 },
+    ],
+  ] as const)(
+    "enforces %s permissions through iframe RPC",
+    async (method, category, internalMethod, result) => {
+      const manager = new AddonIframeManager();
+      const postMessage = vi.fn();
+      const backend = vi.fn().mockResolvedValue(result);
+      const internalAPI = { [internalMethod]: backend } as unknown as InternalHostAPI;
+      const permissions = [
+        {
+          category: "spending",
+          purpose: "Categorize transactions",
+          functions: [{ name: "getRules", isDeclared: true, isDetected: false }],
+        },
+      ];
+      const runtime = {
+        addonId: input.addonId,
+        api: createSDKHostAPIBridge(
+          internalAPI,
+          input.addonId,
+          createPermissionGuard(input.addonId, permissions),
+        ),
+        iframe: { contentWindow: { postMessage } },
+        nonce: "nonce-1",
+      };
+      const internals = manager as unknown as {
+        dispatchMessage: (runtime: unknown, message: unknown) => Promise<void>;
+      };
+      const request = { startDate: "2026-01-01T00:00:00Z", endDate: "2026-01-31T23:59:59Z" };
+      const message = {
+        type: "api",
+        args: [request],
+        method: `spending.${method}`,
+        requestId: "spending-read",
+      };
+
+      await internals.dispatchMessage(runtime, message);
+      expect(backend).not.toHaveBeenCalled();
+      expect(postMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: "rpcResponse",
+          requestId: message.requestId,
+          ok: false,
+          error: expect.stringContaining(`is not allowed to call ${category}.${method}`) as unknown,
+        }),
+        "*",
+      );
+
+      runtime.api = createSDKHostAPIBridge(
+        internalAPI,
+        input.addonId,
+        createPermissionGuard(input.addonId, [
+          {
+            category,
+            purpose: "Read spending",
+            functions: [{ name: method, isDeclared: true, isDetected: false }],
+          },
+        ]),
+      );
+      postMessage.mockClear();
+      await internals.dispatchMessage(runtime, message);
+      expect(backend).toHaveBeenCalledExactlyOnceWith(request);
+      expect(postMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: "rpcResponse",
+          requestId: message.requestId,
+          ok: true,
+          result,
+        }),
+        "*",
+      );
+    },
+  );
+
+  it("whitelists the transfer pairing methods for addon API calls", async () => {
+    const manager = new AddonIframeManager();
+    const postMessage = vi.fn();
+    const transferMethods = {
+      getTransferPair: vi.fn().mockResolvedValue({}),
+      findTransferMatchCandidates: vi.fn().mockResolvedValue([]),
+      saveTransferPair: vi.fn().mockResolvedValue({}),
+      linkTransfer: vi.fn().mockResolvedValue([{}, {}]),
+      unlinkTransfer: vi.fn().mockResolvedValue([{}, {}]),
+    };
+    const runtime = {
+      addonId: "test-addon",
+      api: { activities: transferMethods },
+      iframe: { contentWindow: { postMessage } },
+      nonce: "nonce-1",
+    };
+
+    const internals = manager as unknown as {
+      handleApiCall: (runtime: unknown, message: unknown) => Promise<void>;
+    };
+
+    for (const method of Object.keys(transferMethods)) {
+      postMessage.mockClear();
+      await internals.handleApiCall(runtime, {
+        args: [],
+        method: `activities.${method}`,
+        requestId: `request-${method}`,
+      });
+
+      expect(postMessage).toHaveBeenCalledWith(
+        expect.objectContaining({ ok: true, requestId: `request-${method}` }),
+        "*",
+      );
+    }
   });
 });
 

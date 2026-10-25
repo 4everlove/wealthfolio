@@ -1,5 +1,5 @@
 import { formatDistanceToNow } from "@/lib/utils";
-import { useLocalizationSettings } from "@wealthfolio/ui";
+import { useLocalizationSettings, Spinner } from "@wealthfolio/ui";
 import { Badge } from "@wealthfolio/ui/components/ui/badge";
 import { Button } from "@wealthfolio/ui/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@wealthfolio/ui/components/ui/card";
@@ -25,7 +25,13 @@ function buildStatusConfig(
   { label: string; variant: "default" | "secondary" | "destructive" | "outline" }
 > {
   return {
+    restoring: { label: t("connect:session.restoring"), variant: "secondary" },
+    unavailable: { label: t("connect:session.unavailable"), variant: "secondary" },
     not_connected: { label: t("connect:status.notConnected"), variant: "secondary" },
+    subscription_required: {
+      label: t("connect:subscription.syncPausedTitle"),
+      variant: "secondary",
+    },
     idle: { label: t("connect:status.upToDate"), variant: "default" },
     running: { label: t("connect:status.syncingEllipsis"), variant: "outline" },
     needs_review: { label: t("connect:status.needsReview"), variant: "destructive" },
@@ -65,7 +71,7 @@ export function SyncSummaryCard({
                 : t("connect:status.neverSynced")}
             </p>
             {issueCount > 0 && (
-              <p className="text-sm text-yellow-600 dark:text-yellow-400">
+              <p className="text-warning text-sm">
                 {t("connect:sync.needAttention", { count: issueCount })}
               </p>
             )}
@@ -73,12 +79,12 @@ export function SyncSummaryCard({
           <Button onClick={onSyncAll} disabled={isSyncing || status === "running"} size="sm">
             {isSyncing || status === "running" ? (
               <>
-                <Icons.Spinner className="mr-2 h-4 w-4 animate-spin" />
+                <Spinner className="me-2 h-4 w-4" />
                 {t("connect:sync.syncingShort")}
               </>
             ) : (
               <>
-                <Icons.RefreshCw className="mr-2 h-4 w-4" />
+                <Icons.RefreshCw className="me-2 h-4 w-4" />
                 {t("connect:sync.syncAll")}
               </>
             )}

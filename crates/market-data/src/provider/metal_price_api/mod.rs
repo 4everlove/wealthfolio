@@ -82,10 +82,10 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 impl MetalPriceApiProvider {
     /// Create a new Metal Price API provider with the given API key.
     pub fn new(api_key: String) -> Self {
-        let client = Client::builder()
+        let client = wealthfolio_http::client_builder()
             .timeout(REQUEST_TIMEOUT)
             .build()
-            .unwrap_or_else(|_| Client::new());
+            .unwrap_or_else(|_| wealthfolio_http::client());
 
         Self { client, api_key }
     }
@@ -317,7 +317,7 @@ impl MarketDataProvider for MetalPriceApiProvider {
                 warn!(
                     provider = PROVIDER_ID,
                     error = %e,
-                    body = %&response_text[..response_text.len().min(300)],
+                    body = %&response_text[..response_text.floor_char_boundary(300)],
                     "Failed to parse timeframe response"
                 );
                 MarketDataError::ProviderError {
@@ -330,14 +330,14 @@ impl MarketDataProvider for MetalPriceApiProvider {
             warn!(
                 provider = PROVIDER_ID,
                 symbol = %raw_symbol,
-                body = %&response_text[..response_text.len().min(300)],
+                body = %&response_text[..response_text.floor_char_boundary(300)],
                 "Metal Price API timeframe request failed"
             );
             return Err(MarketDataError::ProviderError {
                 provider: PROVIDER_ID.to_string(),
                 message: format!(
                     "Timeframe API request failed (body: {})",
-                    &response_text[..response_text.len().min(300)]
+                    &response_text[..response_text.floor_char_boundary(300)]
                 ),
             });
         }
@@ -357,7 +357,11 @@ impl MarketDataProvider for MetalPriceApiProvider {
                 }
             })?;
 
-            let timestamp = Utc.from_utc_datetime(&date.and_hms_opt(12, 0, 0).unwrap());
+            let timestamp = Utc.from_utc_datetime(
+                &date
+                    .and_hms_opt(12, 0, 0)
+                    .expect("12:00:00 is a valid time"),
+            );
 
             quotes.push(Quote::new(
                 timestamp,

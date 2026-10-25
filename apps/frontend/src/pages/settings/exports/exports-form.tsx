@@ -7,6 +7,7 @@ import { ExportDataType, ExportedFileFormat } from "@/lib/types";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useExportData } from "./use-export-data";
+import { Spinner } from "@wealthfolio/ui";
 
 export const ExportForm = () => {
   const { t } = useTranslation();
@@ -14,7 +15,7 @@ export const ExportForm = () => {
 
   const { exportData, isExporting, exportingFormat, exportingData } = useExportData();
 
-  // `name` values (CSV/JSON/SQLite) are format identifiers used as radio values —
+  // `name` values (CSV/JSON) are format identifiers used as radio values —
   // do NOT translate those; only the descriptions/labels are localized.
   const dataFormats = [
     { name: "CSV", icon: Icons.FileCsv, description: t("settings:export_format_csv_description") },
@@ -22,11 +23,6 @@ export const ExportForm = () => {
       name: "JSON",
       icon: Icons.FileJson,
       description: t("settings:export_format_json_description"),
-    },
-    {
-      name: "SQLite",
-      icon: Icons.Database,
-      description: t("settings:export_format_sqlite_description"),
     },
   ];
 
@@ -67,14 +63,6 @@ export const ExportForm = () => {
   const dataTypes = {
     CSV: csvJsonTypes,
     JSON: csvJsonTypes,
-    SQLite: [
-      {
-        key: "full",
-        name: t("settings:export_type_full_database"),
-        icon: Icons.Database,
-        description: t("settings:export_type_full_database_description"),
-      },
-    ],
   };
 
   const handleExport = (item: (typeof dataTypes)[ExportedFileFormat][number]) => {
@@ -92,14 +80,14 @@ export const ExportForm = () => {
         <h3 className="pb-3 pt-5 font-semibold">{t("settings:export_format_title")}</h3>
         <RadioGroup
           onValueChange={setSelectedFormat}
-          className="grid grid-cols-1 gap-4 md:grid-cols-3"
+          className="grid grid-cols-1 gap-4 md:grid-cols-2"
         >
           {dataFormats.map((format) => (
             <div key={format.name}>
               <RadioGroupItem value={format.name} id={format.name} className="peer sr-only" />
               <Label
                 htmlFor={format.name}
-                className="bg-card hover:bg-accent hover:text-accent-foreground peer-data-[state=checked]:border-primary [&:has([data-state=checked])]:border-primary relative flex cursor-pointer flex-col items-center justify-between rounded-md border p-4 shadow-sm peer-data-[state=checked]:border-2"
+                className="bg-card hover:bg-accent hover:text-accent-foreground peer-data-checked:border-primary [&:has([data-checked])]:border-primary peer-data-checked:border-2 relative flex cursor-pointer flex-col items-center justify-between rounded-md border p-4 shadow-sm"
               >
                 <format.icon className="mb-3 h-6 w-6" />
                 <div className="text-center">
@@ -119,7 +107,7 @@ export const ExportForm = () => {
             <Card key={item.key} className="mb-4">
               <CardContent className="flex items-center justify-between p-4">
                 <div className="flex items-center">
-                  <item.icon className="mr-2 h-5 w-5" />
+                  <item.icon className="me-2 h-5 w-5" />
                   <div>
                     <span className="font-medium">{item.name}</span>
                     <p className="text-muted-foreground text-sm">{item.description}</p>
@@ -135,7 +123,7 @@ export const ExportForm = () => {
                   exportingFormat === selectedFormat &&
                   exportingData === item.key ? (
                     <>
-                      <Icons.Spinner className="h-4 w-4 animate-spin" />
+                      <Spinner className="h-4 w-4" />
                       <span className="sr-only">
                         {t("settings:export_exporting_item", { name: item.name })}
                       </span>

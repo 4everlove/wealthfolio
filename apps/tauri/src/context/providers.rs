@@ -1,7 +1,6 @@
 use super::ai_environment::TauriAiEnvironment;
 use super::registry::ServiceContext;
 use crate::domain_events::TauriDomainEventSink;
-use crate::secret_store::shared_secret_store;
 use crate::services::ConnectService;
 use log::{error, warn};
 use std::sync::{Arc, RwLock};
@@ -10,6 +9,11 @@ use wealthfolio_ai::{AiProviderService, ChatConfig, ChatService};
 use wealthfolio_connect::{
     BrokerSyncService, CoreImportRunRepositoryAdapter, ImportRunRepositoryTrait,
 };
+use wealthfolio_core::portfolio::coordinator::{
+    CoordinatorDeps, FactSources, PortfolioCoordinator, WindowCadence,
+};
+use wealthfolio_core::portfolio::projection::ProjectionStoreTrait;
+use wealthfolio_core::secrets::SecretStore;
 use wealthfolio_core::{
     accounts::AccountService,
     activities::{rebuild_pending_final_cash_accounts, run_final_cash_migration, ActivityService},
@@ -27,7 +31,6 @@ use wealthfolio_core::{
         income::IncomeService,
         net_worth::NetWorthService,
         performance::PerformanceService,
-        recalculation_gate::PortfolioRecalculationGate,
         snapshot::SnapshotService,
         valuation::ValuationService,
     },
@@ -37,6 +40,7 @@ use wealthfolio_core::{
     taxonomies::TaxonomyService,
 };
 use wealthfolio_device_sync::{engine::DeviceSyncRuntimeState, DeviceEnrollService};
+use wealthfolio_storage_sqlite::sync::ProfileSyncState;
 use wealthfolio_storage_sqlite::{
     accounts::AccountRepository,
     activities::ActivityRepository,
@@ -44,7 +48,7 @@ use wealthfolio_storage_sqlite::{
     agent::{McpAuditRepository, PatRepository},
     ai_chat::AiChatRepository,
     assets::{AlternativeAssetRepository, AssetLogoRepository, AssetRepository},
-    db::{self, write_actor},
+    db::{self, write_actor, WriteHandle, WriterTask},
     fx::FxRepository,
     goals::GoalRepository,
     health::HealthDismissalRepository,
@@ -65,27 +69,93 @@ pub struct ContextInitResult {
     pub context: ServiceContext,
     pub event_receiver: mpsc::UnboundedReceiver<DomainEvent>,
     pub sync_outbox_wake_receiver: mpsc::Receiver<()>,
+    /// Handed to the database runtime so maintenance can stop the writer and
+    /// wait for its pooled connection to be released.
+    pub writer: WriteHandle,
+    pub writer_task: WriterTask,
+    pub final_cash_rebuild: Option<std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>>,
 }
 
+/// Builds every repository and service over an already-resolved database.
+///
+/// `access` carries the path and, when the database is encrypted, the key — so
+/// that `PRAGMA key` is applied at every connection site, including the pool the
+/// write actor draws from.
 pub async fn initialize_context(
     app_data_dir: &str,
+    access: &db::DbAccess,
+    owner: Arc<db::DatabaseOwner>,
+    profile_id: uuid::Uuid,
+    secret_store: Arc<dyn SecretStore>,
+    sync_state: Arc<ProfileSyncState>,
 ) -> Result<ContextInitResult, Box<dyn std::error::Error>> {
-    let db_path = db::init(app_data_dir)?;
-    db::run_migrations(&db_path)?;
+    let migration_access = access.clone();
+    let migration_owner = owner.clone();
+    let backup_root = app_data_dir.to_owned();
+    tauri::async_runtime::spawn_blocking(move || {
+        migration_access.run_migrations_with_backup(&backup_root, &migration_owner)
+    })
+    .await??;
 
-    let pool = db::create_pool(&db_path)?;
+    let pool = access.create_pool_with_owner(owner)?;
+    initialize_with_pool(app_data_dir, pool, profile_id, secret_store, sync_state).await
+}
+
+async fn initialize_with_pool(
+    app_data_dir: &str,
+    pool: Arc<db::DbPool>,
+    profile_id: uuid::Uuid,
+    secret_store: Arc<dyn SecretStore>,
+    sync_state: Arc<ProfileSyncState>,
+) -> Result<ContextInitResult, Box<dyn std::error::Error>> {
     let (sync_outbox_wake_sender, sync_outbox_wake_receiver) = mpsc::channel(128);
-    let writer = write_actor::spawn_writer_with_outbox_observer(
+    let (writer, writer_task) = write_actor::spawn_writer_with_sync_state(
         pool.as_ref().clone(),
         Arc::new(move || {
             let _ = sync_outbox_wake_sender.try_send(());
         }),
+        sync_state,
     )
     .map_err(|e| {
         error!("Failed to initialize writer actor: {}", e);
         e
     })?;
 
+    let built = build_context(app_data_dir, pool, writer.clone(), profile_id, secret_store)
+        .await
+        .map_err(|error| error.to_string());
+    match built {
+        Ok(built) => Ok(ContextInitResult {
+            context: built.context,
+            event_receiver: built.event_receiver,
+            sync_outbox_wake_receiver,
+            writer,
+            writer_task,
+            final_cash_rebuild: built.final_cash_rebuild,
+        }),
+        Err(error) => {
+            // Failed construction has dropped every repository before stopping
+            // the writer's independent pooled connection. Rollback may follow.
+            writer.shutdown().await;
+            writer_task.join().await;
+            Err(error.into())
+        }
+    }
+}
+
+struct BuiltContext {
+    context: ServiceContext,
+    event_receiver: mpsc::UnboundedReceiver<DomainEvent>,
+    final_cash_rebuild: Option<std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>>,
+}
+
+async fn build_context(
+    app_data_dir: &str,
+    pool: Arc<db::DbPool>,
+    writer: WriteHandle,
+    profile_id: uuid::Uuid,
+    secret_store: Arc<dyn SecretStore>,
+) -> Result<BuiltContext, Box<dyn std::error::Error>> {
     // Instantiate Repositories
     let settings_repository = Arc::new(SettingsRepository::new(pool.clone(), writer.clone()));
     let account_repository = Arc::new(AccountRepository::new(pool.clone(), writer.clone()));
@@ -181,8 +251,6 @@ pub async fn initialize_context(
             .ok_or_else(|| std::io::Error::other("Missing internal instance ID"))?,
     );
 
-    let secret_store = shared_secret_store();
-
     // Custom provider repository
     let custom_provider_repository = Arc::new(
         wealthfolio_storage_sqlite::custom_provider::CustomProviderSqliteRepository::new(
@@ -206,7 +274,8 @@ pub async fn initialize_context(
             secret_store.clone(),
             Some(custom_provider_repository.clone()),
         )
-        .await?,
+        .await?
+        .with_event_sink(domain_event_sink.clone()),
     );
 
     // Portfolio service
@@ -282,6 +351,7 @@ pub async fn initialize_context(
             activity_events_repo.clone(),
             events_service.clone(),
             fx_service.clone(),
+            taxonomy_service.clone(),
         ),
     );
 
@@ -379,6 +449,7 @@ pub async fn initialize_context(
             core_import_run_repository,
         )
         .with_timezone(timezone.clone())
+        .with_valuation_repository(valuation_repository.clone())
         .with_event_sink(domain_event_sink.clone()),
     );
     let final_cash_migration = run_final_cash_migration(
@@ -388,10 +459,10 @@ pub async fn initialize_context(
         asset_service.as_ref(),
     )
     .await?;
-    let recalculation_gate = Arc::new(PortfolioRecalculationGate::new(
-        final_cash_migration.pending_account_ids.clone(),
-    ));
-    let goal_service = Arc::new(GoalService::new(goal_repo.clone(), account_service.clone()));
+    let goal_service = Arc::new(
+        GoalService::new(goal_repo.clone(), account_service.clone())
+            .with_timezone(timezone.clone()),
+    );
     let limits_service = Arc::new(ContributionLimitService::new_with_timezone(
         fx_service.clone(),
         limit_repository.clone(),
@@ -407,18 +478,13 @@ pub async fn initialize_context(
     ));
 
     let snapshot_service = Arc::new(
-        SnapshotService::new_with_timezone(
-            base_currency.clone(),
+        SnapshotService::new(
             timezone.clone(),
             account_repository.clone(),
-            activity_repository.clone(),
             snapshot_repository.clone(),
-            asset_repository.clone(),
-            fx_service.clone(),
+            activity_repository.clone(),
         )
-        .with_event_sink(domain_event_sink.clone())
-        .with_lot_repository(lots_repository.clone())
-        .with_recalculation_gate(recalculation_gate.clone()),
+        .with_event_sink(domain_event_sink.clone()),
     );
 
     let holdings_valuation_service = Arc::new(HoldingsValuationService::new_with_timezone(
@@ -427,54 +493,70 @@ pub async fn initialize_context(
         timezone.clone(),
     ));
 
-    let valuation_service = Arc::new(
-        ValuationService::new(
-            base_currency.clone(),
-            valuation_repository.clone(),
-            snapshot_service.clone(),
-            quote_service.clone(),
-            fx_service.clone(),
-        )
-        .with_activity_repository(activity_repository.clone(), timezone.clone())
-        .with_lot_repository(lots_repository.clone())
-        .with_recalculation_gate(recalculation_gate.clone()),
+    let projection_store: Arc<dyn ProjectionStoreTrait> = Arc::new(
+        wealthfolio_storage_sqlite::portfolio::projection::ProjectionStore::new(
+            pool.clone(),
+            writer.clone(),
+        ),
     );
+    let fact_sources = FactSources {
+        accounts: account_repository.clone(),
+        activities: activity_repository.clone(),
+        assets: asset_repository.clone(),
+        quotes: quote_service.clone(),
+        fx_rates: fx_repository.clone(),
+        snapshots: snapshot_repository.clone(),
+        projections: projection_store.clone(),
+    };
+    let valuation_service = Arc::new(ValuationService::new(
+        valuation_repository.clone(),
+        fact_sources.clone(),
+        lots_repository.clone(),
+        timezone.clone(),
+    ));
 
-    if !final_cash_migration.pending_account_ids.is_empty() {
-        // The recalculation gate already serializes and forces full
-        // recomputation for pending accounts, so the rebuild can always run
-        // in the background instead of blocking (or failing) startup.
+    let portfolio_coordinator = Arc::new(PortfolioCoordinator::new(CoordinatorDeps {
+        base_currency: base_currency.clone(),
+        timezone: timezone.clone(),
+        sources: fact_sources.clone(),
+        fx_service: fx_service.clone(),
+        snapshot_service: snapshot_service.clone(),
+        projections: projection_store.clone(),
+        lots: lots_repository.clone(),
+        window_cadence: WindowCadence::Year,
+    }));
+
+    let final_cash_rebuild: Option<
+        std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>,
+    > = if !final_cash_migration.pending_account_ids.is_empty() {
+        // The coordinator serializes and forces a full rebuild per pending
+        // account, so the rebuild can run in the background instead of
+        // blocking (or failing) startup.
         log::info!(
             "Rebuilding {} account(s) after final-cash migration in the background",
             final_cash_migration.pending_account_ids.len()
         );
         let settings_service = settings_service.clone();
-        let snapshot_service = snapshot_service.clone();
-        let valuation_service = valuation_service.clone();
-        let recalculation_gate = recalculation_gate.clone();
-        tokio::spawn(async move {
-            if let Err(error) = rebuild_pending_final_cash_accounts(
-                settings_service.as_ref(),
-                snapshot_service.as_ref(),
-                valuation_service.as_ref(),
-                recalculation_gate.as_ref(),
-            )
-            .await
+        let coordinator = portfolio_coordinator.clone();
+        Some(Box::pin(async move {
+            if let Err(error) =
+                rebuild_pending_final_cash_accounts(settings_service.as_ref(), coordinator.as_ref())
+                    .await
             {
                 log::warn!("Background final-cash rebuild failed: {}", error);
             }
-        });
-    }
+        }))
+    } else {
+        None
+    };
 
-    let performance_service = Arc::new(
-        PerformanceService::new_with_timezone(
-            valuation_service.clone(),
-            quote_service.clone(),
-            timezone.clone(),
-        )
-        .with_activity_repository(activity_repository.clone(), fx_service.clone())
-        .with_lot_repository(lots_repository.clone()),
-    );
+    let performance_service = Arc::new(PerformanceService::new(
+        base_currency.clone(),
+        timezone.clone(),
+        fact_sources.clone(),
+        valuation_repository.clone(),
+        lots_repository.clone(),
+    ));
 
     let classification_service =
         Arc::new(AssetClassificationService::new(taxonomy_service.clone()));
@@ -486,7 +568,11 @@ pub async fn initialize_context(
             classification_service.clone(),
             timezone.clone(),
         )
-        .with_income_dependencies(activity_repository.clone(), fx_service.clone())
+        .with_income_dependencies(
+            activity_repository.clone(),
+            fx_service.clone(),
+            projection_store,
+        )
         .with_lot_repository(lots_repository.clone()),
     );
 
@@ -518,20 +604,23 @@ pub async fn initialize_context(
         holdings_service.clone(),
     ));
 
-    let net_worth_service = Arc::new(NetWorthService::new(
-        base_currency.clone(),
-        account_repository.clone(),
-        asset_repository.clone(),
-        snapshot_repository.clone(),
-        quote_service.clone(),
-        valuation_repository.clone(),
-        fx_service.clone(),
-    ));
-
     let alternative_asset_repository = Arc::new(AlternativeAssetRepository::new(
         pool.clone(),
         writer.clone(),
     ));
+
+    let net_worth_service = Arc::new(
+        NetWorthService::new(
+            base_currency.clone(),
+            account_repository.clone(),
+            asset_repository.clone(),
+            snapshot_service.clone(),
+            quote_service.clone(),
+            valuation_repository.clone(),
+            fx_service.clone(),
+        )
+        .with_loan_payments(alternative_asset_repository.clone(), timezone.clone()),
+    );
 
     let alternative_asset_service = Arc::new(
         AlternativeAssetService::new(
@@ -539,6 +628,7 @@ pub async fn initialize_context(
             asset_repository.clone(),
             quote_service.clone(),
         )
+        .with_timezone(timezone.clone())
         .with_event_sink(domain_event_sink.clone()),
     );
 
@@ -565,7 +655,10 @@ pub async fn initialize_context(
         .with_quote_store(market_data_repo.clone()),
     );
 
-    let connect_service = Arc::new(ConnectService::new(secret_store.clone()));
+    let connect_service = Arc::new(ConnectService::new(
+        secret_store.clone(),
+        settings_service.clone(),
+    ));
 
     // AI provider service - catalog is embedded at compile time
     let ai_catalog_json = include_str!("../../../../crates/ai/src/ai_providers.json");
@@ -581,7 +674,10 @@ pub async fn initialize_context(
     // Health service for portfolio health diagnostics
     let health_dismissal_repository =
         Arc::new(HealthDismissalRepository::new(pool.clone(), writer.clone()));
-    let health_service = Arc::new(HealthService::new(health_dismissal_repository));
+    let health_service = Arc::new(
+        HealthService::new(health_dismissal_repository)
+            .with_projection_freshness(portfolio_coordinator.clone()),
+    );
 
     // Create AI environment and chat service
     let ai_environment = Arc::new(TauriAiEnvironment::new(
@@ -650,8 +746,17 @@ pub async fn initialize_context(
         warn!("Failed to prune local sync outbox: {}", err);
     }
 
-    Ok(ContextInitResult {
+    Ok(BuiltContext {
         context: ServiceContext {
+            portfolio_tasks: crate::listeners::PortfolioTasks::new(),
+            #[cfg(feature = "device-sync")]
+            sync_approvals: Default::default(),
+            backup_scheduler: Arc::default(),
+            sync_lifecycle: tokio::sync::Mutex::new(()),
+            active: std::sync::atomic::AtomicBool::new(true),
+            profile_id,
+            data_root: std::path::PathBuf::from(app_data_dir),
+            secret_store: secret_store.clone(),
             base_currency,
             timezone,
             rating_instance_id,
@@ -667,7 +772,6 @@ pub async fn initialize_context(
             performance_service,
             income_service,
             snapshot_service,
-            snapshot_repository,
             lots_repository,
             app_sync_repository,
             holdings_service,
@@ -676,6 +780,7 @@ pub async fn initialize_context(
             drift_service,
             rebalance_service,
             valuation_service,
+            portfolio_coordinator,
             net_worth_service,
             sync_service,
             alternative_asset_service,
@@ -703,12 +808,12 @@ pub async fn initialize_context(
             spending_insight_service,
         },
         event_receiver,
-        sync_outbox_wake_receiver,
+        final_cash_rebuild,
     })
 }
 
 /// Get a friendly display name for this device based on platform.
-fn get_device_display_name() -> String {
+pub(crate) fn get_device_display_name() -> String {
     #[cfg(target_os = "macos")]
     return "My Mac".to_string();
     #[cfg(target_os = "windows")]
@@ -717,4 +822,44 @@ fn get_device_display_name() -> String {
     return "My Linux".to_string();
     #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     return "My Device".to_string();
+}
+
+#[cfg(test)]
+mod initialization_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn failed_service_build_releases_the_writer_pool() {
+        let directory = tempfile::tempdir().unwrap();
+        let access = db::DbAccess::new(directory.path().join("app.db").to_str().unwrap(), None);
+        access.prepare().unwrap();
+        access.run_migrations().unwrap();
+        access
+            .connect_rusqlite()
+            .unwrap()
+            .execute_batch("DROP TABLE app_settings")
+            .unwrap();
+        let pool = access.create_pool().unwrap();
+        // The writer receives an r2d2 clone rather than this Arc. Check that
+        // both repository ownership and every checked-out connection are gone.
+        let probe = pool.as_ref().clone();
+        let weak = Arc::downgrade(&pool);
+        assert!(initialize_with_pool(
+            directory.path().to_str().unwrap(),
+            pool,
+            uuid::Uuid::nil(),
+            crate::secret_store::shared_secret_store(crate::data_dir::PRODUCTION_APP_IDENTIFIER),
+            Arc::default(),
+        )
+        .await
+        .is_err());
+        assert!(weak.upgrade().is_none());
+        let state = probe.state();
+        assert_eq!(state.connections, state.idle_connections);
+        access
+            .connect_rusqlite()
+            .unwrap()
+            .execute_batch("BEGIN EXCLUSIVE; ROLLBACK;")
+            .unwrap();
+    }
 }

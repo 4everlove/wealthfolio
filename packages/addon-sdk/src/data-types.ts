@@ -364,6 +364,63 @@ export interface ActivityBulkMutationResult {
   errors: ActivityBulkMutationError[];
 }
 
+interface InternalTransferPairRequestBase {
+  sourceGroupId?: string;
+  fromAccountId: string;
+  toAccountId: string;
+  activityDate: string | Date;
+  sourceAmount: string | number;
+  destinationAmount: string | number;
+  sourceCurrency: string;
+  destinationCurrency: string;
+  /** @deprecated Execution-rate hint accepted for compatibility; cash amounts are authoritative.
+   * Never stored in Activity.fxRate (the activity-to-account valuation override).
+   * Derive the transfer rate from destinationAmount / sourceAmount instead.
+   */
+  fxRate?: string | number | null;
+  notes?: string | null;
+  transferMode?: 'cash';
+}
+
+/** Create both legs of a new internal transfer pair. */
+export interface CreateInternalTransferPairRequest extends InternalTransferPairRequestBase {
+  transferOutId?: never;
+  transferInId?: never;
+}
+
+/**
+ * Update an existing internal transfer pair. Both leg ids are required: the host
+ * rejects a request that names one leg without the other.
+ */
+export interface UpdateInternalTransferPairRequest extends InternalTransferPairRequestBase {
+  transferOutId: string;
+  transferInId: string;
+}
+
+export type InternalTransferPairRequest =
+  | CreateInternalTransferPairRequest
+  | UpdateInternalTransferPairRequest;
+
+export interface InternalTransferPairResponse {
+  transferOut: Activity;
+  transferIn: Activity;
+}
+
+export interface TransferMatchCandidateRequest {
+  activityId: string;
+  windowDays?: number;
+  limit?: number;
+}
+
+export interface TransferMatchCandidate {
+  activity: Activity;
+  matchKind: 'cash' | 'security' | 'cash_fx_conversion';
+  confidence: 'high' | 'medium' | 'low';
+  score: number;
+  reasons: string[];
+  warnings: string[];
+}
+
 export interface ActivityImport {
   id?: string;
   accountId: string;
@@ -606,6 +663,141 @@ export interface CategorizationRuleInput {
   priority?: number;
 }
 
+export interface ActivityTaxonomyAssignment {
+  id: string;
+  activityId: string;
+  taxonomyId: string;
+  categoryId: string;
+  weight: number;
+  source: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ActivitySplit {
+  id: string;
+  activityId: string;
+  taxonomyId: string;
+  categoryId: string;
+  amount: string | number;
+  note?: string | null;
+  sortOrder: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type CashFlowBucket = 'spending' | 'income' | 'saving' | 'neutral';
+export type TransferLinkStatus = 'linked' | 'unlinked' | 'invalid';
+export type CashActivityStatusFilter =
+  | 'all'
+  | 'needs_review'
+  | 'uncategorized'
+  | 'categorized';
+export type CashActivitySortField = 'date' | 'amount';
+export type CashActivitySortDirection = 'asc' | 'desc';
+
+export interface CashActivitySearchRequest {
+  search?: string;
+  accountIds?: string[];
+  activityTypes?: ActivityType[];
+  categoryIds?: string[];
+  subcategoryIds?: string[];
+  eventIds?: string[];
+  status?: CashActivityStatusFilter;
+  /** Inclusive RFC3339 timestamp. */
+  startDate?: string;
+  /** Inclusive RFC3339 timestamp. */
+  endDate?: string;
+  minAmount?: number;
+  maxAmount?: number;
+  sortBy?: CashActivitySortField;
+  sortDir?: CashActivitySortDirection;
+  offset?: number;
+  limit?: number;
+}
+
+/** A cash activity enriched with its spending classification and category assignments. */
+export interface CashActivity extends Activity {
+  cashFlowBucket: CashFlowBucket;
+  assignments: ActivityTaxonomyAssignment[];
+  splits: ActivitySplit[];
+  eventId?: string | null;
+  transferLinkStatus?: TransferLinkStatus | null;
+  /** Signed cash movement in the activity's own currency. */
+  netAmount: number;
+  /** `netAmount` converted to the response's `baseCurrency`, when available. */
+  netAmountBase?: number | null;
+  /** Signed spending in the activity's own currency, after excluded portions are removed. */
+  visibleSpendingAmount?: number;
+}
+
+export interface CurrencyNet {
+  currency: string;
+  amount: number;
+}
+
+export interface NetSummary {
+  byCurrency: CurrencyNet[];
+  converted?: CurrencyNet | null;
+}
+
+export interface CashActivitySearchResponse {
+  items: CashActivity[];
+  totalCount: number;
+  /** Net over the complete filtered result. Present only on the first page. */
+  net?: NetSummary | null;
+  baseCurrency?: string | null;
+}
+
+export interface SpendingReportRequest {
+  /** Inclusive RFC3339 timestamp. */
+  startDate: string;
+  /** Inclusive RFC3339 timestamp. */
+  endDate: string;
+  accountIds?: string[];
+}
+
+export interface SpendingPeriodSummary {
+  income: number;
+  outflow: number;
+  saved: number;
+  net: number;
+  count: number;
+}
+
+export interface SpendingCategoryBreakdownRow {
+  taxonomyId: string;
+  categoryId: string;
+  amount: number;
+  count: number;
+}
+
+export interface SpendingDayBucket {
+  date: string;
+  income: number;
+  outflow: number;
+}
+
+export interface SpendingDayCategoryBucket {
+  date: string;
+  taxonomyId: string;
+  categoryId: string;
+  amount: number;
+  count: number;
+}
+
+export interface SpendingReport {
+  /** Currency of all monetary amounts; rates are taken at each period's end. */
+  baseCurrency: string;
+  current: SpendingPeriodSummary;
+  prior: SpendingPeriodSummary;
+  spendingBreakdown: SpendingCategoryBreakdownRow[];
+  incomeBreakdown: SpendingCategoryBreakdownRow[];
+  savingsBreakdown: SpendingCategoryBreakdownRow[];
+  byDay: SpendingDayBucket[];
+  byDayByCategory: SpendingDayCategoryBucket[];
+}
+
 export interface MonetaryValue {
   local: number;
   base: number;
@@ -711,6 +903,42 @@ export interface Asset {
   // Audit
   createdAt: string;
   updatedAt: string;
+}
+
+/**
+ * Alternative asset holding with valuation details (property, vehicle,
+ * collectible, precious metal, liability, other). Simplified model: no
+ * account, no activities, just asset + quotes.
+ */
+export interface AlternativeAssetHolding {
+  /** Asset ID (e.g., "PROP-a1b2c3d4") */
+  id: string;
+  /** Asset kind (property, vehicle, collectible, precious, liability, other) */
+  kind: string;
+  /** Asset name */
+  name: string;
+  /** Asset symbol (display type label, e.g., "Property", "Vehicle") */
+  symbol: string;
+  /** Currency */
+  currency: string;
+  /** Current market value from latest quote */
+  marketValue: string;
+  /** Purchase price if available (from metadata) */
+  purchasePrice?: string | null;
+  /** Purchase date if available (from metadata) */
+  purchaseDate?: string | null;
+  /** Unrealized gain (market_value - purchase_price) */
+  unrealizedGain?: string | null;
+  /** Unrealized gain percentage */
+  unrealizedGainPct?: string | null;
+  /** Date of the latest valuation (ISO format) */
+  valuationDate: string;
+  /** Kind-specific metadata */
+  metadata?: Record<string, unknown> | null;
+  /** For liabilities: linked asset ID if any */
+  linkedAssetId?: string | null;
+  /** Asset notes */
+  notes?: string | null;
 }
 
 export interface Quote {
@@ -822,6 +1050,8 @@ export interface IncomeSummary {
   currency: string;
   monthlyAverage: number;
   yoyGrowth: number | null;
+  /** Currencies with no exchange rate to `currency`, left out of the converted totals. */
+  unconvertedCurrencies: string[];
 }
 
 export interface DateRange {

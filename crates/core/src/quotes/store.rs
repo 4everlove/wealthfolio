@@ -45,6 +45,26 @@ use crate::errors::Result;
 /// - `*_batch` - Operate on multiple assets efficiently
 #[async_trait]
 pub trait QuoteStore: Send + Sync {
+    fn provider_history_reset_context(
+        &self,
+        _asset_id: &str,
+    ) -> Result<super::model::ProviderHistoryResetContext> {
+        Err(crate::errors::Error::Repository(
+            "Provider history reset is not supported by this store".into(),
+        ))
+    }
+
+    /// Replace provider rows and update sync state in one transaction.
+    async fn replace_provider_history(
+        &self,
+        _context: super::model::ProviderHistoryResetContext,
+        _quotes: Vec<Quote>,
+    ) -> Result<super::model::ResetProviderHistoryResult> {
+        Err(crate::errors::Error::Repository(
+            "Provider history reset is not supported by this store".into(),
+        ))
+    }
+
     // =========================================================================
     // Mutations
     // =========================================================================

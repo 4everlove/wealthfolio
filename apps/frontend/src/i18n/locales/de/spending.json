@@ -36,6 +36,11 @@
     "transactionCount_other": "{{count}} Transaktionen",
     "editCategoryTitle": "Kategorie bearbeiten",
     "deleteCategoryTitle": "Kategorie löschen",
+    "excludeLabel": "Aus den Ausgaben ausschließen",
+    "excludeDescription": "Wird in Summen, Diagrammen, Einblicken und Budgets nicht berücksichtigt",
+    "excludeDisabledParent": "Ausgeschlossen, weil die übergeordnete Kategorie ausgeschlossen ist",
+    "excludedTooltip": "Aus den Ausgaben ausgeschlossen",
+    "excludedWithParent": "Zusammen mit {{name}} ausgeschlossen",
     "categoryActions": "Kategorieaktionen",
     "deleteTitle": "Kategorie löschen",
     "deleteConfirm": "Möchten Sie „{{name}}“ wirklich löschen?",
@@ -44,6 +49,13 @@
     "searchCategories": "Kategorien suchen...",
     "noCategoriesFound": "Keine Kategorien gefunden.",
     "clearCategory": "Kategorie entfernen"
+  },
+  "activityTypes": {
+    "balanceTransferCashAdvance": "Saldoübertragung / Barauszahlung",
+    "charge": "Belastung",
+    "interestCharge": "Sollzinsen",
+    "refundCredit": "Erstattung / Gutschrift",
+    "reimbursementRefund": "Kostenerstattung / Rückerstattung"
   },
   "rules": {
     "editTitle": "Regel bearbeiten",
@@ -219,7 +231,13 @@
     "viewingMonth": "{{label}} wird angezeigt, zum Ändern klicken",
     "pickMonth": "Bestimmten Monat auswählen",
     "selectMonth": "Monat auswählen",
-    "clearMonth": "Monatsauswahl aufheben"
+    "clearMonth": "Monatsauswahl aufheben",
+    "chooseMonth": "Monat auswählen",
+    "selectDates": "Daten auswählen",
+    "startDate": "Startdatum",
+    "chooseCustomDates": "Benutzerdefinierte Daten auswählen",
+    "invalidRange": "Das Enddatum muss am oder nach dem Startdatum liegen",
+    "endDate": "Enddatum"
   },
   "presets": {
     "loading": "Vorlagen werden geladen…",
@@ -394,7 +412,8 @@
     "largest": "Größte",
     "noSpending": "Keine Ausgaben in diesem Zeitfenster.",
     "outlier": "Ausreißer",
-    "weekOf": "Woche vom {{date}}"
+    "weekOf": "Woche vom {{date}}",
+    "customSubtitle": "Transaktionen im ausgewählten Zeitraum"
   },
   "split": {
     "title": "Transaktion aufteilen",
@@ -542,7 +561,11 @@
     "brighter": "Heller",
     "moreSpend": "= mehr Ausgaben.",
     "less": "weniger",
-    "more": "mehr"
+    "more": "mehr",
+    "customSubtitleShort": "Ausgewählter Zeitraum",
+    "customNoActivity": "Keine Geldbewegungen im ausgewählten Zeitraum.",
+    "customLegendIntro": "Jede Zelle steht für eine Stunde eines Wochentags im ausgewählten Zeitraum.",
+    "customSubtitle": "Ausgewählter Zeitraum · Ausgabenintensität nach Wochentag und Stunde."
   },
   "eventDetail": {
     "previousEvent": "Vorheriges Ereignis",
@@ -695,12 +718,7 @@
     "noIncome": "Keine Einnahmen in den ausgewählten Konten für diesen Zeitraum.",
     "spent": "Ausgegeben",
     "saved": "Gespart",
-    "incomeSaving": "Einnahmen & Sparen",
-    "nonSpendingCashflow": "Nicht-Ausgaben-Cashflow für {{period}}.",
-    "moneyIn": "Eingänge",
-    "incomeSources": "Einnahmequellen",
     "setAside": "Zurückgelegt",
-    "savingDestinations": "Sparziele",
     "sortSpent": "ausgegeben",
     "sortChange": "Änderung",
     "sortName": "Name",
@@ -714,9 +732,54 @@
     "sortByLabel": "Sortieren nach {{label}}",
     "categoriesShown_one": "{{shown}} von {{total}} Kategorie angezeigt",
     "categoriesShown_other": "{{shown}} von {{total}} Kategorien angezeigt",
+    "excludedInSettings_one": "{{count}} in den Einstellungen ausgeschlossen",
+    "excludedInSettings_other": "{{count}} in den Einstellungen ausgeschlossen",
     "openTransactions": "Transaktionen öffnen →",
     "moreCount_one": "+{{count}} weitere",
-    "moreCount_other": "+{{count}} weitere"
+    "moreCount_other": "+{{count}} weitere",
+    "vsRange": "gegenüber {{from}} – {{to}}"
+  },
+  "moneyFlow": {
+    "title": "Geldfluss",
+    "subtitle": "Woher Ihr Geld kam und wohin es ging für {{period}}.",
+    "focusSubtitle": "Alle Kategorien für {{period}}.",
+    "focusSubcategoriesSubtitle": "Alle Unterkategorien für {{period}}.",
+    "back": "Alle Flüsse",
+    "backTo": "Zurück zu {{name}}",
+    "chartLabel": "Geldflussdiagramm. Mit den Pfeiltasten zwischen den Flüssen wechseln.",
+    "nodeAria": "{{name}}, {{amount}}",
+    "nodeActionAria": "{{name}}, {{amount}}. {{action}}",
+    "shareOfIncome": "{{pct}} der Einnahmen",
+    "shareOfTotal": "{{pct}} der Summe",
+    "clickTransactions": "Klicken, um Transaktionen zu sehen",
+    "clickCategories": "Klicken, um alle Kategorien zu sehen",
+    "clickSubcategories": "Klicken, um Unterkategorien zu sehen",
+    "action": {
+      "categories": "Alle Kategorien anzeigen",
+      "subcategories": "Unterkategorien anzeigen",
+      "transactions": "Transaktionen anzeigen"
+    },
+    "node": {
+      "total": "Summe",
+      "shortfall": "Fehlbetrag",
+      "refunds": "Nettoerstattungen",
+      "surplus": "Übrig",
+      "uncategorizedIncome": "Nicht kategorisierte Einnahmen",
+      "netSpending": "Nettoausgaben"
+    },
+    "hint": {
+      "total": "Eingänge plus Nettoerstattungen und ein etwaiger Fehlbetrag. Entspricht immer den Ausgängen.",
+      "totalOut": "Alles Ausgegebene und Zurückgelegte, vor Erstattungen.",
+      "shortfall": "Ausgaben und Sparen über die Eingänge hinaus.",
+      "refunds": "Kategorien, in denen Erstattungen die Ausgaben überstiegen.",
+      "saved": "Auf Spar- und Anlagekonten übertragen.",
+      "surplus": "Eingegangen, aber weder ausgegeben noch zurückgelegt.",
+      "uncategorized": "Ausgaben, die noch keine Kategorie haben.",
+      "net": "Was diese Kategorie nach Erstattungen gekostet hat.",
+      "direct": "Der Kategorie selbst zugeordnet, keiner Unterkategorie."
+    },
+    "groupRefunds": "Vor Abzug von {{amount}} Nettoerstattungen.",
+    "categoryRefunds": "Vor Abzug von {{refunds}} Nettoerstattungen. Nettoausgaben: {{net}}."
   },
   "budgetChart": {
     "overBudget": "Über Budget",
@@ -852,6 +915,8 @@
     "automateMatching": "Zuordnung für wiederkehrende Händler automatisieren",
     "loadError": "Ausgabendaten konnten nicht geladen werden.",
     "spentLabel": "Ausgegeben",
+    "excludedCategoriesHint_one": "{{count}} Kategorie ausgeschlossen",
+    "excludedCategoriesHint_other": "{{count}} Kategorien ausgeschlossen",
     "noSpendingInPeriod": "Keine Ausgaben in diesem Zeitraum",
     "whereItWent": "Wohin es ging",
     "whereItWentView": "Ansicht „Wohin es ging“",
@@ -966,6 +1031,7 @@
     "addSource_one": "Quelle hinzufügen ({{count}} verfügbar)",
     "addSource_other": "Quelle hinzufügen ({{count}} verfügbar)",
     "overridesTitle_one": "Anpassung · {{count}}",
-    "overridesTitle_other": "Anpassungen · {{count}}"
+    "overridesTitle_other": "Anpassungen · {{count}}",
+    "sourceMonth": "Quellmonat"
   }
 }

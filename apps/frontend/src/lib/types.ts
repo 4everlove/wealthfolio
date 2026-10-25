@@ -1,5 +1,6 @@
 import { importActivitySchema, importMappingSchema, parseConfigSchema } from "@/lib/schemas";
 import * as z from "zod";
+import type { LoanSetup } from "@/adapters/shared/alternative-assets";
 import {
   AccountType,
   ACTIVITY_TYPE_DISPLAY_NAMES,
@@ -48,7 +49,7 @@ export {
 
 export type { HoldingCategoryFilterId } from "./constants";
 
-export type { ActivitySubtype, ImportRequiredField } from "./constants";
+export type { ActivitySubtype } from "./constants";
 
 export interface PortfolioWithAccounts {
   id: string;
@@ -173,18 +174,39 @@ export interface Activity {
   updatedAt: string;
 }
 
+interface TypedActivity {
+  activityType: string;
+  activityTypeOverride?: string | null;
+}
+
+/**
+ * What Rust's `str::trim` strips (Unicode White_Space), at either end. The
+ * backend reads a blank override with that set; JavaScript's `trim()`
+ * differs (it strips U+FEFF and keeps U+0085).
+ */
+const OVERRIDE_PADDING =
+  /^[\t\n\v\f\r \u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+|[\t\n\v\f\r \u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+$/g;
+
+/**
+ * The user's type override, when it is not blank: a blank override is none,
+ * as the backend and the portfolio engine read it.
+ */
+function typeOverride(activity: TypedActivity): string | undefined {
+  return activity.activityTypeOverride?.replace(OVERRIDE_PADDING, "") || undefined;
+}
+
 /**
  * Helper to get effective type (respects user override)
  */
-export function getEffectiveType(activity: Activity): string {
-  return activity.activityTypeOverride ?? activity.activityType;
+export function getEffectiveType(activity: TypedActivity): string {
+  return typeOverride(activity) ?? activity.activityType;
 }
 
 /**
  * Check if activity has user override
  */
-export function hasUserOverride(activity: Activity): boolean {
-  return activity.activityTypeOverride !== undefined && activity.activityTypeOverride !== null;
+export function hasUserOverride(activity: TypedActivity): boolean {
+  return typeOverride(activity) !== undefined;
 }
 
 /**
@@ -224,6 +246,8 @@ export interface ActivityDetails {
   assetSymbol: string;
   assetName?: string;
   assetQuoteMode?: QuoteMode;
+  /** Currency the asset is quoted in, which can differ from the activity currency. */
+  assetQuoteCcy?: string | null;
   /** Canonical exchange MIC code for asset identification */
   exchangeMic?: string;
   instrumentType?: string;
@@ -245,7 +269,22 @@ export interface ActivityDetails {
   counterpartCurrency?: string | null;
   counterpartFxRate?: string | null;
   subRows?: ActivityDetails[];
+  /**
+   * The account's cash in `cashBalanceCurrency`, as `cashBalanceScope` says:
+   * only when the search asked for balances and the account's holdings come
+   * from its activities.
+   */
+  cashBalance?: string | null;
+  cashBalanceCurrency?: string | null;
+  cashBalanceScope?: CashBalanceScope | null;
 }
+
+/**
+ * What a row's `cashBalance` measures: the cash after the row (`ROW`, cash and
+ * credit-card accounts), or at the end of the row's day in the account
+ * currency (`DAY`, every posted row of that day carries it).
+ */
+export type CashBalanceScope = "ROW" | "DAY";
 
 export interface ActivitySearchResponse {
   data: ActivityDetails[];
@@ -349,6 +388,7 @@ export interface ActivityBulkMutationResult {
 }
 
 export interface InternalTransferPairRequest {
+  editedActivityId?: string;
   transferOutId?: string;
   transferInId?: string;
   sourceGroupId?: string;
@@ -359,6 +399,10 @@ export interface InternalTransferPairRequest {
   destinationAmount: string | number;
   sourceCurrency: string;
   destinationCurrency: string;
+  /** @deprecated Execution-rate hint accepted for compatibility; cash amounts are authoritative.
+   * Never stored in Activity.fxRate (the activity-to-account valuation override).
+   * Derive the transfer rate from destinationAmount / sourceAmount instead.
+   */
   fxRate?: string | number | null;
   notes?: string | null;
   transferMode?: "cash";
@@ -544,9 +588,14 @@ export interface ResolvedQuote {
 
 export interface ExchangeInfo {
   mic: string;
+  operatingMic: string;
+  micType: "OPRT" | "SGMT";
   name: string;
   longName: string;
-  currency: string;
+  countryCode: string;
+  status: "ACTIVE" | "UPDATED";
+  currency?: string | null;
+  configured: boolean;
 }
 
 export interface MarketDataProviderInfo {
@@ -885,10 +934,15 @@ export interface QuoteUpdate {
 }
 
 export interface Settings {
+  insightsOverviewLayout?: Record<string, unknown> | null;
+  /** Read-only restore state, absent on older backends. */
+  restoreReconnectRequired?: boolean;
   theme: string;
   font: string;
   language: string;
   formattingRegion: string;
+  /** Formatting regions for amounts in specific currencies, keyed by currency code. */
+  currencyFormattingRegions?: Record<string, string>;
   baseCurrency: string;
   defaultReturnMetric: "twr" | "irr" | "valueReturn";
   timezone: string;
@@ -1005,12 +1059,15 @@ export interface IncomeSummary {
   byMonth: Record<string, number>;
   byType: Record<string, number>;
   byAsset: Record<string, IncomeByAsset>;
-  byCurrency: Record<string, number>;
+  byCurrency: Record<string, number>; // In each currency
+  byCurrencyBase: Record<string, number>; // Converted to the base currency
   byAccount: Record<string, IncomeByAccount>;
   totalIncome: number;
   currency: string;
   monthlyAverage: number;
   yoyGrowth: number | null; // Changed from optional to nullable
+  /** Currencies with no exchange rate to `currency`, left out of the converted totals. */
+  unconvertedCurrencies: string[];
 }
 
 // Define custom DateRange type matching react-day-picker's
@@ -1395,7 +1452,15 @@ export interface UpdateInfo {
   storeUrl?: string;
   changelogUrl?: string;
   screenshots?: string[];
+  /** Set when something other than the app installs updates. */
+  externalUpdateSource?: ExternalUpdateSource | null;
 }
+
+/** How updates arrive when the in-app updater must leave them to something else. */
+export type ExternalUpdateSource =
+  | { kind: "packager"; explanation: string }
+  | { kind: "flatpak" }
+  | { kind: "packageManager" };
 
 // Platform/Broker type
 export interface Platform {
@@ -1504,6 +1569,8 @@ export interface CreateAlternativeAssetRequest {
   metadata?: Record<string, string>;
   /** For liabilities: optional ID of the financed asset (UI-only linking) */
   linkedAssetId?: string;
+  /** For liabilities: the loan as entered; loan fields are not accepted in `metadata`. */
+  loan?: LoanSetup;
 }
 
 /**
@@ -1689,6 +1756,23 @@ export interface AlternativeAssetHolding {
   linkedAssetId?: string;
   /** Asset notes */
   notes?: string | null;
+  /** For liabilities: what the card shows, from the calculation that values it */
+  loan?: LoanSummary | null;
+}
+
+/** A liability's terms in effect and its milestones, as Holdings values it. */
+export interface LoanSummary {
+  /** Null means no balance is available; original principal is an unconfirmed fallback. */
+  balanceSource?: "recorded" | "schedule" | "original" | null;
+  /** The balance follows a payment schedule rather than manual updates. */
+  scheduled: boolean;
+  originalAmount: number | null;
+  annualRate: number | null;
+  paymentAmount: number | null;
+  frequency: "monthly" | "biweekly" | "accelerated_biweekly" | null;
+  /** When principal and accrued interest are settled; null while a residual remains. */
+  payoffDate: string | null;
+  renewalMaturity: string | null;
 }
 
 /**
@@ -2169,6 +2253,8 @@ export interface SetDefaultProviderRequest {
 export interface FetchedModel {
   id: string;
   name?: string;
+  /** From the provider's model metadata, or the provider's defaults. */
+  capabilities?: ModelCapabilities;
 }
 
 /**

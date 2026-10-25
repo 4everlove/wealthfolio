@@ -13,12 +13,45 @@ const base: TransferValidationInput = {
   direction: "out",
   toAccountId: "",
   amount: 1000,
+  sourceCurrency: "USD",
+  destinationCurrency: "USD",
   assetId: null,
   quantity: null,
   unitPrice: null,
 };
 
 describe("validateTransferFields", () => {
+  it("allows same-account cash exchanges but not same-currency or securities self-transfers", () => {
+    const exchange = {
+      ...base,
+      accountId: "a",
+      toAccountId: "a",
+      isExternal: false,
+      sourceCurrency: "USD",
+      destinationCurrency: "EUR",
+      sourceAmount: 100,
+      destinationAmount: 92,
+    };
+    expect(validateTransferFields(exchange)).toBeNull();
+    for (const [sourceCurrency, destinationCurrency] of [
+      ["USD", "USD"],
+      ["GBp", "GBP"],
+      ["GBX", "GBP"],
+    ]) {
+      expect(
+        validateTransferFields({ ...exchange, sourceCurrency, destinationCurrency })?.field,
+      ).toBe("destinationCurrency");
+    }
+    expect(
+      validateTransferFields({
+        ...exchange,
+        transferMode: "securities",
+        assetId: "AAPL",
+        quantity: 1,
+      })?.field,
+    ).toBe("toAccountId");
+  });
+
   // ── Non-transfer types are always valid ──────────────────────────
   it("returns null for non-transfer activity types", () => {
     expect(validateTransferFields({ ...base, activityType: "BUY" })).toBeNull();
@@ -54,6 +87,8 @@ describe("validateTransferFields", () => {
         activityType: "TRANSFER_OUT",
         amount: 500,
         toAccountId: "acc-2",
+        sourceCurrency: "USD",
+        destinationCurrency: "USD",
       });
       expect(result).toBeNull();
     });

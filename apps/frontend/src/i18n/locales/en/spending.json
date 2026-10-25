@@ -36,6 +36,11 @@
     "transactionCount_other": "{{count}} transactions",
     "editCategoryTitle": "Edit category",
     "deleteCategoryTitle": "Delete category",
+    "excludeLabel": "Exclude from spending",
+    "excludeDescription": "Hidden from totals, charts, insights, and budgets",
+    "excludeDisabledParent": "Excluded because its parent category is excluded",
+    "excludedTooltip": "Excluded from spending",
+    "excludedWithParent": "Excluded with {{name}}",
     "categoryActions": "Category actions",
     "deleteTitle": "Delete Category",
     "deleteConfirm": "Are you sure you want to delete \"{{name}}\"?",
@@ -44,6 +49,13 @@
     "searchCategories": "Search categories...",
     "noCategoriesFound": "No categories found.",
     "clearCategory": "Clear category"
+  },
+  "activityTypes": {
+    "balanceTransferCashAdvance": "Balance Transfer / Cash Advance",
+    "charge": "Charge",
+    "interestCharge": "Interest Charge",
+    "refundCredit": "Refund / Credit",
+    "reimbursementRefund": "Reimbursement / refund"
   },
   "rules": {
     "editTitle": "Edit Rule",
@@ -212,6 +224,12 @@
     "filteredNet": "Filtered net"
   },
   "period": {
+    "selectDates": "Select dates",
+    "chooseCustomDates": "Choose custom dates",
+    "chooseMonth": "Choose a month",
+    "startDate": "Start date",
+    "endDate": "End date",
+    "invalidRange": "End date must be on or after start date",
     "thisMonth": "This month",
     "mtdShort": "MTD",
     "lastMonth": "Last month",
@@ -384,6 +402,7 @@
     "loadMore_other": "Load {{count}} more"
   },
   "heatmapSheet": {
+    "customSubtitle": "Transactions in the selected period",
     "eyebrow": "When you spend",
     "activity": "Activity",
     "subtitle": "Last 12 weeks · spending in this weekday + hour",
@@ -531,6 +550,10 @@
     "multiCurrencyDetail": "totals shown in {{currency}}, FX-converted from {{foreign}} using rates from {{asOfDate}}."
   },
   "whenYouSpend": {
+    "customSubtitle": "Selected period · spending intensity by weekday and hour.",
+    "customSubtitleShort": "Selected period",
+    "customNoActivity": "No cash activity in the selected period.",
+    "customLegendIntro": "Each cell is one weekday-hour over the selected period.",
     "title": "When you spend",
     "subtitle": "Last 12 weeks · spending intensity by weekday and hour.",
     "subtitleShort": "Last 12 weeks",
@@ -687,6 +710,7 @@
     "spentMonths": "SPENT · {{months}} MO",
     "vsMonth": "vs {{month}}",
     "vsPrior": "vs prior",
+    "vsRange": "vs {{from}} – {{to}}",
     "moreCount": "+{{count}} more",
     "netCashflow": "NET CASHFLOW",
     "leftOver": "Left over {{pct}}",
@@ -695,12 +719,7 @@
     "noIncome": "No income in selected accounts for this period.",
     "spent": "Spent",
     "saved": "Saved",
-    "incomeSaving": "Income & saving",
-    "nonSpendingCashflow": "Non-spending cashflow for {{period}}.",
-    "moneyIn": "Money in",
-    "incomeSources": "Income sources",
     "setAside": "Set aside",
-    "savingDestinations": "Saving destinations",
     "sortSpent": "spent",
     "sortChange": "change",
     "sortName": "name",
@@ -714,9 +733,53 @@
     "sortByLabel": "Sort by {{label}}",
     "categoriesShown_one": "{{shown}} of {{total}} category shown",
     "categoriesShown_other": "{{shown}} of {{total}} categories shown",
+    "excludedInSettings_one": "{{count}} excluded in settings",
+    "excludedInSettings_other": "{{count}} excluded in settings",
     "openTransactions": "Open transactions →",
     "moreCount_one": "+{{count}} more",
     "moreCount_other": "+{{count}} more"
+  },
+  "moneyFlow": {
+    "title": "Money flow",
+    "subtitle": "Where your money came from and where it went for {{period}}.",
+    "focusSubtitle": "Every category for {{period}}.",
+    "focusSubcategoriesSubtitle": "Every subcategory for {{period}}.",
+    "back": "All flows",
+    "backTo": "Back to {{name}}",
+    "chartLabel": "Money flow chart. Use the arrow keys to move between flows.",
+    "nodeAria": "{{name}}, {{amount}}",
+    "nodeActionAria": "{{name}}, {{amount}}. {{action}}",
+    "shareOfIncome": "{{pct}} of income",
+    "shareOfTotal": "{{pct}} of total",
+    "clickTransactions": "Click to see transactions",
+    "clickCategories": "Click to see every category",
+    "clickSubcategories": "Click to see subcategories",
+    "action": {
+      "categories": "Show every category",
+      "subcategories": "Show subcategories",
+      "transactions": "View transactions"
+    },
+    "node": {
+      "total": "Total",
+      "shortfall": "Shortfall",
+      "refunds": "Net refunds",
+      "surplus": "Left over",
+      "uncategorizedIncome": "Uncategorized income",
+      "netSpending": "Net spending"
+    },
+    "hint": {
+      "total": "Money in, plus net refunds and any shortfall. It always equals money out.",
+      "totalOut": "Everything spent and set aside, before any refunds.",
+      "shortfall": "Spending and saving beyond what came in.",
+      "refunds": "Categories where refunds were larger than spending.",
+      "saved": "Moved to savings and investment accounts.",
+      "surplus": "Came in but wasn't spent or set aside.",
+      "uncategorized": "Spending that doesn't have a category yet.",
+      "net": "What this category cost after refunds.",
+      "direct": "Assigned to the category itself, not to a subcategory."
+    },
+    "groupRefunds": "Before subtracting {{amount}} in net refunds.",
+    "categoryRefunds": "Before subtracting {{refunds}} in net refunds. Net spending: {{net}}."
   },
   "budgetChart": {
     "overBudget": "Over budget",
@@ -852,6 +915,8 @@
     "automateMatching": "Automate matching for recurring merchants",
     "loadError": "Couldn't load spending data.",
     "spentLabel": "Spent",
+    "excludedCategoriesHint_one": "{{count}} category excluded",
+    "excludedCategoriesHint_other": "{{count}} categories excluded",
     "noSpendingInPeriod": "No spending in this period",
     "whereItWent": "Where it went",
     "whereItWentView": "Where it went view",
@@ -966,6 +1031,7 @@
     "addSource_one": "Add source ({{count}} available)",
     "addSource_other": "Add source ({{count}} available)",
     "overridesTitle_one": "Override · {{count}}",
-    "overridesTitle_other": "Overrides · {{count}}"
+    "overridesTitle_other": "Overrides · {{count}}",
+    "sourceMonth": "Source month"
   }
 }

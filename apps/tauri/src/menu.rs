@@ -1,27 +1,63 @@
-use tauri::menu::{Menu, MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder};
+#[cfg(not(target_os = "linux"))]
+use tauri::menu::PredefinedMenuItem;
+use tauri::menu::{Menu, MenuBuilder, MenuItemBuilder, SubmenuBuilder};
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 use tauri_plugin_dialog::DialogExt;
 
 pub fn create_menu<R: Runtime>(app: &AppHandle<R>) -> Result<Menu<R>, tauri::Error> {
     let app_menu = SubmenuBuilder::new(app, "Wealthfolio")
         .item(&MenuItemBuilder::with_id("open_settings", "Settings...").build(app)?)
-        .separator()
-        .item(&PredefinedMenuItem::hide(app, None).unwrap())
-        .item(&PredefinedMenuItem::hide_others(app, None).unwrap())
-        .item(&PredefinedMenuItem::show_all(app, None).unwrap())
-        .separator()
-        .item(&PredefinedMenuItem::quit(app, None)?)
-        .build()?;
+        .separator();
+    // Only macOS gets the predefined Hide, Hide Others and Show All. On Windows,
+    // muda 0.20 shows Hide Others and Show All disabled, and Hide hides the
+    // window with nothing to show it again. On GTK 3 it shows all three
+    // disabled, along with Quit, Undo and Redo, which Linux handles in
+    // handle_menu_event.
+    #[cfg(target_os = "macos")]
+    let app_menu = app_menu
+        .item(&PredefinedMenuItem::hide(app, None)?)
+        .item(&PredefinedMenuItem::hide_others(app, None)?)
+        .item(&PredefinedMenuItem::show_all(app, None)?)
+        .separator();
+    #[cfg(target_os = "linux")]
+    let app_menu = app_menu.item(&MenuItemBuilder::with_id("quit", "Quit").build(app)?);
+    #[cfg(not(target_os = "linux"))]
+    let app_menu = app_menu.item(&PredefinedMenuItem::quit(app, None)?);
+    let app_menu = app_menu.build()?;
 
-    let edit_menu = SubmenuBuilder::new(app, "Edit")
-        .item(&PredefinedMenuItem::undo(app, None).unwrap())
-        .item(&PredefinedMenuItem::redo(app, None).unwrap())
+    let edit_menu = SubmenuBuilder::new(app, "Edit");
+    // On GTK 3, muda 0.20's predefined Cut, Copy, Paste and Select All only work
+    // through libxdo, which isn't enabled, so Linux handles them in
+    // handle_menu_event too. They get no accelerators: WebKitGTK and the data
+    // grid's keydown handler already handle those keys, and an accelerator
+    // would take them first.
+    #[cfg(target_os = "linux")]
+    let edit_menu = edit_menu
+        .item(
+            &MenuItemBuilder::with_id("Undo", "Undo")
+                .accelerator("Ctrl+Z")
+                .build(app)?,
+        )
+        .item(
+            &MenuItemBuilder::with_id("Redo", "Redo")
+                .accelerator("Ctrl+Shift+Z")
+                .build(app)?,
+        )
         .separator()
-        .item(&PredefinedMenuItem::cut(app, None).unwrap())
-        .item(&PredefinedMenuItem::copy(app, None).unwrap())
-        .item(&PredefinedMenuItem::paste(app, None).unwrap())
-        .item(&PredefinedMenuItem::select_all(app, None).unwrap())
-        .build()?;
+        .item(&MenuItemBuilder::with_id("Cut", "Cut").build(app)?)
+        .item(&MenuItemBuilder::with_id("Copy", "Copy").build(app)?)
+        .item(&MenuItemBuilder::with_id("Paste", "Paste").build(app)?)
+        .item(&MenuItemBuilder::with_id("SelectAll", "Select All").build(app)?);
+    #[cfg(not(target_os = "linux"))]
+    let edit_menu = edit_menu
+        .item(&PredefinedMenuItem::undo(app, None)?)
+        .item(&PredefinedMenuItem::redo(app, None)?)
+        .separator()
+        .item(&PredefinedMenuItem::cut(app, None)?)
+        .item(&PredefinedMenuItem::copy(app, None)?)
+        .item(&PredefinedMenuItem::paste(app, None)?)
+        .item(&PredefinedMenuItem::select_all(app, None)?);
+    let edit_menu = edit_menu.build()?;
 
     let view_menu = SubmenuBuilder::new(app, "View")
         .item(
@@ -56,6 +92,22 @@ pub fn handle_menu_event(app: &AppHandle, event_id: &str) {
             if let Some(window) = app.get_webview_window("main") {
                 let payload = serde_json::json!({ "route": "/settings/general" });
                 let _ = window.emit("navigate-to-route", payload);
+            }
+        }
+        // Linux only (see create_menu). exit(0) still runs the RunEvent::Exit
+        // cleanup in lib.rs.
+        #[cfg(target_os = "linux")]
+        "quit" => app.exit(0),
+        // On Linux the Edit menu's IDs are WebKitGTK editing commands, which,
+        // unlike document.execCommand run through eval, can also paste.
+        #[cfg(target_os = "linux")]
+        "Undo" | "Redo" | "Cut" | "Copy" | "Paste" | "SelectAll" => {
+            if let Some(window) = app.get_webview_window("main") {
+                let command = event_id.to_owned();
+                let _ = window.with_webview(move |webview| {
+                    use webkit2gtk::WebViewExt;
+                    webview.inner().execute_editing_command(&command);
+                });
             }
         }
         "report_issue" => {
@@ -94,7 +146,10 @@ pub fn handle_menu_event(app: &AppHandle, event_id: &str) {
                         // Error - show native dialog
                         app_handle
                             .dialog()
-                            .message(format!("Failed to check for updates: {}", e))
+                            .message(native_dialog_text(&format!(
+                                "Failed to check for updates: {}",
+                                e
+                            )))
                             .title("Update Check Failed")
                             .show(|_| {});
                     }
@@ -112,5 +167,32 @@ pub fn handle_menu_event(app: &AppHandle, event_id: &str) {
                 .show(|_| {});
         }
         _ => {}
+    }
+}
+
+/// rfd's GTK backend passes dialog text to GTK as a printf format string
+/// (PolyMeilex/rfd#343), so a literal `%` (in an error message, say) must be
+/// doubled there. Remove this once tauri-plugin-dialog uses an rfd with
+/// that fixed, or the doubled `%%` will show.
+fn native_dialog_text(text: &str) -> String {
+    if cfg!(target_os = "linux") {
+        text.replace('%', "%%")
+    } else {
+        text.to_owned()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_dialog_text_keeps_percent_signs_literal() {
+        let expected = if cfg!(target_os = "linux") {
+            "Run %%s or 100%% with apt."
+        } else {
+            "Run %s or 100% with apt."
+        };
+        assert_eq!(native_dialog_text("Run %s or 100% with apt."), expected);
     }
 }

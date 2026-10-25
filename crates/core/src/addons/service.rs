@@ -243,8 +243,19 @@ pub fn detect_addon_permissions(addon_files: &[AddonFile]) -> Vec<AddonPermissio
                 "checkImport",
                 "getImportMapping",
                 "saveImportMapping",
+                "getTransferPair",
+                "findTransferMatchCandidates",
+                "saveTransferPair",
+                "linkTransfer",
+                "unlinkTransfer",
             ],
             "Access to transaction history and activity management",
+        ),
+        (
+            "activities",
+            "spending",
+            vec!["searchCashActivities"],
+            "Access to categorized spending transactions",
         ),
         (
             "accounts",
@@ -318,12 +329,13 @@ pub fn detect_addon_permissions(addon_files: &[AddonFile]) -> Vec<AddonPermissio
             vec![
                 "isEnabled",
                 "getCategories",
+                "getReport",
                 "getRules",
                 "saveRule",
                 "deleteRule",
                 "rerunRules",
             ],
-            "Access to spend categories and categorization rules",
+            "Access to spending reports, categories, and categorization rules",
         ),
         (
             "settings",
@@ -1400,7 +1412,7 @@ pub fn read_addon_files_recursive(
             // Recursively read subdirectories
             read_addon_files_recursive(&file_path, base_dir, files)?;
         } else if file_path.is_file() {
-            let file_name = file_path.file_name().unwrap().to_string_lossy().to_string();
+            let file_name = entry.file_name().to_string_lossy().to_string();
 
             // Skip the manifest file
             if file_name == "manifest.json" {
@@ -1650,7 +1662,7 @@ pub async fn check_addon_update_from_api(
         ADDON_STORE_API_BASE_URL, addon_id, current_version
     );
 
-    let client = reqwest::Client::new();
+    let client = wealthfolio_http::client();
     let response = create_request_with_headers(&client, reqwest::Method::GET, &api_url)
         .send()
         .await
@@ -1709,7 +1721,7 @@ async fn download_addon_package_with_optional_sha256(
 ) -> Result<Vec<u8>, String> {
     log::info!("Downloading addon package from URL: {}", download_url);
 
-    let client = reqwest::Client::new();
+    let client = wealthfolio_http::client();
     let mut request = client.get(download_url);
 
     // Always add User-Agent, with version if available
@@ -1824,7 +1836,7 @@ pub async fn download_addon_from_store(addon_id: &str) -> Result<Vec<u8>, String
         addon_id,
         download_api_url
     );
-    let client = reqwest::Client::new();
+    let client = wealthfolio_http::client();
     let response = create_request_with_headers(&client, reqwest::Method::GET, &download_api_url)
         .send()
         .await
@@ -2114,7 +2126,7 @@ pub async fn fetch_addon_store_listings() -> Result<Vec<serde_json::Value>, Stri
     // Fetch all addons and let frontend filter by status
     let api_url = ADDON_STORE_API_BASE_URL.to_string();
 
-    let client = reqwest::Client::new();
+    let client = wealthfolio_http::client();
     let response = create_request_with_headers(&client, reqwest::Method::GET, &api_url)
         .send()
         .await
@@ -2192,7 +2204,7 @@ pub async fn submit_addon_rating(
         request_body["review"] = serde_json::Value::String(review_text);
     }
 
-    let client = reqwest::Client::new();
+    let client = wealthfolio_http::client();
     let response = create_request_with_headers(&client, reqwest::Method::POST, &api_url)
         .header("X-Instance-Id", rating_instance_id)
         .json(&request_body)
@@ -2242,6 +2254,9 @@ pub struct AddonService {
     storage_repo: Arc<dyn AddonStorageRepositoryTrait>,
     package_access: RwLock<()>,
     asset_indexes: Mutex<HashMap<PathBuf, CachedAddonAssets>>,
+    /// Manifests of addons served by a local dev server, keyed by addon id.
+    /// Only populated in debug builds; never persisted.
+    dev_manifests: RwLock<HashMap<String, AddonManifest>>,
 }
 
 impl AddonService {
@@ -2256,7 +2271,50 @@ impl AddonService {
             storage_repo,
             package_access: RwLock::new(()),
             asset_indexes: Mutex::new(HashMap::new()),
+            dev_manifests: RwLock::new(HashMap::new()),
         }
+    }
+
+    /// Registers the manifest of an addon loaded from a dev server so brokered
+    /// network requests can be authorized without installing the addon. The
+    /// declared hosts are treated as approved, and a registered dev manifest
+    /// takes precedence over an installed addon with the same id.
+    pub fn register_dev_addon_manifest(&self, manifest_json: &str) -> Result<(), String> {
+        let mut manifest = parse_manifest_json_metadata(manifest_json)?;
+        if let Some(network) = manifest.network.as_mut() {
+            network.approved_hosts = network.allowed_hosts.clone();
+        }
+        log::info!(
+            "Registered dev addon manifest for '{}' (approved hosts: {:?})",
+            manifest.id,
+            manifest
+                .network
+                .as_ref()
+                .map(|network| network.approved_hosts.as_slice())
+                .unwrap_or_default()
+        );
+        self.dev_manifests
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(manifest.id.clone(), manifest);
+        Ok(())
+    }
+
+    fn dev_manifest(&self, addon_id: &str) -> Option<AddonManifest> {
+        self.dev_manifests
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(addon_id)
+            .cloned()
+    }
+
+    pub fn unregister_dev_addon_manifest(&self, addon_id: &str) -> Result<(), String> {
+        validate_addon_id(addon_id)?;
+        self.dev_manifests
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(addon_id);
+        Ok(())
     }
 
     fn package_read_guard(
@@ -3176,7 +3234,11 @@ impl AddonServiceTrait for AddonService {
         addon_id: &str,
         request: AddonNetworkRequest,
     ) -> Result<AddonNetworkResponse, String> {
-        let result = match self.enabled_manifest_for_addon(addon_id) {
+        let manifest = match self.dev_manifest(addon_id) {
+            Some(manifest) => Ok(manifest),
+            None => self.enabled_manifest_for_addon(addon_id),
+        };
+        let result = match manifest {
             Ok(manifest) => {
                 if (request.auth.is_some() || request.injected_authorization.is_some())
                     && !Self::manifest_allows_function(&manifest, "secrets", "use")

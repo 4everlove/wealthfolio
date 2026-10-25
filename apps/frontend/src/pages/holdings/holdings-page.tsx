@@ -1,6 +1,13 @@
 import { Button } from "@wealthfolio/ui/components/ui/button";
 import { Icons } from "@wealthfolio/ui/components/ui/icons";
-import { EmptyPlaceholder } from "@wealthfolio/ui";
+import {
+  Empty,
+  EmptyHeader,
+  EmptyMedia,
+  EmptyTitle,
+  EmptyDescription,
+  EmptyContent,
+} from "@wealthfolio/ui";
 import { useCallback, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigate, useSearchParams } from "react-router-dom";
@@ -26,6 +33,7 @@ import {
 } from "@/lib/constants";
 import {
   AccountScope,
+  Holding,
   HoldingType,
   AlternativeAssetHolding,
   AlternativeAssetKind,
@@ -35,6 +43,7 @@ import { useIsMobileViewport } from "@/hooks/use-platform";
 import { HoldingsTable } from "./components/holdings-table";
 import { HoldingsTableMobile } from "./components/holdings-table-mobile";
 import { AlternativeHoldingsTable } from "./components/alternative-holdings-table";
+import { LiabilityOverview } from "./components/liability-overview";
 import { AlternativeHoldingsListMobile } from "./components/alternative-holdings-list-mobile";
 import { HoldingsEditMode } from "./components/holdings-edit-mode";
 import {
@@ -55,6 +64,7 @@ import {
   AlternativeAssetQuickAddModal,
   AssetDetailsSheet,
   UpdateValuationModal,
+  toLinkedLiability,
   type AssetDetailsSheetAsset,
   type LinkableAsset,
   type LinkedLiability,
@@ -65,6 +75,7 @@ import { useUpdatePortfolioMutation } from "@/hooks/use-calculate-portfolio";
 import { useQueryClient } from "@tanstack/react-query";
 import { QueryKeys } from "@/lib/query-keys";
 import { useSettingsContext } from "@/lib/settings-provider";
+import type { LoanSetup } from "@/adapters/shared/alternative-assets";
 
 export const HoldingsPage = () => {
   const { t } = useTranslation();
@@ -213,15 +224,33 @@ export const HoldingsPage = () => {
     setEditAsset(assetForSheet);
   }, []);
 
+  // Stable so HoldingsTable keeps its memoized columns across page re-renders.
+  const handleClassify = useCallback((holding: Holding) => {
+    setClassifyAsset({
+      id: holding.instrument?.id ?? holding.id,
+      symbol: holding.instrument?.symbol ?? holding.id,
+      name: holding.instrument?.name ?? undefined,
+      exchangeMic: holding.instrument?.exchangeMic,
+      instrumentType: holding.instrument?.instrumentType,
+    });
+  }, []);
+
   // Handler to save asset details
   const handleSaveAssetDetails = useCallback(
-    async (assetId: string, metadata: Record<string, string>, name?: string) => {
+    async (
+      assetId: string,
+      metadata: Record<string, string>,
+      name?: string,
+      notes?: string | null,
+      loan?: LoanSetup,
+    ) => {
       setIsSavingDetails(true);
       try {
-        await updateAlternativeAssetMetadata(assetId, metadata, name);
-        // Invalidate queries to refresh the list
+        await updateAlternativeAssetMetadata(assetId, metadata, name, notes, loan);
+        // Invalidate queries to refresh the list and the asset detail page
         queryClient.invalidateQueries({ queryKey: [QueryKeys.ALTERNATIVE_HOLDINGS] });
         queryClient.invalidateQueries({ queryKey: [QueryKeys.NET_WORTH] });
+        queryClient.invalidateQueries({ queryKey: [QueryKeys.ASSET_DATA] });
       } finally {
         setIsSavingDetails(false);
       }
@@ -286,11 +315,7 @@ export const HoldingsPage = () => {
           const linkedAssetId = metadata?.linked_asset_id;
           return linkedAssetId === propertyId;
         })
-        .map((h) => ({
-          id: h.id,
-          name: h.name,
-          balance: h.marketValue,
-        }));
+        .map(toLinkedLiability);
     },
     [liabilitiesHoldings],
   );
@@ -301,18 +326,14 @@ export const HoldingsPage = () => {
       return liabilitiesHoldings
         .filter((h) => {
           const metadata = h.metadata as Record<string, unknown> | null | undefined;
-          const liabilityType = metadata?.liability_type;
+          const liabilityType = metadata?.sub_type ?? metadata?.liability_type;
           const linkedAssetId = metadata?.linked_asset_id;
           // Only mortgages that are not linked to any asset (or linked to this property for re-linking)
           return (
             liabilityType === "mortgage" && (!linkedAssetId || linkedAssetId === excludePropertyId)
           );
         })
-        .map((h) => ({
-          id: h.id,
-          name: h.name,
-          balance: h.marketValue,
-        }));
+        .map(toLinkedLiability);
     },
     [liabilitiesHoldings],
   );
@@ -482,41 +503,46 @@ export const HoldingsPage = () => {
         />
       ) : hasNoInvestments ? (
         <div className="flex items-center justify-center py-16">
-          <EmptyPlaceholder
-            icon={<Icons.TrendingUp className="text-muted-foreground h-10 w-10" />}
-            title={t("holdings:empty_no_holdings_yet")}
-            description={
-              canEditHoldings
-                ? t("holdings:empty_get_started_manual")
-                : t("holdings:empty_get_started_transaction")
-            }
-          >
-            <div className="flex flex-col items-center gap-3 sm:flex-row">
-              {canEditHoldings ? (
-                <>
-                  <Button size="default" onClick={() => setIsEditMode(true)}>
-                    <Icons.Pencil className="mr-2 h-4 w-4" />
-                    {t("holdings:update_holdings")}
-                  </Button>
-                  <Button size="default" variant="outline" onClick={() => navigate("/import")}>
-                    <Icons.Import className="mr-2 h-4 w-4" />
-                    {t("holdings:import_from_csv")}
-                  </Button>
-                </>
-              ) : (
-                <>
-                  <Button size="default" onClick={() => navigate("/activities/manage")}>
-                    <Icons.Plus className="mr-2 h-4 w-4" />
-                    {t("holdings:add_transaction")}
-                  </Button>
-                  <Button size="default" variant="outline" onClick={() => navigate("/import")}>
-                    <Icons.Import className="mr-2 h-4 w-4" />
-                    {t("holdings:import_from_csv")}
-                  </Button>
-                </>
-              )}
-            </div>
-          </EmptyPlaceholder>
+          <Empty>
+            <EmptyHeader>
+              <EmptyMedia variant="icon">
+                {<Icons.TrendingUp className="text-muted-foreground size-10" />}
+              </EmptyMedia>
+              <EmptyTitle>{t("holdings:empty_no_holdings_yet")}</EmptyTitle>
+              <EmptyDescription>
+                {canEditHoldings
+                  ? t("holdings:empty_get_started_manual")
+                  : t("holdings:empty_get_started_transaction")}
+              </EmptyDescription>
+            </EmptyHeader>
+            <EmptyContent>
+              <div className="flex flex-col items-center gap-3 sm:flex-row">
+                {canEditHoldings ? (
+                  <>
+                    <Button size="default" onClick={() => setIsEditMode(true)}>
+                      <Icons.Pencil className="me-2 h-4 w-4" />
+                      {t("holdings:update_holdings")}
+                    </Button>
+                    <Button size="default" variant="outline" onClick={() => navigate("/import")}>
+                      <Icons.Import className="me-2 h-4 w-4" />
+                      {t("holdings:import_from_csv")}
+                    </Button>
+                  </>
+                ) : (
+                  <>
+                    <Button size="default" onClick={() => navigate("/activities/manage")}>
+                      <Icons.Plus className="me-2 h-4 w-4" />
+                      {t("holdings:add_transaction")}
+                    </Button>
+                    <Button size="default" variant="outline" onClick={() => navigate("/import")}>
+                      <Icons.Import className="me-2 h-4 w-4" />
+                      {t("holdings:import_from_csv")}
+                    </Button>
+                  </>
+                )}
+              </div>
+            </EmptyContent>
+          </Empty>
         </div>
       ) : (
         <>
@@ -528,15 +554,7 @@ export const HoldingsPage = () => {
               visibilityFilters={effectiveVisibilityFilters}
               setVisibilityFilters={handleVisibilityFiltersChange}
               showClosedPositions={showClosedPositions}
-              onClassify={(holding) =>
-                setClassifyAsset({
-                  id: holding.instrument?.id ?? holding.id,
-                  symbol: holding.instrument?.symbol ?? holding.id,
-                  name: holding.instrument?.name ?? undefined,
-                  exchangeMic: holding.instrument?.exchangeMic,
-                  instrumentType: holding.instrument?.instrumentType,
-                })
-              }
+              onClassify={handleClassify}
             />
           </div>
 
@@ -593,16 +611,21 @@ export const HoldingsPage = () => {
     <>
       {hasNoAssets ? (
         <div className="flex items-center justify-center py-16">
-          <EmptyPlaceholder
-            icon={<Icons.Wallet className="text-muted-foreground h-10 w-10" />}
-            title={t("holdings:empty_no_assets_yet")}
-            description={t("holdings:empty_add_first_asset")}
-          >
-            <Button size="default" onClick={() => setIsAlternativeAssetModalOpen(true)}>
-              <Icons.Plus className="mr-2 h-4 w-4" />
-              {t("holdings:add_asset")}
-            </Button>
-          </EmptyPlaceholder>
+          <Empty>
+            <EmptyHeader>
+              <EmptyMedia variant="icon">
+                {<Icons.Wallet className="text-muted-foreground size-10" />}
+              </EmptyMedia>
+              <EmptyTitle>{t("holdings:empty_no_assets_yet")}</EmptyTitle>
+              <EmptyDescription>{t("holdings:empty_add_first_asset")}</EmptyDescription>
+            </EmptyHeader>
+            <EmptyContent>
+              <Button size="default" onClick={() => setIsAlternativeAssetModalOpen(true)}>
+                <Icons.Plus className="me-2 h-4 w-4" />
+                {t("holdings:add_asset")}
+              </Button>
+            </EmptyContent>
+          </Empty>
         </div>
       ) : (
         <>
@@ -639,43 +662,31 @@ export const HoldingsPage = () => {
     <>
       {hasNoLiabilities ? (
         <div className="flex items-center justify-center py-16">
-          <EmptyPlaceholder
-            icon={<Icons.CreditCard className="text-muted-foreground h-10 w-10" />}
-            title={t("holdings:empty_no_liabilities_yet")}
-            description={t("holdings:empty_track_debts")}
-          >
-            <Button size="default" onClick={() => setIsAlternativeAssetModalOpen(true)}>
-              <Icons.Plus className="mr-2 h-4 w-4" />
-              {t("holdings:add_liability")}
-            </Button>
-          </EmptyPlaceholder>
+          <Empty>
+            <EmptyHeader>
+              <EmptyMedia variant="icon">
+                {<Icons.CreditCard className="text-muted-foreground size-10" />}
+              </EmptyMedia>
+              <EmptyTitle>{t("holdings:empty_no_liabilities_yet")}</EmptyTitle>
+              <EmptyDescription>{t("holdings:empty_track_debts")}</EmptyDescription>
+            </EmptyHeader>
+            <EmptyContent>
+              <Button size="default" onClick={() => setIsAlternativeAssetModalOpen(true)}>
+                <Icons.Plus className="me-2 h-4 w-4" />
+                {t("holdings:add_liability")}
+              </Button>
+            </EmptyContent>
+          </Empty>
         </div>
       ) : (
-        <>
-          {/* Desktop View */}
-          <div className="hidden md:block">
-            <AlternativeHoldingsTable
-              holdings={liabilitiesHoldings}
-              isLoading={isDataLoading}
-              emptyTitle={t("holdings:empty_no_liabilities")}
-              emptyDescription={t("holdings:empty_add_first_liability_button")}
-              onEdit={handleEditAsset}
-              onUpdateValue={setUpdateValueAsset}
-              onViewHistory={handleViewHistory}
-              onDelete={handleDeleteAsset}
-              onRowClick={handleRowClick}
-              isDeleting={isDeleting}
-            />
-          </div>
-          {/* Mobile View */}
-          <div className="block md:hidden">
-            <AlternativeHoldingsListMobile
-              holdings={liabilitiesHoldings}
-              isLoading={isDataLoading}
-              onRowClick={handleRowClick}
-            />
-          </div>
-        </>
+        <LiabilityOverview
+          holdings={liabilitiesHoldings}
+          isLoading={isDataLoading}
+          onEdit={handleEditAsset}
+          onViewHistory={handleViewHistory}
+          onDelete={handleDeleteAsset}
+          isDeleting={isDeleting}
+        />
       )}
     </>
   );
@@ -690,7 +701,7 @@ export const HoldingsPage = () => {
         {/* Show Update button for HOLDINGS-mode manual accounts (only on investments tab) */}
         {canEditHoldings && !isEditMode && currentTab === "investments" && (
           <Button size="sm" variant="outline" onClick={() => setIsEditMode(true)}>
-            <Icons.Pencil className="mr-2 h-4 w-4" />
+            <Icons.Pencil className="me-2 h-4 w-4" />
             {t("holdings:update")}
           </Button>
         )}

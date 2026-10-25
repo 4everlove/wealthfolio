@@ -1,6 +1,7 @@
 import { useMemo } from "react";
 import { useWealthfolioConnect } from "../providers/wealthfolio-connect-provider";
-import { hasBrokerSync } from "../lib/plan-capabilities";
+import { getLastBrokerSyncAt } from "../lib/connect-overview";
+import { hasBrokerSync, isSubscriptionStatusActive } from "../lib/plan-capabilities";
 import { useSyncStates } from "./use-sync-states";
 import type { AggregatedSyncStatus, BrokerSyncState } from "../types";
 
@@ -40,35 +41,49 @@ function determineAggregatedStatus(
 }
 
 export function useAggregatedSyncStatus() {
-  const { isConnected, userInfo, isEnabled } = useWealthfolioConnect();
+  const {
+    isConnected,
+    userInfo,
+    isEnabled,
+    isInitializing,
+    isLoadingUserInfo,
+    isSessionUnavailable,
+    error,
+  } = useWealthfolioConnect();
   const showBrokerSync = hasBrokerSync(userInfo);
   const { data: syncStates = [], isLoading } = useSyncStates({ enabled: showBrokerSync });
 
   // Determine if user has an active subscription
   const hasSubscription = useMemo(() => {
-    if (!userInfo?.team) return false;
-    const status = userInfo.team.subscription_status;
-    return status === "active" || status === "trialing";
+    return isSubscriptionStatusActive(userInfo?.team?.subscription_status);
   }, [userInfo]);
 
   const status = useMemo<AggregatedSyncStatus>(() => {
     if (!isEnabled) return "not_connected";
-    if (!isConnected || !hasSubscription) return "not_connected";
+    if (isInitializing || (isConnected && isLoadingUserInfo && !userInfo)) return "restoring";
+    if (isSessionUnavailable || (isConnected && !userInfo && error)) return "unavailable";
+    if (!isConnected) return "not_connected";
+    if (userInfo && !hasSubscription) return "subscription_required";
+    if (!userInfo) return "restoring";
     if (!showBrokerSync) return "idle";
     return determineAggregatedStatus(isConnected, hasSubscription, syncStates);
-  }, [isEnabled, showBrokerSync, isConnected, hasSubscription, syncStates]);
+  }, [
+    isEnabled,
+    showBrokerSync,
+    isConnected,
+    hasSubscription,
+    userInfo,
+    syncStates,
+    isInitializing,
+    isLoadingUserInfo,
+    isSessionUnavailable,
+    error,
+  ]);
 
-  // Find the last successful sync time across all states
+  // When sync last ran. lastSuccessfulAt is the provider's data date, which can lag by days.
   const lastSyncTime = useMemo(() => {
-    if (!showBrokerSync || syncStates.length === 0) return null;
-
-    const successfulSyncs = syncStates
-      .filter((s) => s.lastSuccessfulAt)
-      .map((s) => new Date(s.lastSuccessfulAt!).getTime());
-
-    if (successfulSyncs.length === 0) return null;
-
-    return new Date(Math.max(...successfulSyncs)).toISOString();
+    if (!showBrokerSync) return null;
+    return getLastBrokerSyncAt(syncStates, [])?.toISOString() ?? null;
   }, [showBrokerSync, syncStates]);
 
   // Check if there are any warnings or errors
@@ -83,7 +98,7 @@ export function useAggregatedSyncStatus() {
 
   return {
     status,
-    isLoading,
+    isLoading: isLoading || status === "restoring",
     isConnected,
     hasSubscription,
     lastSyncTime,

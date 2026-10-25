@@ -9,17 +9,20 @@ use crate::{
 };
 
 pub mod ports;
+mod restore;
+#[cfg(test)]
+mod restore_tests;
 mod runtime;
 
 pub use ports::{
-    CredentialStore, OutboxStore, ReadyReconcileStore, ReplayEvent, ReplayStore,
-    SyncBootstrapResult, SyncCycleResult, SyncIdentity, SyncReadyReconcileResult, SyncTransport,
-    TransportError,
+    CredentialStore, OutboxStore, ReplayEvent, ReplayStore, SyncCycleResult, SyncIdentity,
+    SyncTransport, TransportError,
 };
-pub use runtime::{
-    DeviceSyncRuntimeState, DeviceSyncWakeHandle, OverwriteInfo, OverwriteTableInfo,
-    PairingFlowPhase, PairingFlowResponse, PairingFlowState,
+pub use restore::{
+    RestoreError, RestoreErrorCode, RestoreFile, RestoreOperation, RestorePhase, RestorePorts,
+    RestoreRetry, RestoreSnapshotRef, StartRestore,
 };
+pub use runtime::{DeviceSyncRuntimeState, DeviceSyncWakeHandle};
 
 /// Default periodic sync cadence for the background engine.
 pub const DEVICE_SYNC_PERIODIC_INTERVAL_SECS: u64 = 5 * 60;
@@ -88,6 +91,7 @@ fn sync_entity_name(entity: &SyncEntity) -> &'static str {
         SyncEntity::AllocationTargetWeight => "allocation_target_weight",
         SyncEntity::AllocationTargetConstraint => "allocation_target_constraint",
         SyncEntity::SpendingSetting => "spending_setting",
+        SyncEntity::AppPreference => "app_preference",
         SyncEntity::ActivityTaxonomyAssignment => "activity_taxonomy_assignment",
         SyncEntity::SpendingActivitySplit => "spending_activity_split",
         SyncEntity::SpendingActivityEvent => "spending_activity_event",
@@ -223,6 +227,28 @@ where
         pulled_count: 0,
     };
 
+    match ports.is_sync_allowed().await {
+        Ok(true) => {}
+        Ok(false) => {
+            return ctx
+                .fail(
+                    "subscription_required",
+                    "Device sync is paused: an active subscription is required.".to_string(),
+                    Some(300),
+                )
+                .await
+        }
+        Err(err) => {
+            return ctx
+                .fail(
+                    "subscription_check_error",
+                    format!("Could not verify sync subscription: {}", err),
+                    Some(60),
+                )
+                .await
+        }
+    }
+
     let identity = match ports.get_sync_identity() {
         Some(value) => value,
         None => {
@@ -296,7 +322,7 @@ where
     }
 
     ports.persist_device_config(&identity, "trusted").await;
-    let token = match ports.get_access_token() {
+    let token = match ports.get_access_token().await {
         Ok(value) => value,
         Err(err) => {
             return ctx
@@ -309,6 +335,11 @@ where
     let reconcile = match ports.get_reconcile_ready_state(&token, &device_id).await {
         Ok(response) => response,
         Err(err) => {
+            if err.is_subscription_blocked() {
+                return ctx
+                    .fail("subscription_required", err.to_string(), Some(300))
+                    .await;
+            }
             return ctx
                 .fail(
                     "reconcile_error",
@@ -326,7 +357,9 @@ where
     let has_pending = ports.has_pending_outbox().await.unwrap_or(false);
     match reconcile.action.as_str() {
         "NOOP" => {
-            if !has_pending {
+            // The server's device cursor can advance before incoming changes are applied locally.
+            let has_remote_changes = reconcile.cursor.is_some_and(|c| c > ctx.local_cursor);
+            if !has_pending && !has_remote_changes {
                 debug!(
                     "[DeviceSync] Reconcile action=NOOP and no pending outbox, skipping push+pull"
                 );
@@ -350,7 +383,7 @@ where
                     dead_letter_count: 0,
                 });
             }
-            debug!("[DeviceSync] Reconcile action=NOOP but has pending outbox, proceeding with push+pull");
+            debug!("[DeviceSync] Reconcile action=NOOP but has pending outbox or remote changes, proceeding with push+pull");
         }
         "BOOTSTRAP_SNAPSHOT" => {
             if post_bootstrap {
@@ -532,6 +565,7 @@ where
     }
 
     let mut pushed_count = 0usize;
+    let mut retryable_push_failure = None;
     if !push_events.is_empty() {
         match ports
             .push_events(
@@ -567,6 +601,11 @@ where
                 server_cursor = push_response.server_cursor;
             }
             Err(err) => {
+                if err.is_subscription_blocked() {
+                    return ctx
+                        .fail("subscription_required", err.to_string(), Some(300))
+                        .await;
+                }
                 let err_str = err.to_string();
 
                 if err_str.contains("KEY_VERSION_MISMATCH") {
@@ -664,6 +703,10 @@ where
                             )
                             .await
                             .map_err(|e| e.to_string())?;
+                        // Keep the original deadline while incoming changes arrive.
+                        let retry_at =
+                            (Utc::now() + chrono::Duration::seconds(backoff)).to_rfc3339();
+                        retryable_push_failure = Some((format!("Push failed: {}", err), retry_at));
                     }
                     ApiRetryClass::Permanent => {
                         ports
@@ -674,11 +717,11 @@ where
                             )
                             .await
                             .map_err(|e| e.to_string())?;
+                        return ctx
+                            .fail("push_error", format!("Push failed: {}", err), Some(backoff))
+                            .await;
                     }
                 }
-                return ctx
-                    .fail("push_error", format!("Push failed: {}", err), Some(backoff))
-                    .await;
             }
         }
     }
@@ -721,6 +764,11 @@ where
             {
                 Ok(value) => value,
                 Err(err) => {
+                    if err.is_subscription_blocked() {
+                        return ctx
+                            .fail("subscription_required", err.to_string(), Some(300))
+                            .await;
+                    }
                     if err.retry_class == ApiRetryClass::ReauthRequired {
                         warn!("[DeviceSync] Auth error during pull — token may need refresh");
                         return ctx
@@ -949,11 +997,20 @@ where
         let _ = ports.prune_applied_events_up_to_seq(prune_seq).await;
     }
 
+    let (status, next_retry_at) = if let Some((message, retry_at)) = retryable_push_failure {
+        ports
+            .mark_engine_error(message)
+            .await
+            .map_err(|e| e.to_string())?;
+        ("push_error", Some(retry_at))
+    } else {
+        ("ok", None)
+    };
     ports
         .mark_cycle_outcome(
-            "ok".to_string(),
+            status.to_string(),
             cycle_started_at.elapsed().as_millis() as i64,
-            None,
+            next_retry_at,
         )
         .await
         .map_err(|e| e.to_string())?;
@@ -966,7 +1023,7 @@ where
     }
 
     Ok(SyncCycleResult {
-        status: "ok".to_string(),
+        status: status.to_string(),
         lock_version,
         pushed_count,
         pulled_count,
@@ -976,167 +1033,6 @@ where
         bootstrap_snapshot_seq: None,
         dead_letter_count: 0,
     })
-}
-
-fn reconcile_error(
-    mut result: SyncReadyReconcileResult,
-    message: String,
-) -> SyncReadyReconcileResult {
-    result.status = "error".to_string();
-    result.message = message;
-    result
-}
-
-fn derive_bootstrap_action(bootstrap_status: &str, bootstrap_snapshot_id: Option<&str>) -> String {
-    if bootstrap_status == "applied" {
-        return "PULL_REMOTE_OVERWRITE".to_string();
-    }
-
-    if bootstrap_status == "requested" {
-        return "WAIT_REMOTE_SNAPSHOT".to_string();
-    }
-
-    if bootstrap_snapshot_id
-        .map(|id| !id.trim().is_empty())
-        .unwrap_or(false)
-    {
-        return "PULL_REMOTE_OVERWRITE".to_string();
-    }
-
-    "NO_BOOTSTRAP".to_string()
-}
-
-pub async fn run_ready_reconcile_state<P>(ports: &P) -> SyncReadyReconcileResult
-where
-    P: ReadyReconcileStore + Send + Sync,
-{
-    let mut result = SyncReadyReconcileResult {
-        status: "ok".to_string(),
-        message: "Device sync reconcile completed".to_string(),
-        bootstrap_action: "NO_BOOTSTRAP".to_string(),
-        bootstrap_status: "not_attempted".to_string(),
-        bootstrap_message: None,
-        bootstrap_snapshot_id: None,
-        cycle_status: None,
-        cycle_needs_bootstrap: false,
-        retry_attempted: false,
-        retry_cycle_status: None,
-        background_status: "skipped".to_string(),
-    };
-
-    let sync_state = match ports.get_sync_state().await {
-        Ok(value) => value,
-        Err(err) => {
-            return reconcile_error(result, format!("Failed to read sync state: {}", err));
-        }
-    };
-    if sync_state != SyncState::Ready {
-        result.status = "skipped_not_ready".to_string();
-        result.message = "Device is not in READY state".to_string();
-        return result;
-    }
-
-    let bootstrap_result = match ports.bootstrap_snapshot_if_needed().await {
-        Ok(value) => value,
-        Err(err) => {
-            return reconcile_error(result, format!("Snapshot bootstrap failed: {}", err));
-        }
-    };
-    result.bootstrap_status = bootstrap_result.status.clone();
-    result.bootstrap_message = Some(bootstrap_result.message);
-    result.bootstrap_snapshot_id = bootstrap_result.snapshot_id;
-    result.bootstrap_action = derive_bootstrap_action(
-        &result.bootstrap_status,
-        result.bootstrap_snapshot_id.as_deref(),
-    );
-
-    if result.bootstrap_status == "applied" {
-        let cycle_result = match ports.run_sync_cycle(true).await {
-            Ok(value) => value,
-            Err(err) => {
-                return reconcile_error(result, format!("Initial sync cycle failed: {}", err));
-            }
-        };
-        result.cycle_status = Some(cycle_result.status.clone());
-        result.cycle_needs_bootstrap = cycle_result.needs_bootstrap;
-
-        if cycle_result.needs_bootstrap {
-            result.retry_attempted = true;
-            let retry_bootstrap_result = match ports.bootstrap_snapshot_if_needed().await {
-                Ok(value) => value,
-                Err(err) => {
-                    return reconcile_error(
-                        result,
-                        format!("Retry snapshot bootstrap failed: {}", err),
-                    );
-                }
-            };
-            result.bootstrap_status = retry_bootstrap_result.status.clone();
-            result.bootstrap_message = Some(retry_bootstrap_result.message);
-            result.bootstrap_snapshot_id = retry_bootstrap_result.snapshot_id;
-            result.bootstrap_action = derive_bootstrap_action(
-                &result.bootstrap_status,
-                result.bootstrap_snapshot_id.as_deref(),
-            );
-
-            if result.bootstrap_status != "applied" {
-                let retry_status = result.bootstrap_status.clone();
-                return reconcile_error(
-                    result,
-                    format!(
-                        "Retry bootstrap did not apply a snapshot (status={})",
-                        retry_status
-                    ),
-                );
-            }
-
-            let retry_cycle_result = match ports.run_sync_cycle(true).await {
-                Ok(value) => value,
-                Err(err) => {
-                    return reconcile_error(result, format!("Retry sync cycle failed: {}", err));
-                }
-            };
-            result.retry_cycle_status = Some(retry_cycle_result.status);
-            result.cycle_needs_bootstrap = retry_cycle_result.needs_bootstrap;
-            if result.cycle_needs_bootstrap {
-                return reconcile_error(
-                    result,
-                    "Retry sync cycle still requires bootstrap".to_string(),
-                );
-            }
-        }
-    }
-
-    match ports.ensure_background_started().await {
-        Ok(true) => {
-            result.background_status = "started".to_string();
-        }
-        Ok(false) => {
-            result.background_status = "skipped".to_string();
-        }
-        Err(err) => {
-            result.background_status = "failed".to_string();
-            let bootstrap_status = result.bootstrap_status.clone();
-            let cycle_status = result.cycle_status.as_deref().unwrap_or("none").to_string();
-            let retry_cycle_status = result
-                .retry_cycle_status
-                .as_deref()
-                .unwrap_or("none")
-                .to_string();
-            return reconcile_error(
-                result,
-                format!(
-                    "Background engine start failed: {} (bootstrap_status={}, cycle_status={}, retry_cycle_status={})",
-                    err,
-                    bootstrap_status,
-                    cycle_status,
-                    retry_cycle_status
-                ),
-            );
-        }
-    }
-
-    result
 }
 
 fn compute_jitter_ms() -> u64 {
@@ -1153,8 +1049,13 @@ where
     P: OutboxStore + ReplayStore + Send + Sync,
 {
     let mut delay_ms = DEVICE_SYNC_PERIODIC_INTERVAL_SECS.saturating_mul(1000) + jitter_ms;
+    let mut subscription_paused = false;
 
     if let Ok(engine_status) = ports.get_engine_status().await {
+        subscription_paused = matches!(
+            engine_status.last_cycle_status.as_deref(),
+            Some("subscription_required" | "subscription_check_error")
+        );
         if let Some(next_retry_at) = engine_status.next_retry_at.as_deref() {
             if let Some(wait_ms) = millis_until_rfc3339(next_retry_at) {
                 delay_ms = wait_ms.saturating_add(jitter_ms).max(1_000);
@@ -1162,8 +1063,15 @@ where
         }
     }
 
-    if ports.has_pending_outbox().await.unwrap_or(false) {
-        delay_ms = delay_ms.min(2_000 + (jitter_ms % 500));
+    if !subscription_paused {
+        if ports.has_pending_outbox().await.unwrap_or(false) {
+            delay_ms = delay_ms.min(2_000 + (jitter_ms % 500));
+        } else if let Ok(Some(retry_at)) = ports.next_outbox_retry_at().await {
+            // Waiting uploads need a wake even if a download changed the cycle deadline.
+            if let Some(wait_ms) = millis_until_rfc3339(&retry_at) {
+                delay_ms = delay_ms.min(wait_ms.saturating_add(jitter_ms).max(1_000));
+            }
+        }
     }
 
     delay_ms
@@ -1245,6 +1153,20 @@ where
     let mut next_prune_at =
         tokio::time::Instant::now() + Duration::from_secs(DEVICE_SYNC_OUTBOX_PRUNE_INTERVAL_SECS);
     loop {
+        // A wake can race logout's startup check. Never keep a worker alive
+        // without a session, even if it was spawned just after shutdown.
+        match ports.has_cloud_session() {
+            Ok(true) => {}
+            Ok(false) => break,
+            Err(err) => {
+                warn!(
+                    "[DeviceSync] Could not read cloud session; retrying: {}",
+                    err
+                );
+                tokio::time::sleep(Duration::from_secs(60)).await;
+                continue;
+            }
+        }
         let identity = ports.get_sync_identity();
         if !sync_identity_can_run_background(identity.clone()) {
             if sync_identity_is_revoked(identity) {
@@ -1316,6 +1238,10 @@ mod tests {
 
     #[derive(Clone)]
     struct TestPorts {
+        has_cloud_session: bool,
+        session_read_results: Arc<std::sync::Mutex<VecDeque<Result<bool, String>>>>,
+        sync_allowed: Result<bool, String>,
+        token_lookup_gate: Option<(Arc<Mutex<()>>, Arc<tokio::sync::Notify>)>,
         cursor: i64,
         identity: Option<SyncIdentity>,
         sync_state: Result<SyncState, String>,
@@ -1323,13 +1249,16 @@ mod tests {
         pending_outbox: Arc<Mutex<Vec<wealthfolio_core::sync::SyncOutboxEvent>>>,
         dead_outbox_batches: Arc<Mutex<Vec<Vec<String>>>>,
         pull_responses: Arc<Mutex<VecDeque<crate::SyncPullResponse>>>,
+        pull_cursors: Arc<Mutex<Vec<Option<i64>>>>,
         set_cursor_calls: Arc<Mutex<Vec<i64>>>,
         applied_events: Arc<Mutex<Vec<ReplayEvent>>>,
+        pull_complete_counts: Arc<Mutex<Vec<usize>>>,
         push_error: Option<TransportError>,
         push_batches: Arc<Mutex<Vec<Vec<String>>>>,
         reconcile_response: crate::ReconcileReadyStateResponse,
         persisted_trust_states: Arc<Mutex<Vec<String>>>,
         cycle_outcomes: Arc<Mutex<Vec<String>>>,
+        last_cycle_retry_at: Arc<Mutex<Option<String>>>,
         engine_errors: Arc<Mutex<Vec<String>>>,
         prune_calls: Arc<AtomicUsize>,
         reconcile_delay_ms: u64,
@@ -1340,6 +1269,10 @@ mod tests {
     impl TestPorts {
         fn new(identity: Option<SyncIdentity>, sync_state: Result<SyncState, String>) -> Self {
             Self {
+                has_cloud_session: true,
+                session_read_results: Arc::new(std::sync::Mutex::new(VecDeque::new())),
+                sync_allowed: Ok(true),
+                token_lookup_gate: None,
                 cursor: 0,
                 identity,
                 sync_state,
@@ -1347,8 +1280,10 @@ mod tests {
                 pending_outbox: Arc::new(Mutex::new(Vec::new())),
                 dead_outbox_batches: Arc::new(Mutex::new(Vec::new())),
                 pull_responses: Arc::new(Mutex::new(VecDeque::new())),
+                pull_cursors: Arc::new(Mutex::new(Vec::new())),
                 set_cursor_calls: Arc::new(Mutex::new(Vec::new())),
                 applied_events: Arc::new(Mutex::new(Vec::new())),
+                pull_complete_counts: Arc::new(Mutex::new(Vec::new())),
                 push_error: None,
                 push_batches: Arc::new(Mutex::new(Vec::new())),
                 reconcile_response: crate::ReconcileReadyStateResponse {
@@ -1358,6 +1293,7 @@ mod tests {
                 },
                 persisted_trust_states: Arc::new(Mutex::new(Vec::new())),
                 cycle_outcomes: Arc::new(Mutex::new(Vec::new())),
+                last_cycle_retry_at: Arc::new(Mutex::new(None)),
                 engine_errors: Arc::new(Mutex::new(Vec::new())),
                 prune_calls: Arc::new(AtomicUsize::new(0)),
                 reconcile_delay_ms: 0,
@@ -1380,7 +1316,19 @@ mod tests {
         ) -> Result<Vec<wealthfolio_core::sync::SyncOutboxEvent>, String> {
             let pending = self.pending_outbox.lock().await.clone();
             let max = usize::try_from(limit.max(0)).unwrap_or(usize::MAX);
-            Ok(pending.into_iter().take(max).collect())
+            let now = Utc::now().to_rfc3339();
+            Ok(pending
+                .into_iter()
+                .filter(|event| {
+                    !event.sent
+                        && event.status == wealthfolio_core::sync::SyncOutboxStatus::Pending
+                        && event
+                            .next_retry_at
+                            .as_deref()
+                            .is_none_or(|retry_at| retry_at <= now.as_str())
+                })
+                .take(max)
+                .collect())
         }
 
         async fn mark_outbox_dead(
@@ -1400,17 +1348,32 @@ mod tests {
             Ok(())
         }
 
-        async fn mark_outbox_sent(&self, _event_ids: Vec<String>) -> Result<(), String> {
+        async fn mark_outbox_sent(&self, event_ids: Vec<String>) -> Result<(), String> {
+            for event in self.pending_outbox.lock().await.iter_mut() {
+                if event_ids.contains(&event.event_id) {
+                    event.sent = true;
+                    event.status = wealthfolio_core::sync::SyncOutboxStatus::Sent;
+                }
+            }
             Ok(())
         }
 
         async fn schedule_outbox_retry(
             &self,
-            _event_ids: Vec<String>,
-            _delay_seconds: i64,
-            _error_message: Option<String>,
-            _error_code: Option<String>,
+            event_ids: Vec<String>,
+            delay_seconds: i64,
+            error_message: Option<String>,
+            error_code: Option<String>,
         ) -> Result<(), String> {
+            let retry_at = (Utc::now() + chrono::Duration::seconds(delay_seconds)).to_rfc3339();
+            for event in self.pending_outbox.lock().await.iter_mut() {
+                if event_ids.contains(&event.event_id) {
+                    event.retry_count += 1;
+                    event.next_retry_at = Some(retry_at.clone());
+                    event.last_error = error_message.clone();
+                    event.last_error_code = error_code.clone();
+                }
+            }
             Ok(())
         }
 
@@ -1419,7 +1382,20 @@ mod tests {
         }
 
         async fn has_pending_outbox(&self) -> Result<bool, String> {
-            Ok(!self.pending_outbox.lock().await.is_empty())
+            Ok(!self.list_pending_outbox(1).await?.is_empty())
+        }
+
+        async fn next_outbox_retry_at(&self) -> Result<Option<String>, String> {
+            Ok(self
+                .pending_outbox
+                .lock()
+                .await
+                .iter()
+                .filter(|event| {
+                    !event.sent && event.status == wealthfolio_core::sync::SyncOutboxStatus::Pending
+                })
+                .filter_map(|event| event.next_retry_at.clone())
+                .min())
         }
     }
 
@@ -1456,6 +1432,9 @@ mod tests {
         }
 
         async fn mark_pull_completed(&self) -> Result<(), String> {
+            // Match the real store, which clears the previous error and retry time.
+            self.engine_errors.lock().await.clear();
+            *self.last_cycle_retry_at.lock().await = None;
             Ok(())
         }
 
@@ -1463,9 +1442,10 @@ mod tests {
             &self,
             status: String,
             _duration_ms: i64,
-            _next_retry_at: Option<String>,
+            next_retry_at: Option<String>,
         ) -> Result<(), String> {
             self.cycle_outcomes.lock().await.push(status);
+            *self.last_cycle_retry_at.lock().await = next_retry_at;
             if self.fail_mark_cycle_outcome {
                 return Err("forced cycle_outcome failure".to_string());
             }
@@ -1497,10 +1477,15 @@ mod tests {
                 last_pull_at: None,
                 last_error: None,
                 consecutive_failures: 0,
-                next_retry_at: None,
-                last_cycle_status: None,
+                next_retry_at: self.last_cycle_retry_at.lock().await.clone(),
+                last_cycle_status: self.cycle_outcomes.lock().await.last().cloned(),
                 last_cycle_duration_ms: None,
             })
+        }
+
+        async fn on_pull_complete(&self, pulled_count: usize) -> Result<(), String> {
+            self.pull_complete_counts.lock().await.push(pulled_count);
+            Ok(())
         }
     }
 
@@ -1541,9 +1526,10 @@ mod tests {
             &self,
             _token: &str,
             _device_id: &str,
-            _from_cursor: Option<i64>,
+            from_cursor: Option<i64>,
             _limit: Option<i64>,
         ) -> Result<crate::SyncPullResponse, TransportError> {
+            self.pull_cursors.lock().await.push(from_cursor);
             self.pull_responses
                 .lock()
                 .await
@@ -1585,11 +1571,27 @@ mod tests {
 
     #[async_trait]
     impl CredentialStore for TestPorts {
+        fn has_cloud_session(&self) -> Result<bool, String> {
+            self.session_read_results
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or(Ok(self.has_cloud_session))
+        }
+
+        async fn is_sync_allowed(&self) -> Result<bool, String> {
+            self.sync_allowed.clone()
+        }
+
         fn get_sync_identity(&self) -> Option<SyncIdentity> {
             self.identity.clone()
         }
 
-        fn get_access_token(&self) -> Result<String, String> {
+        async fn get_access_token(&self) -> Result<String, String> {
+            if let Some((mutex, waiting)) = &self.token_lookup_gate {
+                waiting.notify_one();
+                let _guard = mutex.lock().await;
+            }
             Ok("token".to_string())
         }
 
@@ -1679,6 +1681,144 @@ mod tests {
             );
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         }
+    }
+
+    #[tokio::test]
+    async fn inactive_subscription_preserves_pending_changes_and_resumes() {
+        let mut ports = TestPorts::new(Some(ready_identity()), Ok(SyncState::Ready));
+        ports.sync_allowed = Ok(false);
+        ports.pending_outbox.lock().await.push(outbox_event(
+            "event-1",
+            "019cb093-06a8-7534-8677-546317b17957",
+            1,
+        ));
+        let paused = run_sync_cycle(&ports, false).await.unwrap();
+        assert_eq!(paused.status, "subscription_required");
+        assert_eq!(ports.pending_outbox.lock().await.len(), 1);
+        assert!(ports.persisted_trust_states.lock().await.is_empty());
+        assert_eq!(ports.max_active_reconcile_count.load(Ordering::SeqCst), 0);
+        assert!((299_000..=300_000).contains(&compute_cycle_delay_ms(&ports, 0).await));
+        ports.sync_allowed = Ok(true);
+        let resumed = run_sync_cycle(&ports, false).await.unwrap();
+        assert_eq!(resumed.status, "ok");
+        assert_eq!(ports.push_batches.lock().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn subscription_denied_during_push_preserves_pending_changes() {
+        let mut ports = TestPorts::new(Some(ready_identity()), Ok(SyncState::Ready));
+        ports.push_error = Some(TransportError {
+            message: "Subscription required".to_string(),
+            retry_class: ApiRetryClass::Permanent,
+            error_code: Some("SUBSCRIPTION_REQUIRED".to_string()),
+            details: None,
+        });
+        ports.pending_outbox.lock().await.push(outbox_event(
+            "event-1",
+            "019cb093-06a8-7534-8677-546317b17957",
+            1,
+        ));
+        assert_eq!(
+            run_sync_cycle(&ports, false).await.unwrap().status,
+            "subscription_required"
+        );
+        assert_eq!(ports.pending_outbox.lock().await.len(), 1);
+        assert!(ports.dead_outbox_batches.lock().await.is_empty());
+        ports.push_error = None;
+        assert_eq!(run_sync_cycle(&ports, false).await.unwrap().status, "ok");
+        assert_eq!(
+            *ports.push_batches.lock().await,
+            vec![vec!["event-1".to_string()], vec!["event-1".to_string()]]
+        );
+    }
+
+    #[tokio::test]
+    async fn subscription_lookup_failure_cannot_push_or_pull() {
+        let mut ports = TestPorts::new(Some(ready_identity()), Ok(SyncState::Ready));
+        ports.sync_allowed = Err("service unavailable".to_string());
+        assert_eq!(
+            run_sync_cycle(&ports, false).await.unwrap().status,
+            "subscription_check_error"
+        );
+        assert!(ports.push_batches.lock().await.is_empty());
+        assert!(ports.applied_events.lock().await.is_empty());
+        assert!(ports.persisted_trust_states.lock().await.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn background_recovers_from_session_read_error_without_a_wake() {
+        let ports = Arc::new(TestPorts::new(Some(ready_identity()), Ok(SyncState::Ready)));
+        ports
+            .session_read_results
+            .lock()
+            .unwrap()
+            .push_back(Err("storage unavailable".into()));
+        let runtime = Arc::new(DeviceSyncRuntimeState::new());
+        runtime.ensure_background_started(Arc::clone(&ports)).await;
+        tokio::task::yield_now().await;
+        assert!(runtime.is_background_running().await);
+        assert!(ports.cycle_outcomes.lock().await.is_empty());
+        tokio::time::advance(Duration::from_secs(59)).await;
+        assert!(ports.cycle_outcomes.lock().await.is_empty());
+        tokio::time::advance(Duration::from_secs(1)).await;
+        wait_for_cycle_outcomes(&ports, 1, 1_000).await;
+        assert_eq!(ports.cycle_outcomes.lock().await[0], "ok");
+        runtime.ensure_background_stopped().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn background_stops_if_session_is_missing_after_read_error() {
+        let ports = Arc::new(TestPorts::new(Some(ready_identity()), Ok(SyncState::Ready)));
+        ports
+            .session_read_results
+            .lock()
+            .unwrap()
+            .extend([Err("storage unavailable".into()), Ok(false)]);
+        let runtime = Arc::new(DeviceSyncRuntimeState::new());
+        runtime.ensure_background_started(Arc::clone(&ports)).await;
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(60)).await;
+        wait_for_background_stopped(&runtime, 1_000).await;
+        assert!(ports.cycle_outcomes.lock().await.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn background_shutdown_cancels_pending_token_lookup() {
+        let token_mutex = Arc::new(Mutex::new(()));
+        let waiting = Arc::new(tokio::sync::Notify::new());
+        let mut ports = TestPorts::new(Some(ready_identity()), Ok(SyncState::Ready));
+        ports.token_lookup_gate = Some((token_mutex.clone(), waiting.clone()));
+        let ports = Arc::new(ports);
+        let runtime = Arc::new(DeviceSyncRuntimeState::new());
+
+        // Logout retains the token mutex until worker shutdown finishes.
+        let logout_guard = token_mutex.lock().await;
+        runtime.ensure_background_started(ports.clone()).await;
+        tokio::time::timeout(Duration::from_secs(2), waiting.notified())
+            .await
+            .expect("worker must reach token lookup");
+        let stopped =
+            tokio::time::timeout(Duration::from_secs(2), runtime.ensure_background_stopped()).await;
+        drop(logout_guard);
+        stopped.expect("shutdown must cancel lookup without waiting for the token mutex");
+        assert!(!runtime.is_background_running().await);
+        assert_eq!(Arc::strong_count(&ports), 1);
+        assert_eq!(ports.max_active_reconcile_count.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn background_wake_without_session_exits_without_cloud_requests() {
+        let mut ports = TestPorts::new(Some(ready_identity()), Ok(SyncState::Ready));
+        ports.has_cloud_session = false;
+        let ports = Arc::new(ports);
+        let runtime = Arc::new(DeviceSyncRuntimeState::new());
+        for _ in 0..2 {
+            runtime.ensure_background_started(Arc::clone(&ports)).await;
+            runtime.notify_sync_work_available();
+            wait_for_background_stopped(&runtime, 1_000).await;
+        }
+        assert!(ports.cycle_outcomes.lock().await.is_empty());
+        assert_eq!(ports.max_active_reconcile_count.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
@@ -1918,6 +2058,7 @@ mod tests {
             "019cb093-06a8-7534-8677-546317b17957",
             "spending.enabled",
             "spending.account_ids",
+            "spending.excluded_category_ids",
             "custom_groups",
             "spending_categories",
             "income_sources",
@@ -2233,6 +2374,463 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn retryable_push_failure_downloads_without_clearing_upload_error_or_backoff() {
+        for (retry_count, delay_seconds) in [(0, 5), (3, 40), (12, 1280)] {
+            for has_incoming in [true, false] {
+                let mut ports = TestPorts::new(Some(ready_identity()), Ok(SyncState::Ready));
+                ports.cursor = 5;
+                ports.reconcile_response.cursor = Some(if has_incoming { 8 } else { 5 });
+                ports.push_error = Some(TransportError {
+                    message: "503 Service Unavailable".to_string(),
+                    retry_class: ApiRetryClass::Retryable,
+                    error_code: None,
+                    details: None,
+                });
+                let mut event = outbox_event("evt-local", "account-local", 1);
+                event.retry_count = retry_count;
+                ports.pending_outbox.lock().await.push(event);
+                if has_incoming {
+                    ports
+                        .pull_responses
+                        .lock()
+                        .await
+                        .push_back(single_event_pull_response(
+                            8,
+                            pull_event(
+                                "evt-remote",
+                                "account",
+                                "account.update.v1",
+                                "account-remote",
+                                8,
+                                r#"{"id":"account-remote","name":"Checking"}"#,
+                            ),
+                        ));
+                }
+                let before = Utc::now();
+
+                let result = run_sync_cycle(&ports, false).await.expect("cycle");
+
+                assert_eq!(result.status, "push_error");
+                assert_eq!(result.pushed_count, 0);
+                assert_eq!(result.pulled_count, usize::from(has_incoming));
+                assert_eq!(result.cursor, if has_incoming { 8 } else { 5 });
+                assert_eq!(
+                    ports.push_batches.lock().await.as_slice(),
+                    [vec!["evt-local".to_string()]]
+                );
+                assert_eq!(
+                    ports.applied_events.lock().await.len(),
+                    usize::from(has_incoming)
+                );
+                if has_incoming {
+                    assert_eq!(ports.pull_cursors.lock().await.as_slice(), [Some(5)]);
+                    assert_eq!(ports.set_cursor_calls.lock().await.as_slice(), [8]);
+                    assert_eq!(ports.pull_complete_counts.lock().await.as_slice(), [1]);
+                } else {
+                    assert!(ports.pull_cursors.lock().await.is_empty());
+                    assert!(ports.set_cursor_calls.lock().await.is_empty());
+                    assert!(ports.pull_complete_counts.lock().await.is_empty());
+                }
+                assert!(ports.dead_outbox_batches.lock().await.is_empty());
+                assert_eq!(ports.cycle_outcomes.lock().await.as_slice(), ["push_error"]);
+                assert_eq!(
+                    ports.engine_errors.lock().await.as_slice(),
+                    ["Push failed: 503 Service Unavailable"]
+                );
+                let pending = ports.pending_outbox.lock().await;
+                assert_eq!(pending.len(), 1);
+                assert!(!pending[0].sent);
+                assert_eq!(
+                    pending[0].status,
+                    wealthfolio_core::sync::SyncOutboxStatus::Pending
+                );
+                assert_eq!(pending[0].retry_count, retry_count + 1);
+                assert_eq!(
+                    pending[0].last_error.as_deref(),
+                    Some("503 Service Unavailable")
+                );
+                assert_eq!(pending[0].last_error_code.as_deref(), Some("retryable"));
+                for retry_at in [
+                    pending[0].next_retry_at.clone(),
+                    ports.last_cycle_retry_at.lock().await.clone(),
+                ] {
+                    let retry_at =
+                        chrono::DateTime::parse_from_rfc3339(&retry_at.expect("retry time"))
+                            .expect("valid retry time");
+                    assert!(retry_at >= before + chrono::Duration::seconds(delay_seconds));
+                    assert!(retry_at <= Utc::now() + chrono::Duration::seconds(delay_seconds));
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn retryable_push_failure_does_not_extend_retry_deadline_while_downloading() {
+        let mut ports = TestPorts::new(Some(ready_identity()), Ok(SyncState::Ready));
+        ports.cursor = 5;
+        ports.reconcile_response.cursor = Some(8);
+        ports.push_error = Some(TransportError {
+            message: "503 Service Unavailable".to_string(),
+            retry_class: ApiRetryClass::Retryable,
+            error_code: None,
+            details: None,
+        });
+        let mut event = outbox_event("evt-local", "account-local", 1);
+        event.retry_count = 3; // Existing backoff: 40 seconds.
+        ports.pending_outbox.lock().await.push(event);
+
+        // Hold the response to pause the download after the upload retry is scheduled.
+        let mut responses = ports.pull_responses.lock().await;
+        responses.push_back(single_event_pull_response(
+            8,
+            pull_event(
+                "evt-remote",
+                "account",
+                "account.update.v1",
+                "account-remote",
+                8,
+                r#"{"id":"account-remote","name":"Checking"}"#,
+            ),
+        ));
+        let cycle_ports = ports.clone();
+        let cycle = tokio::spawn(async move { run_sync_cycle(&cycle_ports, false).await });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while ports.pull_cursors.lock().await.is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("cycle should reach the download");
+        let latest_original_deadline = Utc::now() + chrono::Duration::seconds(40);
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        drop(responses);
+
+        let result = cycle.await.expect("cycle task").expect("cycle");
+
+        assert_eq!(result.status, "push_error");
+        assert_eq!(result.cursor, 8);
+        assert_eq!(result.pulled_count, 1);
+        let retry_at = ports
+            .last_cycle_retry_at
+            .lock()
+            .await
+            .clone()
+            .expect("retry time");
+        let retry_at = chrono::DateTime::parse_from_rfc3339(&retry_at).expect("valid retry time");
+        assert!(
+            retry_at <= latest_original_deadline,
+            "download extended the upload retry deadline"
+        );
+    }
+
+    #[tokio::test]
+    async fn retryable_push_failure_preserves_upload_retry_when_download_also_fails() {
+        let mut ports = TestPorts::new(Some(ready_identity()), Ok(SyncState::Ready));
+        ports.cursor = 5;
+        ports.reconcile_response.cursor = Some(8);
+        ports.push_error = Some(TransportError {
+            message: "503 Service Unavailable".to_string(),
+            retry_class: ApiRetryClass::Retryable,
+            error_code: None,
+            details: None,
+        });
+        ports
+            .pending_outbox
+            .lock()
+            .await
+            .push(outbox_event("evt-local", "account-local", 1));
+        // With no queued response, the transport fails the download.
+
+        let result = run_sync_cycle(&ports, false).await.expect("cycle");
+
+        assert_eq!(result.status, "pull_error");
+        assert_eq!(result.cursor, 5);
+        assert_eq!(result.pushed_count, 0);
+        assert_eq!(result.pulled_count, 0);
+        assert_eq!(ports.pull_cursors.lock().await.as_slice(), [Some(5)]);
+        assert!(ports.applied_events.lock().await.is_empty());
+        assert!(ports.set_cursor_calls.lock().await.is_empty());
+        assert!(ports.pull_complete_counts.lock().await.is_empty());
+        assert_eq!(ports.cycle_outcomes.lock().await.as_slice(), ["pull_error"]);
+        let pending = ports.pending_outbox.lock().await;
+        assert_eq!(pending.len(), 1);
+        assert!(!pending[0].sent);
+        assert_eq!(pending[0].retry_count, 1);
+        assert!(pending[0].next_retry_at.is_some());
+        assert_eq!(
+            pending[0].last_error.as_deref(),
+            Some("503 Service Unavailable")
+        );
+    }
+
+    #[tokio::test]
+    async fn upload_retry_wakes_after_download_recovers_during_backoff() {
+        let mut ports = TestPorts::new(Some(ready_identity()), Ok(SyncState::Ready));
+        ports.cursor = 5;
+        ports.reconcile_response.cursor = Some(8);
+        ports.push_error = Some(TransportError {
+            message: "503 Service Unavailable".to_string(),
+            retry_class: ApiRetryClass::Retryable,
+            error_code: None,
+            details: None,
+        });
+        let mut event = outbox_event("evt-local", "account-local", 1);
+        event.retry_count = 3; // Existing backoff: 40 seconds.
+        ports.pending_outbox.lock().await.push(event);
+
+        // No response: the first download fails and schedules a 10-second retry.
+        let failed = run_sync_cycle(&ports, false).await.expect("failed cycle");
+        assert_eq!(failed.status, "pull_error");
+        let download_delay = compute_cycle_delay_ms(&ports, 0).await;
+        assert!((1_000..=10_000).contains(&download_delay));
+        let upload_retry_at = ports.pending_outbox.lock().await[0]
+            .next_retry_at
+            .clone()
+            .expect("upload retry deadline");
+
+        // Run the recovery cycle before the upload becomes eligible again.
+        ports
+            .pull_responses
+            .lock()
+            .await
+            .push_back(single_event_pull_response(
+                8,
+                pull_event(
+                    "evt-remote",
+                    "account",
+                    "account.update.v1",
+                    "account-remote",
+                    8,
+                    r#"{"id":"account-remote","name":"Checking"}"#,
+                ),
+            ));
+        let recovered = run_sync_cycle(&ports, false).await.expect("recovery cycle");
+        assert_eq!(recovered.status, "ok");
+        assert_eq!(recovered.cursor, 8);
+        assert_eq!(recovered.pulled_count, 1);
+        assert_eq!(ports.push_batches.lock().await.len(), 1);
+        assert!(ports.last_cycle_retry_at.lock().await.is_none());
+        assert!(!ports.has_pending_outbox().await.expect("ready uploads"));
+        assert_eq!(
+            ports.pending_outbox.lock().await[0]
+                .next_retry_at
+                .as_deref(),
+            Some(upload_retry_at.as_str())
+        );
+        let remaining_ms = millis_until_rfc3339(&upload_retry_at).expect("retry time");
+        let delay_ms = compute_cycle_delay_ms(&ports, 0).await;
+        assert!(
+            (1_000..=remaining_ms).contains(&delay_ms),
+            "upload retry was delayed until the periodic cycle: {delay_ms} ms"
+        );
+    }
+
+    #[tokio::test]
+    async fn upload_retry_wakes_before_unsupported_download_backoff() {
+        let mut ports = TestPorts::new(Some(ready_identity()), Ok(SyncState::Ready));
+        ports.cursor = 5;
+        ports.reconcile_response.cursor = Some(8);
+        ports.push_error = Some(TransportError {
+            message: "503 Service Unavailable".to_string(),
+            retry_class: ApiRetryClass::Retryable,
+            error_code: None,
+            details: None,
+        });
+        let mut event = outbox_event("evt-local", "account-local", 1);
+        event.retry_count = 3;
+        ports.pending_outbox.lock().await.push(event);
+        ports
+            .pull_responses
+            .lock()
+            .await
+            .push_back(single_event_pull_response(
+                8,
+                pull_event(
+                    "evt-remote",
+                    "account",
+                    "account.future.v1",
+                    "account-remote",
+                    8,
+                    "{}",
+                ),
+            ));
+
+        let result = run_sync_cycle(&ports, false).await.expect("cycle");
+        assert_eq!(result.status, "replay_blocked");
+        assert_eq!(result.cursor, 5);
+        assert!(ports.applied_events.lock().await.is_empty());
+        let cycle_retry_at = ports
+            .last_cycle_retry_at
+            .lock()
+            .await
+            .clone()
+            .expect("replay retry");
+        assert!(millis_until_rfc3339(&cycle_retry_at).expect("retry time") > 21_000_000);
+        let upload_retry_at = ports.pending_outbox.lock().await[0]
+            .next_retry_at
+            .clone()
+            .expect("upload retry deadline");
+        let remaining_ms = millis_until_rfc3339(&upload_retry_at).expect("retry time");
+        let delay_ms = compute_cycle_delay_ms(&ports, 0).await;
+        assert!(
+            (1_000..=remaining_ms).contains(&delay_ms),
+            "upload retry was delayed by the replay backoff: {delay_ms} ms"
+        );
+        assert_eq!(ports.push_batches.lock().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn upload_retry_does_not_shorten_subscription_pause() {
+        for (status, seconds) in [
+            ("subscription_required", 300),
+            ("subscription_check_error", 60),
+        ] {
+            let ports = TestPorts::new(Some(ready_identity()), Ok(SyncState::Ready));
+            let mut event = outbox_event("evt-local", "account-local", 1);
+            event.next_retry_at = Some((Utc::now() + chrono::Duration::seconds(40)).to_rfc3339());
+            ports.pending_outbox.lock().await.push(event);
+            ports
+                .mark_cycle_outcome(
+                    status.to_string(),
+                    0,
+                    Some((Utc::now() + chrono::Duration::seconds(seconds)).to_rfc3339()),
+                )
+                .await
+                .expect("subscription pause");
+            assert!(compute_cycle_delay_ms(&ports, 0).await > 40_000);
+            assert!(ports.push_batches.lock().await.is_empty());
+            assert!(ports.pull_cursors.lock().await.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn other_push_failures_still_stop_before_downloading() {
+        for (retry_class, code, message, status) in [
+            (
+                ApiRetryClass::Permanent,
+                None,
+                "400 Bad Request",
+                "push_error",
+            ),
+            (
+                ApiRetryClass::ReauthRequired,
+                None,
+                "401 Unauthorized",
+                "auth_error",
+            ),
+            (
+                ApiRetryClass::Retryable,
+                Some("SUBSCRIPTION_REQUIRED"),
+                "Subscription required",
+                "subscription_required",
+            ),
+            (
+                ApiRetryClass::Retryable,
+                Some("SYNC_KEY_VERSION_MISMATCH"),
+                "KEY_VERSION_MISMATCH",
+                "key_version_mismatch",
+            ),
+        ] {
+            let mut ports = TestPorts::new(Some(ready_identity()), Ok(SyncState::Ready));
+            ports.reconcile_response.cursor = Some(8);
+            ports.push_error = Some(TransportError {
+                message: message.to_string(),
+                retry_class,
+                error_code: code.map(str::to_string),
+                details: None,
+            });
+            ports
+                .pending_outbox
+                .lock()
+                .await
+                .push(outbox_event("evt-local", "account-local", 1));
+
+            let result = run_sync_cycle(&ports, false).await.expect("cycle");
+
+            assert_eq!(result.status, status);
+            assert_eq!(result.cursor, 0);
+            assert!(ports.pull_cursors.lock().await.is_empty());
+            assert!(ports.applied_events.lock().await.is_empty());
+            assert!(ports.set_cursor_calls.lock().await.is_empty());
+            assert!(ports.pull_complete_counts.lock().await.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn run_sync_cycle_noop_pulls_when_server_cursor_is_ahead() {
+        let mut ports = TestPorts::new(Some(ready_identity()), Ok(SyncState::Ready));
+        ports.cursor = 5;
+        ports.reconcile_response.cursor = Some(8);
+        ports
+            .pull_responses
+            .lock()
+            .await
+            .push_back(single_event_pull_response(
+                8,
+                pull_event(
+                    "evt-account-1",
+                    "account",
+                    "account.update.v1",
+                    "account-1",
+                    8,
+                    r#"{"id":"account-1","name":"Checking"}"#,
+                ),
+            ));
+
+        let result = run_sync_cycle(&ports, false).await.expect("cycle");
+
+        assert_eq!(result.status, "ok");
+        assert_eq!(result.cursor, 8);
+        assert_eq!(result.pulled_count, 1);
+        assert_eq!(ports.pull_cursors.lock().await.as_slice(), [Some(5)]);
+        assert_eq!(ports.set_cursor_calls.lock().await.as_slice(), [8]);
+        let applied_events = ports.applied_events.lock().await;
+        assert_eq!(applied_events.len(), 1);
+        assert_eq!(applied_events[0].event_id, "evt-account-1");
+        assert!(ports.push_batches.lock().await.is_empty());
+        assert!(ports.engine_errors.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn run_sync_cycle_noop_skips_pull_when_server_cursor_is_not_ahead() {
+        for server_cursor in [Some(5), Some(4), None] {
+            let mut ports = TestPorts::new(Some(ready_identity()), Ok(SyncState::Ready));
+            ports.cursor = 5;
+            ports.reconcile_response.cursor = server_cursor;
+
+            let result = run_sync_cycle(&ports, false).await.expect("cycle");
+
+            assert_eq!(result.status, "ok");
+            assert_eq!(result.cursor, 5);
+            assert_eq!(result.lock_version, 0);
+            assert_eq!(result.pulled_count, 0);
+            assert!(ports.pull_cursors.lock().await.is_empty());
+            assert!(ports.set_cursor_calls.lock().await.is_empty());
+            assert!(ports.applied_events.lock().await.is_empty());
+            assert!(ports.push_batches.lock().await.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn run_sync_cycle_noop_reports_pull_failure_when_server_cursor_is_ahead() {
+        let mut ports = TestPorts::new(Some(ready_identity()), Ok(SyncState::Ready));
+        ports.cursor = 5;
+        ports.reconcile_response.cursor = Some(8);
+        // With no queued response, the transport fails the pull.
+
+        let result = run_sync_cycle(&ports, false).await.expect("cycle");
+
+        assert_eq!(result.status, "pull_error");
+        assert_eq!(result.cursor, 5);
+        assert_eq!(ports.pull_cursors.lock().await.as_slice(), [Some(5)]);
+        assert!(ports.set_cursor_calls.lock().await.is_empty());
+        assert!(ports.applied_events.lock().await.is_empty());
+        assert!(ports.push_batches.lock().await.is_empty());
+        assert_eq!(ports.engine_errors.lock().await.len(), 1);
+        assert_eq!(ports.cycle_outcomes.lock().await.as_slice(), ["pull_error"]);
+    }
+
+    #[tokio::test]
     async fn run_sync_cycle_skips_unknown_remote_entity_and_advances_cursor() {
         let mut ports = TestPorts::new(Some(ready_identity()), Ok(SyncState::Ready));
         ports.reconcile_response.action = "PULL_TAIL".to_string();
@@ -2386,253 +2984,5 @@ mod tests {
             ports.cycle_outcomes.lock().await.last().map(String::as_str),
             Some("key_version_mismatch")
         );
-    }
-
-    #[derive(Clone)]
-    struct ReconcileTestPorts {
-        sync_state: Result<SyncState, String>,
-        bootstrap_results: Arc<Mutex<Vec<SyncBootstrapResult>>>,
-        cycle_results: Arc<Mutex<Vec<SyncCycleResult>>>,
-        ensure_background_result: Result<bool, String>,
-    }
-
-    impl ReconcileTestPorts {
-        fn new(sync_state: Result<SyncState, String>) -> Self {
-            Self {
-                sync_state,
-                bootstrap_results: Arc::new(Mutex::new(Vec::new())),
-                cycle_results: Arc::new(Mutex::new(Vec::new())),
-                ensure_background_result: Ok(true),
-            }
-        }
-    }
-
-    #[async_trait]
-    impl ReadyReconcileStore for ReconcileTestPorts {
-        async fn get_sync_state(&self) -> Result<SyncState, String> {
-            self.sync_state.clone()
-        }
-
-        async fn bootstrap_snapshot_if_needed(&self) -> Result<SyncBootstrapResult, String> {
-            self.bootstrap_results
-                .lock()
-                .await
-                .pop()
-                .ok_or_else(|| "missing bootstrap result".to_string())
-        }
-
-        async fn run_sync_cycle(&self, _post_bootstrap: bool) -> Result<SyncCycleResult, String> {
-            self.cycle_results
-                .lock()
-                .await
-                .pop()
-                .ok_or_else(|| "missing cycle result".to_string())
-        }
-
-        async fn ensure_background_started(&self) -> Result<bool, String> {
-            self.ensure_background_result.clone()
-        }
-    }
-
-    #[tokio::test]
-    async fn run_ready_reconcile_state_skips_when_not_ready() {
-        let ports = ReconcileTestPorts::new(Ok(SyncState::Registered));
-        let result = run_ready_reconcile_state(&ports).await;
-
-        assert_eq!(result.status, "skipped_not_ready");
-        assert_eq!(result.bootstrap_status, "not_attempted");
-        assert_eq!(result.background_status, "skipped");
-    }
-
-    #[tokio::test]
-    async fn run_ready_reconcile_state_applies_bootstrap_and_cycle() {
-        let ports = ReconcileTestPorts::new(Ok(SyncState::Ready));
-        ports
-            .bootstrap_results
-            .lock()
-            .await
-            .push(SyncBootstrapResult {
-                status: "applied".to_string(),
-                message: "Snapshot bootstrap completed".to_string(),
-                snapshot_id: Some("snap-1".to_string()),
-            });
-        ports.cycle_results.lock().await.push(SyncCycleResult {
-            status: "ok".to_string(),
-            lock_version: 1,
-            pushed_count: 0,
-            pulled_count: 8,
-            cursor: 25,
-            needs_bootstrap: false,
-            bootstrap_snapshot_id: None,
-            bootstrap_snapshot_seq: None,
-            dead_letter_count: 0,
-        });
-
-        let result = run_ready_reconcile_state(&ports).await;
-        assert_eq!(result.status, "ok");
-        assert_eq!(result.bootstrap_status, "applied");
-        assert_eq!(result.cycle_status.as_deref(), Some("ok"));
-        assert!(!result.retry_attempted);
-        assert_eq!(result.background_status, "started");
-    }
-
-    #[tokio::test]
-    async fn run_ready_reconcile_state_retries_once_when_cycle_needs_bootstrap() {
-        let ports = ReconcileTestPorts::new(Ok(SyncState::Ready));
-        {
-            let mut bootstrap_results = ports.bootstrap_results.lock().await;
-            bootstrap_results.push(SyncBootstrapResult {
-                status: "applied".to_string(),
-                message: "Retry bootstrap".to_string(),
-                snapshot_id: Some("snap-2".to_string()),
-            });
-            bootstrap_results.push(SyncBootstrapResult {
-                status: "applied".to_string(),
-                message: "Initial bootstrap".to_string(),
-                snapshot_id: Some("snap-1".to_string()),
-            });
-        }
-        {
-            let mut cycle_results = ports.cycle_results.lock().await;
-            cycle_results.push(SyncCycleResult {
-                status: "ok".to_string(),
-                lock_version: 2,
-                pushed_count: 0,
-                pulled_count: 2,
-                cursor: 40,
-                needs_bootstrap: false,
-                bootstrap_snapshot_id: None,
-                bootstrap_snapshot_seq: None,
-                dead_letter_count: 0,
-            });
-            cycle_results.push(SyncCycleResult {
-                status: "stale_cursor".to_string(),
-                lock_version: 1,
-                pushed_count: 0,
-                pulled_count: 0,
-                cursor: 20,
-                needs_bootstrap: true,
-                bootstrap_snapshot_id: None,
-                bootstrap_snapshot_seq: None,
-                dead_letter_count: 0,
-            });
-        }
-
-        let result = run_ready_reconcile_state(&ports).await;
-        assert_eq!(result.status, "ok");
-        assert!(result.retry_attempted);
-        assert_eq!(result.retry_cycle_status.as_deref(), Some("ok"));
-        assert!(!result.cycle_needs_bootstrap);
-    }
-
-    #[tokio::test]
-    async fn run_ready_reconcile_state_errors_when_retry_bootstrap_not_applied() {
-        let ports = ReconcileTestPorts::new(Ok(SyncState::Ready));
-        {
-            let mut bootstrap_results = ports.bootstrap_results.lock().await;
-            bootstrap_results.push(SyncBootstrapResult {
-                status: "requested".to_string(),
-                message: "requested a new snapshot".to_string(),
-                snapshot_id: None,
-            });
-            bootstrap_results.push(SyncBootstrapResult {
-                status: "applied".to_string(),
-                message: "Initial bootstrap".to_string(),
-                snapshot_id: Some("snap-1".to_string()),
-            });
-        }
-        ports.cycle_results.lock().await.push(SyncCycleResult {
-            status: "stale_cursor".to_string(),
-            lock_version: 1,
-            pushed_count: 0,
-            pulled_count: 0,
-            cursor: 20,
-            needs_bootstrap: true,
-            bootstrap_snapshot_id: None,
-            bootstrap_snapshot_seq: None,
-            dead_letter_count: 0,
-        });
-
-        let result = run_ready_reconcile_state(&ports).await;
-        assert_eq!(result.status, "error");
-        assert!(result.retry_attempted);
-        assert_eq!(result.bootstrap_status, "requested");
-        assert!(result
-            .message
-            .contains("Retry bootstrap did not apply a snapshot"));
-    }
-
-    #[tokio::test]
-    async fn run_ready_reconcile_state_errors_when_retry_cycle_still_needs_bootstrap() {
-        let ports = ReconcileTestPorts::new(Ok(SyncState::Ready));
-        {
-            let mut bootstrap_results = ports.bootstrap_results.lock().await;
-            bootstrap_results.push(SyncBootstrapResult {
-                status: "applied".to_string(),
-                message: "Retry bootstrap".to_string(),
-                snapshot_id: Some("snap-2".to_string()),
-            });
-            bootstrap_results.push(SyncBootstrapResult {
-                status: "applied".to_string(),
-                message: "Initial bootstrap".to_string(),
-                snapshot_id: Some("snap-1".to_string()),
-            });
-        }
-        {
-            let mut cycle_results = ports.cycle_results.lock().await;
-            cycle_results.push(SyncCycleResult {
-                status: "stale_cursor".to_string(),
-                lock_version: 2,
-                pushed_count: 0,
-                pulled_count: 0,
-                cursor: 40,
-                needs_bootstrap: true,
-                bootstrap_snapshot_id: None,
-                bootstrap_snapshot_seq: None,
-                dead_letter_count: 0,
-            });
-            cycle_results.push(SyncCycleResult {
-                status: "stale_cursor".to_string(),
-                lock_version: 1,
-                pushed_count: 0,
-                pulled_count: 0,
-                cursor: 20,
-                needs_bootstrap: true,
-                bootstrap_snapshot_id: None,
-                bootstrap_snapshot_seq: None,
-                dead_letter_count: 0,
-            });
-        }
-
-        let result = run_ready_reconcile_state(&ports).await;
-        assert_eq!(result.status, "error");
-        assert!(result.retry_attempted);
-        assert!(result.cycle_needs_bootstrap);
-        assert_eq!(result.retry_cycle_status.as_deref(), Some("stale_cursor"));
-        assert!(result
-            .message
-            .contains("Retry sync cycle still requires bootstrap"));
-    }
-
-    #[tokio::test]
-    async fn run_ready_reconcile_state_surfaces_background_start_failure() {
-        let mut ports = ReconcileTestPorts::new(Ok(SyncState::Ready));
-        ports.ensure_background_result = Err("start failed".to_string());
-        ports
-            .bootstrap_results
-            .lock()
-            .await
-            .push(SyncBootstrapResult {
-                status: "skipped".to_string(),
-                message: "Snapshot bootstrap already completed".to_string(),
-                snapshot_id: None,
-            });
-
-        let result = run_ready_reconcile_state(&ports).await;
-        assert_eq!(result.status, "error");
-        assert_eq!(result.background_status, "failed");
-        assert!(result.message.contains("Background engine start failed"));
-        assert!(result.message.contains("bootstrap_status=skipped"));
-        assert_eq!(result.bootstrap_status, "skipped");
     }
 }

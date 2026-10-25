@@ -162,7 +162,7 @@ export default function HistoryChart({
                   value: amountFormatting.formatPrice(averageCost, data[0]?.currency ?? "", false),
                   position: "insideBottomLeft",
                   fill: "var(--foreground)",
-                  fontSize: 11,
+                  fontSize: "0.6875rem",
                 }}
               />
             )}
@@ -267,6 +267,8 @@ function markerTextClass(tone: HistoryChartMarkerTone) {
       return "text-secondary-foreground";
     case "warning":
       return "text-warning";
+    case "info":
+      return "text-info";
     default:
       return "text-primary";
   }
@@ -282,6 +284,8 @@ function markerDotClass(tone: HistoryChartMarkerTone) {
       return "bg-secondary";
     case "warning":
       return "bg-warning";
+    case "info":
+      return "bg-info";
     default:
       return "bg-primary";
   }

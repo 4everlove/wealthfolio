@@ -9,6 +9,7 @@ import { useMemo } from "react";
 import { FormProvider, useForm, type Resolver } from "react-hook-form";
 import { useTranslation } from "react-i18next";
 import { z } from "zod";
+import { useActivityCurrency } from "../../hooks/use-activity-currency";
 import {
   AccountSelect,
   AdvancedOptionsSection,
@@ -21,6 +22,7 @@ import {
   SymbolSearch,
   type AccountSelectOption,
 } from "./fields";
+import { Spinner } from "@wealthfolio/ui";
 
 export type AdjustmentMode = "cash" | "securities";
 
@@ -91,7 +93,8 @@ export const createAdjustmentFormSchema = (t?: TFunction) =>
         .positive({
           message: msg(t, "activity:form.err_fxrate_positive", "FX Rate must be positive."),
         })
-        .optional(),
+        .optional()
+        .nullable(),
       subtype: z.string().optional().nullable(),
       quoteMode: z.enum([QuoteMode.MARKET, QuoteMode.MANUAL]).default(QuoteMode.MARKET),
       exchangeMic: z.string().nullable().optional(),
@@ -106,6 +109,23 @@ export const createAdjustmentFormSchema = (t?: TFunction) =>
           path: ["assetId"],
           message: msg(t, "activity:form.err_select_symbol", "Please select a symbol."),
         });
+      }
+
+      if (isCostBasisAdjustment(data.subtype)) {
+        if (data.adjustmentMode !== "securities") {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["assetId"],
+            message: msg(t, "activity:form.err_select_symbol", "Please select a symbol."),
+          });
+        }
+        if (!(data.amount != null && data.amount > 0)) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["amount"],
+            message: msg(t, "activity:form.err_enter_amount", "Please enter an amount."),
+          });
+        }
       }
 
       if (data.subtype?.trim().toUpperCase() === ACTIVITY_SUBTYPES.OPTION_EXPIRY) {
@@ -139,6 +159,15 @@ export const createAdjustmentFormSchema = (t?: TFunction) =>
         }
       }
     });
+
+/** RETURN_OF_CAPITAL / NOTIONAL_DISTRIBUTION: move an asset's cost basis by the amount. */
+function isCostBasisAdjustment(subtype: string | null | undefined): boolean {
+  const normalized = subtype?.trim().toUpperCase();
+  return (
+    normalized === ACTIVITY_SUBTYPES.RETURN_OF_CAPITAL ||
+    normalized === ACTIVITY_SUBTYPES.NOTIONAL_DISTRIBUTION
+  );
+}
 
 export const adjustmentFormSchema = createAdjustmentFormSchema();
 
@@ -191,6 +220,8 @@ export function AdjustmentForm({
     },
   });
 
+  useActivityCurrency(form, accounts, { isEditing });
+
   const adjustmentMode = form.watch("adjustmentMode");
   const accountId = form.watch("accountId");
   const currency = form.watch("currency");
@@ -209,7 +240,7 @@ export function AdjustmentForm({
       symbolInstrumentType?.trim().toUpperCase() === InstrumentType.OPTION || isCurrentOptionExpiry;
     const options: string[] = canSelectOptionExpiry
       ? [isCurrentOptionExpiry && currentSubtype ? currentSubtype : ACTIVITY_SUBTYPES.OPTION_EXPIRY]
-      : [];
+      : [ACTIVITY_SUBTYPES.RETURN_OF_CAPITAL, ACTIVITY_SUBTYPES.NOTIONAL_DISTRIBUTION];
     if (currentSubtype && !options.includes(currentSubtype)) {
       return [currentSubtype, ...options];
     }
@@ -227,7 +258,10 @@ export function AdjustmentForm({
       form.setValue("assetMetadata", undefined);
       form.setValue("quantity", null);
       form.setValue("unitPrice", null);
-      if (subtype?.trim().toUpperCase() === ACTIVITY_SUBTYPES.OPTION_EXPIRY) {
+      if (
+        subtype?.trim().toUpperCase() === ACTIVITY_SUBTYPES.OPTION_EXPIRY ||
+        isCostBasisAdjustment(subtype)
+      ) {
         form.setValue("subtype", null);
       }
     }
@@ -260,7 +294,7 @@ export function AdjustmentForm({
             />
           }
         >
-          <AccountSelect name="accountId" accounts={accounts} currencyName="currency" />
+          <AccountSelect name="accountId" accounts={accounts} />
           <DatePicker name="activityDate" label={t("activity:field_date")} />
         </FormSection>
 
@@ -337,11 +371,11 @@ export function AdjustmentForm({
             </Button>
           )}
           <Button type="submit" disabled={isLoading}>
-            {isLoading && <Icons.Spinner className="mr-2 h-4 w-4 animate-spin" />}
+            {isLoading && <Spinner className="me-2 h-4 w-4" />}
             {isEditing ? (
-              <Icons.Check className="mr-2 h-4 w-4" />
+              <Icons.Check className="me-2 h-4 w-4" />
             ) : (
-              <Icons.Plus className="mr-2 h-4 w-4" />
+              <Icons.Plus className="me-2 h-4 w-4" />
             )}
             {isEditing
               ? t("activity:form.button_update")

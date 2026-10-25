@@ -1,3 +1,4 @@
+use crate::profiles::ProfileAccess;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
@@ -13,7 +14,7 @@ use chrono::NaiveDate;
 use log::{debug, info};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, State};
+use tauri::AppHandle;
 use wealthfolio_core::{
     accounts::{
         account_supports_portfolio_scope, account_supports_purpose, Account, AccountPurpose,
@@ -34,10 +35,9 @@ use wealthfolio_core::{
     },
     portfolio::snapshot::{
         check_holdings_import as validate_holdings_import, holdings_import_data_source,
-        snapshot_date_requires_remediation, snapshot_recalculation_start_after_delete,
-        validate_holdings_import_snapshot, CashBalanceInput, HoldingsImportPositionValidationInput,
-        HoldingsImportSnapshotValidationInput, ManualHoldingInput, ManualSnapshotRequest,
-        ManualSnapshotService, SnapshotSource,
+        snapshot_date_requires_remediation, validate_holdings_import_snapshot, CashBalanceInput,
+        HoldingsImportPositionValidationInput, HoldingsImportSnapshotValidationInput,
+        ManualHoldingInput, ManualSnapshotRequest, ManualSnapshotService, SnapshotSource,
     },
     portfolios::{AccountScope, ResolvedAccountScope},
     quotes::MarketSyncMode,
@@ -159,7 +159,8 @@ pub struct SnapshotInfo {
 }
 
 #[tauri::command]
-pub async fn recalculate_portfolio(handle: AppHandle) -> Result<(), String> {
+pub async fn recalculate_portfolio(handle: AppHandle, state: ProfileAccess) -> Result<(), String> {
+    let context = state.context()?;
     debug!("Emitting PORTFOLIO_TRIGGER_RECALCULATE event...");
     // Full recalculation uses BackfillHistory to rebuild quote history from activity start.
     // This ensures all historical valuations have proper quote coverage.
@@ -171,20 +172,22 @@ pub async fn recalculate_portfolio(handle: AppHandle) -> Result<(), String> {
             asset_ids: None,
             days: 365 * 5, // 5 years fallback if no activity dates
         })
+        .force_full(true)
         .build();
-    emit_portfolio_trigger_recalculate(&handle, payload);
+    emit_portfolio_trigger_recalculate(&handle, payload, &context);
     Ok(())
 }
 
 #[tauri::command]
-pub async fn update_portfolio(handle: AppHandle) -> Result<(), String> {
+pub async fn update_portfolio(handle: AppHandle, state: ProfileAccess) -> Result<(), String> {
+    let context = state.context()?;
     debug!("Emitting PORTFOLIO_TRIGGER_UPDATE event...");
     // Manual update uses Incremental sync for all assets
     let payload = PortfolioRequestPayload::builder()
         .account_ids(None) // None signifies all accounts
         .market_sync_mode(MarketSyncMode::Incremental { asset_ids: None })
         .build();
-    emit_portfolio_trigger_update(&handle, payload);
+    emit_portfolio_trigger_update(&handle, payload, &context);
     Ok(())
 }
 
@@ -230,28 +233,26 @@ async fn resolve_current_valuation_scope(
 
 #[tauri::command]
 pub async fn get_holdings(
-    state: State<'_, Arc<ServiceContext>>,
+    state: ProfileAccess,
     filter: AccountScopeInput,
 ) -> Result<Vec<Holding>, String> {
+    let context = state.context()?;
     debug!("Get holdings...");
     let filter = filter.into_account_filter()?;
-    get_holdings_for_filter(state.inner().as_ref(), filter, false).await
+    get_holdings_for_filter(context.as_ref(), filter, false).await
 }
 
 #[tauri::command]
 pub async fn get_holdings_list(
-    state: State<'_, Arc<ServiceContext>>,
+    state: ProfileAccess,
     filter: AccountScopeInput,
     include_closed: Option<bool>,
 ) -> Result<Vec<HoldingListItem>, String> {
+    let context = state.context()?;
     debug!("Get holdings list...");
     let filter = filter.into_account_filter()?;
-    let holdings = get_holdings_for_filter(
-        state.inner().as_ref(),
-        filter,
-        include_closed.unwrap_or(false),
-    )
-    .await?;
+    let holdings =
+        get_holdings_for_filter(context.as_ref(), filter, include_closed.unwrap_or(false)).await?;
     Ok(holdings.into_iter().map(HoldingListItem::from).collect())
 }
 
@@ -288,16 +289,17 @@ async fn get_holdings_for_filter(
 
 #[tauri::command]
 pub async fn get_holding(
-    state: State<'_, Arc<ServiceContext>>,
+    state: ProfileAccess,
     account_id: String,
     asset_id: String,
 ) -> Result<Option<Holding>, String> {
+    let context = state.context()?;
     debug!(
         "Get specific holding for asset {} in account {}",
         asset_id, account_id
     );
-    let base_currency = state.get_base_currency();
-    state
+    let base_currency = context.get_base_currency();
+    context
         .holdings_service()
         .get_holding(&account_id, &asset_id, &base_currency)
         .await
@@ -306,12 +308,13 @@ pub async fn get_holding(
 
 #[tauri::command]
 pub async fn get_asset_holdings(
-    state: State<'_, Arc<ServiceContext>>,
+    state: ProfileAccess,
     asset_id: String,
 ) -> Result<Vec<Holding>, String> {
+    let context = state.context()?;
     debug!("Get holdings for asset {} across all accounts", asset_id);
-    let base_currency = state.get_base_currency();
-    let accounts = state
+    let base_currency = context.get_base_currency();
+    let accounts = context
         .account_service()
         .get_active_accounts()
         .map_err(|e| format!("Failed to get accounts: {}", e))?;
@@ -321,7 +324,7 @@ pub async fn get_asset_holdings(
         if !account_supports_purpose(&account.account_type, AccountPurpose::Holdings) {
             continue;
         }
-        if let Ok(Some(holding)) = state
+        if let Ok(Some(holding)) = context
             .holdings_service()
             .get_holding(&account.id, &asset_id, &base_currency)
             .await
@@ -334,13 +337,14 @@ pub async fn get_asset_holdings(
 
 #[tauri::command]
 pub async fn get_asset_lots(
-    state: State<'_, Arc<ServiceContext>>,
+    state: ProfileAccess,
     asset_id: String,
     include_snapshot_positions: bool,
 ) -> Result<Vec<AssetLotView>, String> {
+    let context = state.context()?;
     debug!("Get lot view rows for asset {}", asset_id);
-    state
-        .lots_repository
+    context
+        .holdings_service()
         .get_asset_lot_view(&asset_id, include_snapshot_positions)
         .await
         .map_err(|e| e.to_string())
@@ -348,21 +352,22 @@ pub async fn get_asset_lots(
 
 #[tauri::command]
 pub async fn get_portfolio_allocations(
-    state: State<'_, Arc<ServiceContext>>,
+    state: ProfileAccess,
     filter: AccountScopeInput,
 ) -> Result<PortfolioAllocations, String> {
-    let base_currency = state.get_base_currency();
+    let context = state.context()?;
+    let base_currency = context.get_base_currency();
     let filter = filter.into_account_filter()?;
-    let resolved = resolve_scope(&filter, &state).await?;
-    let account_ids = holdings_account_ids(&state, &resolved.account_ids)?;
+    let resolved = resolve_scope(&filter, &context).await?;
+    let account_ids = holdings_account_ids(&context, &resolved.account_ids)?;
     if account_ids.len() == 1 {
-        state
+        context
             .allocation_service()
             .get_portfolio_allocations(&account_ids[0], &base_currency)
             .await
             .map_err(|e| e.to_string())
     } else {
-        state
+        context
             .allocation_service()
             .get_portfolio_allocations_for_accounts(
                 &account_ids,
@@ -376,23 +381,24 @@ pub async fn get_portfolio_allocations(
 
 #[tauri::command]
 pub async fn get_holdings_by_allocation(
-    state: State<'_, Arc<ServiceContext>>,
+    state: ProfileAccess,
     filter: AccountScopeInput,
     taxonomy_id: String,
     category_id: String,
 ) -> Result<AllocationHoldings, String> {
-    let base_currency = state.get_base_currency();
+    let context = state.context()?;
+    let base_currency = context.get_base_currency();
     let filter = filter.into_account_filter()?;
-    let resolved = resolve_scope(&filter, &state).await?;
-    let account_ids = holdings_account_ids(&state, &resolved.account_ids)?;
+    let resolved = resolve_scope(&filter, &context).await?;
+    let account_ids = holdings_account_ids(&context, &resolved.account_ids)?;
     if account_ids.len() == 1 {
-        state
+        context
             .allocation_service()
             .get_holdings_by_allocation(&account_ids[0], &base_currency, &taxonomy_id, &category_id)
             .await
             .map_err(|e| e.to_string())
     } else {
-        state
+        context
             .allocation_service()
             .get_holdings_by_allocation_for_accounts(
                 &account_ids,
@@ -408,12 +414,13 @@ pub async fn get_holdings_by_allocation(
 
 #[tauri::command]
 pub async fn get_historical_valuations(
-    state: State<'_, Arc<ServiceContext>>,
+    state: ProfileAccess,
     account_id: Option<String>,
     filter: Option<AccountScopeInput>,
     start_date: Option<String>,
     end_date: Option<String>,
 ) -> Result<Vec<DailyAccountValuation>, String> {
+    let context = state.context()?;
     let started_at = Instant::now();
     let debug_scope = log::log_enabled!(log::Level::Debug)
         .then(|| (format!("{:?}", account_id), format!("{:?}", filter)));
@@ -437,22 +444,22 @@ pub async fn get_historical_valuations(
         .transpose()?;
 
     let result = if let Some(input) = filter {
-        let base_currency = state.get_base_currency();
+        let base_currency = context.get_base_currency();
         let account_filter = input.into_account_filter()?;
-        let resolved = state
+        let resolved = context
             .portfolio_service()
             .resolve_account_scope(&account_filter, &base_currency)
             .map_err(|e| e.to_string())?;
-        let account_ids = holdings_account_ids(state.inner().as_ref(), &resolved.account_ids)?;
+        let account_ids = holdings_account_ids(context.as_ref(), &resolved.account_ids)?;
         if account_ids.is_empty() {
             Ok(Vec::new())
         } else if account_ids.len() == 1 {
-            state
+            context
                 .valuation_service()
                 .get_historical_valuations(&account_ids[0], from_date_opt, to_date_opt)
                 .map_err(|e| e.to_string())
         } else {
-            state
+            context
                 .valuation_service()
                 .get_historical_valuation_totals_for_accounts(
                     &resolved.scope_id,
@@ -461,29 +468,30 @@ pub async fn get_historical_valuations(
                     from_date_opt,
                     to_date_opt,
                 )
+                .await
                 .map_err(|e| e.to_string())
         }
     } else if let Some(account_id) = account_id {
         let account_ids =
-            holdings_account_ids(state.inner().as_ref(), std::slice::from_ref(&account_id))?;
+            holdings_account_ids(context.as_ref(), std::slice::from_ref(&account_id))?;
         if account_ids.is_empty() {
             return Ok(Vec::new());
         }
-        state
+        context
             .valuation_service()
             .get_historical_valuations(&account_id, from_date_opt, to_date_opt)
             .map_err(|e| e.to_string())
     } else {
-        let base_currency = state.get_base_currency();
-        let resolved = state
+        let base_currency = context.get_base_currency();
+        let resolved = context
             .portfolio_service()
             .resolve_account_scope(&AccountScope::All, &base_currency)
             .map_err(|e| e.to_string())?;
-        let account_ids = holdings_account_ids(state.inner().as_ref(), &resolved.account_ids)?;
+        let account_ids = holdings_account_ids(context.as_ref(), &resolved.account_ids)?;
         if account_ids.is_empty() {
             return Ok(Vec::new());
         }
-        state
+        context
             .valuation_service()
             .get_historical_valuation_totals_for_accounts(
                 &resolved.scope_id,
@@ -492,6 +500,7 @@ pub async fn get_historical_valuations(
                 from_date_opt,
                 to_date_opt,
             )
+            .await
             .map_err(|e| e.to_string())
     };
 
@@ -509,30 +518,31 @@ pub async fn get_historical_valuations(
 
 #[tauri::command]
 pub async fn get_latest_valuations(
-    state: State<'_, Arc<ServiceContext>>,
+    state: ProfileAccess,
     account_ids: Vec<String>,
 ) -> Result<Vec<DailyAccountValuation>, String> {
+    let context = state.context()?;
     debug!("Get latest valuations for accounts: {:?}", account_ids);
 
     let ids_to_process: Vec<String> = if account_ids.is_empty() {
         debug!("Input account_ids is empty, fetching active accounts for latest valuations.");
-        let active_ids = state
+        let active_ids = context
             .account_service()
             .get_active_accounts()
             .map_err(|e| format!("Failed to fetch active accounts: {}", e))?
             .into_iter()
             .map(|acc| acc.id)
             .collect::<Vec<_>>();
-        holdings_account_ids(state.inner().as_ref(), &active_ids)?
+        holdings_account_ids(context.as_ref(), &active_ids)?
     } else {
-        holdings_account_ids(state.inner().as_ref(), &account_ids)?
+        holdings_account_ids(context.as_ref(), &account_ids)?
     };
 
     if ids_to_process.is_empty() {
         return Ok(Vec::new());
     }
 
-    state
+    context
         .valuation_service()
         .get_latest_valuations(&ids_to_process)
         .map_err(|e| e.to_string())
@@ -540,25 +550,26 @@ pub async fn get_latest_valuations(
 
 #[tauri::command]
 pub async fn get_current_valuation(
-    state: State<'_, Arc<ServiceContext>>,
+    state: ProfileAccess,
     filter: AccountScopeInput,
     include_accounts: Option<bool>,
 ) -> Result<CurrentValuationResponse, String> {
+    let context = state.context()?;
     debug!("Get scoped current valuation...");
 
-    let base_currency = state.get_base_currency();
-    let timezone = state.get_timezone();
+    let base_currency = context.get_base_currency();
+    let timezone = context.get_timezone();
     let latest_snapshot_cutoff = user_today(parse_user_timezone_or_default(&timezone));
     let account_filter = filter.into_account_filter()?;
-    let resolved = resolve_current_valuation_scope(&account_filter, &state).await?;
-    let account_service = state.account_service();
-    let snapshot_repository = state.snapshot_repository();
-    let asset_service = state.asset_service();
-    let quote_service = state.quote_service();
-    let fx_service = state.fx_service();
+    let resolved = resolve_current_valuation_scope(&account_filter, &context).await?;
+    let account_service = context.account_service();
+    let snapshot_service = context.snapshot_service();
+    let asset_service = context.asset_service();
+    let quote_service = context.quote_service();
+    let fx_service = context.fx_service();
     let service = CurrentAccountValuationService::new(
         account_service.as_ref(),
-        snapshot_repository.as_ref(),
+        snapshot_service.as_ref(),
         asset_service.as_ref(),
         quote_service.as_ref(),
         fx_service.as_ref(),
@@ -578,16 +589,17 @@ pub async fn get_current_valuation(
 
 #[tauri::command]
 pub async fn get_income_summary(
-    state: State<'_, Arc<ServiceContext>>,
+    state: ProfileAccess,
     filter: Option<AccountScopeInput>,
 ) -> Result<Vec<IncomeSummary>, String> {
+    let context = state.context()?;
     debug!("Fetching income summary...");
     let account_ids: Vec<String> = if let Some(input) = filter {
         let af = input.into_account_filter()?;
-        let resolved = resolve_scope(&af, &state).await?;
-        income_account_ids(&state, &resolved.account_ids)?
+        let resolved = resolve_scope(&af, &context).await?;
+        income_account_ids(&context, &resolved.account_ids)?
     } else {
-        state
+        context
             .account_service()
             .get_active_accounts()
             .map_err(|e| format!("Failed to fetch active accounts: {}", e))?
@@ -601,7 +613,7 @@ pub async fn get_income_summary(
     if account_ids.is_empty() {
         return Ok(Vec::new());
     }
-    state
+    context
         .income_service()
         .get_income_summary(Some(&account_ids))
         .map_err(|e| e.to_string())
@@ -609,9 +621,10 @@ pub async fn get_income_summary(
 
 #[tauri::command]
 pub async fn calculate_accounts_simple_performance(
-    state: State<'_, Arc<ServiceContext>>,
+    state: ProfileAccess,
     account_ids: Vec<String>,
 ) -> Result<Vec<SimplePerformanceMetrics>, String> {
+    let context = state.context()?;
     debug!(
         "Calculate simple performance for accounts: {:?}",
         account_ids
@@ -620,7 +633,7 @@ pub async fn calculate_accounts_simple_performance(
     let ids_to_process: Vec<String> = if account_ids.is_empty() {
         Vec::new()
     } else {
-        let requested = state
+        let requested = context
             .account_service()
             .get_accounts_by_ids(&account_ids)
             .map_err(|e| format!("Failed to fetch accounts: {}", e))?;
@@ -637,7 +650,7 @@ pub async fn calculate_accounts_simple_performance(
         return Ok(Vec::new());
     }
 
-    state
+    context
         .performance_service()
         .calculate_accounts_simple_performance(&ids_to_process) // Pass the potentially modified list
         .map_err(|e| e.to_string())
@@ -648,7 +661,7 @@ pub async fn calculate_accounts_simple_performance(
 /// tracking_mode: Optional tracking mode for the account ("HOLDINGS" or "TRANSACTIONS")
 #[tauri::command]
 pub async fn calculate_performance_history(
-    state: State<'_, Arc<ServiceContext>>,
+    state: ProfileAccess,
     item_type: String,
     item_id: String,
     start_date: Option<String>,
@@ -656,6 +669,7 @@ pub async fn calculate_performance_history(
     tracking_mode: Option<String>,
     filter: Option<AccountScopeInput>,
 ) -> Result<PerformanceResult, String> {
+    let context = state.context()?;
     debug!(
         "Calculating performance for type: {}, id: {}, start: {:?}, end: {:?}, tracking_mode: {:?}",
         item_type, item_id, start_date, end_date, tracking_mode
@@ -683,14 +697,13 @@ pub async fn calculate_performance_history(
         _ => None,
     });
     if let (true, Some(filter)) = (item_type == "account", filter) {
-        let base_currency = state.get_base_currency();
+        let base_currency = context.get_base_currency();
         let account_filter = filter.into_account_filter()?;
-        let resolved = state
+        let resolved = context
             .portfolio_service()
             .resolve_account_scope(&account_filter, &base_currency)
             .map_err(|e| e.to_string())?;
-        let accounts_by_id =
-            performance_accounts_by_id(state.inner().as_ref(), &resolved.account_ids)?;
+        let accounts_by_id = performance_accounts_by_id(context.as_ref(), &resolved.account_ids)?;
         let account_ids = performance_account_ids_from_map(&accounts_by_id, &resolved.account_ids);
         if account_ids.is_empty() {
             let mut result = empty_performance_metrics(
@@ -711,7 +724,7 @@ pub async fn calculate_performance_history(
         let tracking_modes =
             performance_account_tracking_modes_from_map(&accounts_by_id, &account_ids);
         let account_types = performance_account_types_from_map(&accounts_by_id, &account_ids);
-        let mut result = state
+        let mut result = context
             .performance_service()
             .calculate_performance_history_for_accounts(
                 &resolved.scope_id,
@@ -735,7 +748,7 @@ pub async fn calculate_performance_history(
         Ok(result)
     } else {
         let (authoritative_tracking_mode, authoritative_account_type) = if item_type == "account" {
-            let account = state
+            let account = context
                 .account_service()
                 .get_account(&item_id)
                 .map_err(|e| format!("Failed to fetch account: {}", e))?;
@@ -752,7 +765,7 @@ pub async fn calculate_performance_history(
             (tracking_mode_opt, None)
         };
 
-        state
+        context
             .performance_service()
             .calculate_performance_history(
                 &item_type,
@@ -773,7 +786,7 @@ pub async fn calculate_performance_history(
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn calculate_performance_summary(
-    state: State<'_, Arc<ServiceContext>>,
+    state: ProfileAccess,
     item_type: String,
     item_id: String,
     start_date: Option<String>,
@@ -782,6 +795,7 @@ pub async fn calculate_performance_summary(
     filter: Option<AccountScopeInput>,
     profile: Option<PerformanceSummaryProfile>,
 ) -> Result<PerformanceResult, String> {
+    let context = state.context()?;
     debug!(
         "Calculating performance summary for type: {}, id: {}, start: {:?}, end: {:?}, tracking_mode: {:?}",
         item_type, item_id, start_date, end_date, tracking_mode
@@ -812,14 +826,13 @@ pub async fn calculate_performance_summary(
     let summary_start = Instant::now();
 
     if let (true, Some(filter)) = (item_type == "account", filter) {
-        let base_currency = state.get_base_currency();
+        let base_currency = context.get_base_currency();
         let account_filter = filter.into_account_filter()?;
-        let resolved = state
+        let resolved = context
             .portfolio_service()
             .resolve_account_scope(&account_filter, &base_currency)
             .map_err(|e| e.to_string())?;
-        let accounts_by_id =
-            performance_accounts_by_id(state.inner().as_ref(), &resolved.account_ids)?;
+        let accounts_by_id = performance_accounts_by_id(context.as_ref(), &resolved.account_ids)?;
         let account_ids = performance_account_ids_from_map(&accounts_by_id, &resolved.account_ids);
         if account_ids.is_empty() {
             let mut result = empty_performance_metrics(
@@ -841,37 +854,20 @@ pub async fn calculate_performance_summary(
             performance_account_tracking_modes_from_map(&accounts_by_id, &account_ids);
         let account_types = performance_account_types_from_map(&accounts_by_id, &account_ids);
         let tracking_composition = performance_tracking_composition(&tracking_modes, &account_ids);
-        let performance_service = state.performance_service();
-        let handle = tokio::runtime::Handle::current();
-        let scope_id_for_task = resolved.scope_id.clone();
-        let base_currency_for_task = resolved.base_currency.clone();
-        let account_ids_for_task = account_ids.clone();
-        let tracking_modes_for_task = tracking_modes.clone();
-        let account_types_for_task = account_types.clone();
-        let mut result = tokio::task::spawn_blocking(move || {
-            handle.block_on(async move {
-                performance_service
-                    .calculate_performance_summary_for_accounts(
-                        &scope_id_for_task,
-                        &account_ids_for_task,
-                        &base_currency_for_task,
-                        &tracking_modes_for_task,
-                        &account_types_for_task,
-                        start_date_opt,
-                        end_date_opt,
-                        profile,
-                    )
-                    .await
-            })
-        })
-        .await
-        .map_err(|e| {
-            format!(
-                "Failed to join performance summary calculation for {}: {}",
-                resolved.scope_id, e
+        let mut result = context
+            .performance_service()
+            .calculate_performance_summary_for_accounts(
+                &resolved.scope_id,
+                &account_ids,
+                &resolved.base_currency,
+                &tracking_modes,
+                &account_types,
+                start_date_opt,
+                end_date_opt,
+                profile,
             )
-        })?
-        .map_err(|e| format!("Failed to calculate performance: {}", e))?;
+            .await
+            .map_err(|e| format!("Failed to calculate performance: {}", e))?;
         debug!(
             "Performance summary timing: item_type={}, scope_id={}, profile={:?}, account_count={}, tracking_composition={}, start={:?}, end={:?}, elapsed_ms={:.1}",
             item_type,
@@ -894,7 +890,7 @@ pub async fn calculate_performance_summary(
         Ok(result)
     } else {
         let (authoritative_tracking_mode, authoritative_account_type) = if item_type == "account" {
-            let account = state
+            let account = context
                 .account_service()
                 .get_account(&item_id)
                 .map_err(|e| format!("Failed to fetch account: {}", e))?;
@@ -911,7 +907,7 @@ pub async fn calculate_performance_summary(
             (tracking_mode_opt, None)
         };
 
-        let result = state
+        let result = context
             .performance_service()
             .calculate_performance_summary(
                 &item_type,
@@ -940,12 +936,13 @@ pub async fn calculate_performance_summary(
 
 #[tauri::command]
 pub async fn get_performance_summaries(
-    state: State<'_, Arc<ServiceContext>>,
+    state: ProfileAccess,
     scopes: Vec<PerformanceSummaryScopeInput>,
     start_date: Option<String>,
     end_date: Option<String>,
     profile: Option<PerformanceSummaryProfile>,
 ) -> Result<HashMap<String, PerformanceResult>, String> {
+    let context = state.context()?;
     let start_date_opt: Option<chrono::NaiveDate> = start_date
         .map(|date_str| {
             chrono::NaiveDate::parse_from_str(&date_str, "%Y-%m-%d")
@@ -960,24 +957,22 @@ pub async fn get_performance_summaries(
         })
         .transpose()?;
 
-    let base_currency = state.get_base_currency();
+    let base_currency = context.get_base_currency();
     let profile = profile.unwrap_or_default();
     let requested_account_ids = unique_account_ids(
         scopes
             .iter()
             .flat_map(|scope| scope.account_ids.iter().cloned()),
     );
-    let accounts_by_id =
-        performance_accounts_by_id(state.inner().as_ref(), &requested_account_ids)?;
+    let accounts_by_id = performance_accounts_by_id(context.as_ref(), &requested_account_ids)?;
     let batch_scopes = scopes
         .into_iter()
         .map(|scope| PerformanceSummaryBatchScope {
             account_ids: scope.account_ids,
         })
         .collect();
-    let performance_service = state.performance_service();
     let batch = calculate_performance_summary_batch_for_accounts(
-        performance_service,
+        context.performance_service(),
         batch_scopes,
         accounts_by_id,
         base_currency,
@@ -1076,13 +1071,14 @@ pub struct HoldingInput {
 /// Ensures assets and FX pairs are created before saving, following the same pattern as activities.
 #[tauri::command]
 pub async fn save_manual_holdings(
-    state: State<'_, Arc<ServiceContext>>,
+    state: ProfileAccess,
     _handle: AppHandle,
     account_id: String,
     holdings: Vec<HoldingInput>,
     cash_balances: HashMap<String, String>,
     snapshot_date: Option<String>,
 ) -> Result<(), String> {
+    let context = state.context()?;
     debug!(
         "Saving manual holdings for account {}: {} holdings, {} cash balances",
         account_id,
@@ -1091,16 +1087,16 @@ pub async fn save_manual_holdings(
     );
 
     // Get the account to verify it exists and get its currency
-    let account = state
+    let account = context
         .account_service()
         .get_account(&account_id)
         .map_err(|e| format!("Failed to get account: {}", e))?;
 
     // Get base currency for FX pair registration
-    let base_currency = state.get_base_currency();
+    let base_currency = context.get_base_currency();
 
     // Parse the snapshot date or use today in the configured user timezone.
-    let timezone = state.get_timezone();
+    let timezone = context.get_timezone();
     let date = match snapshot_date {
         Some(date_str) => chrono::NaiveDate::parse_from_str(&date_str, "%Y-%m-%d")
             .map_err(|e| format!("Invalid date format: {}", e))?,
@@ -1148,10 +1144,10 @@ pub async fn save_manual_holdings(
     }
 
     let manual_snapshot_service = ManualSnapshotService::new(
-        state.asset_service(),
-        state.fx_service(),
-        state.snapshot_service(),
-        state.quote_service(),
+        context.asset_service(),
+        context.fx_service(),
+        context.snapshot_service(),
+        context.quote_service(),
     )
     .with_timezone(timezone);
 
@@ -1205,10 +1201,11 @@ pub struct CheckHoldingsImportResult {
 
 #[tauri::command]
 pub async fn check_holdings_import(
-    state: State<'_, Arc<ServiceContext>>,
+    state: ProfileAccess,
     account_id: String,
     snapshots: Vec<HoldingsSnapshotInput>,
 ) -> Result<CheckHoldingsImportResult, String> {
+    let context = state.context()?;
     debug!(
         "Checking {} holdings snapshots for account {}",
         snapshots.len(),
@@ -1216,11 +1213,11 @@ pub async fn check_holdings_import(
     );
 
     // Verify account exists
-    let account = state
+    let account = context
         .account_service()
         .get_account(&account_id)
         .map_err(|e| format!("Failed to get account: {}", e))?;
-    let today = user_today(parse_user_timezone_or_default(&state.get_timezone()));
+    let today = user_today(parse_user_timezone_or_default(&context.get_timezone()));
 
     let validation_snapshots: Vec<_> = snapshots
         .iter()
@@ -1250,8 +1247,8 @@ pub async fn check_holdings_import(
                 .collect(),
         })
         .collect();
-    let asset_service = state.asset_service();
-    let snapshot_service = state.snapshot_service();
+    let asset_service = context.asset_service();
+    let snapshot_service = context.snapshot_service();
     let result = validate_holdings_import(
         asset_service.as_ref(),
         snapshot_service.as_ref(),
@@ -1358,11 +1355,12 @@ pub struct ImportHoldingsCsvResult {
 /// - Multiple dates create multiple snapshots
 #[tauri::command]
 pub async fn import_holdings_csv(
-    state: State<'_, Arc<ServiceContext>>,
+    state: ProfileAccess,
     _handle: AppHandle,
     account_id: String,
     snapshots: Vec<HoldingsSnapshotInput>,
 ) -> Result<ImportHoldingsCsvResult, String> {
+    let context = state.context()?;
     info!(
         "Importing {} holdings snapshots for account {}",
         snapshots.len(),
@@ -1370,13 +1368,13 @@ pub async fn import_holdings_csv(
     );
 
     // Get the account to verify it exists and get its currency
-    let account = state
+    let account = context
         .account_service()
         .get_account(&account_id)
         .map_err(|e| format!("Failed to get account: {}", e))?;
 
     // Get base currency for FX pair registration
-    let base_currency = state.get_base_currency();
+    let base_currency = context.get_base_currency();
 
     let mut snapshots_imported = 0;
     let mut snapshots_failed = 0;
@@ -1385,7 +1383,7 @@ pub async fn import_holdings_csv(
 
     for snapshot_input in snapshots {
         match import_single_snapshot(
-            &state,
+            &context,
             &account_id,
             &account.currency,
             &base_currency,
@@ -1431,7 +1429,7 @@ pub async fn import_holdings_csv(
 /// Helper function to import a single holdings snapshot
 /// Returns the list of asset IDs that were created/used
 async fn import_single_snapshot(
-    state: &State<'_, Arc<ServiceContext>>,
+    state: &Arc<ServiceContext>,
     account_id: &str,
     account_currency: &str,
     base_currency: &str,
@@ -1544,11 +1542,12 @@ async fn import_single_snapshot(
 /// Optionally filtered by date range. Returns snapshot metadata without full position details.
 #[tauri::command]
 pub async fn get_snapshots(
-    state: State<'_, Arc<ServiceContext>>,
+    state: ProfileAccess,
     account_id: String,
     date_from: Option<String>, // YYYY-MM-DD, inclusive
     date_to: Option<String>,   // YYYY-MM-DD, inclusive
 ) -> Result<Vec<SnapshotInfo>, String> {
+    let context = state.context()?;
     debug!(
         "Getting snapshots for account: {} (from: {:?}, to: {:?})",
         account_id, date_from, date_to
@@ -1564,7 +1563,7 @@ pub async fn get_snapshots(
         .transpose()
         .map_err(|e| format!("Invalid date_to format: {}", e))?;
 
-    let snapshots = state
+    let snapshots = context
         .snapshot_service()
         .get_snapshot_metadata(&account_id, start_date, end_date)
         .map_err(|e| format!("Failed to get snapshots: {}", e))?;
@@ -1595,10 +1594,11 @@ pub async fn get_snapshots(
 /// Returns holdings in the same format as get_holdings (without live valuation).
 #[tauri::command]
 pub async fn get_snapshot_by_date(
-    state: State<'_, Arc<ServiceContext>>,
+    state: ProfileAccess,
     account_id: String,
     date: String,
 ) -> Result<Vec<Holding>, String> {
+    let context = state.context()?;
     debug!(
         "Getting snapshot holdings for account {} on date {}",
         account_id, date
@@ -1608,7 +1608,7 @@ pub async fn get_snapshot_by_date(
         .map_err(|e| format!("Invalid date format: {}", e))?;
 
     // Get keyframes for this specific date
-    let snapshots = state
+    let snapshots = context
         .snapshot_service()
         .get_holdings_keyframes(&account_id, Some(target_date), Some(target_date))
         .map_err(|e| format!("Failed to get snapshot: {}", e))?;
@@ -1619,8 +1619,8 @@ pub async fn get_snapshot_by_date(
         .ok_or_else(|| format!("No snapshot found for date {}", date))?;
 
     // Keep desktop snapshot conversion aligned with the server path.
-    let base_currency = state.get_base_currency();
-    state
+    let base_currency = context.get_base_currency();
+    context
         .holdings_service()
         .holdings_from_snapshot(&snapshot, &base_currency)
         .await
@@ -1631,19 +1631,20 @@ pub async fn get_snapshot_by_date(
 /// Calculated snapshots are only deletable when their date requires remediation.
 #[tauri::command]
 pub async fn delete_snapshot(
-    state: State<'_, Arc<ServiceContext>>,
+    state: ProfileAccess,
     handle: AppHandle,
     account_id: String,
     date: String,
     snapshot_id: Option<String>,
 ) -> Result<(), String> {
+    let context = state.context()?;
     debug!(
         "Deleting snapshot for account {} on date {}",
         account_id, date
     );
 
     // Read raw metadata so a malformed stored date remains deletable by ID.
-    let snapshots = state
+    let snapshots = context
         .snapshot_service()
         .get_snapshot_metadata(&account_id, None, None)
         .map_err(|e| format!("Failed to get snapshot: {}", e))?;
@@ -1659,16 +1660,14 @@ pub async fn delete_snapshot(
         .ok_or_else(|| format!("No snapshot found for date {}", date))?;
 
     let target_date = NaiveDate::parse_from_str(&snapshot.snapshot_date, "%Y-%m-%d").ok();
-    let account = state
+    let account = context
         .account_service()
         .get_account(&account_id)
         .map_err(|e| format!("Failed to get account: {}", e))?;
-    let today = user_today(parse_user_timezone_or_default(&state.get_timezone()));
+    let today = user_today(parse_user_timezone_or_default(&context.get_timezone()));
     let requires_remediation = target_date
         .map(|date| snapshot_date_requires_remediation(date, today))
         .unwrap_or(true);
-    let recalculation_start =
-        target_date.and_then(|date| snapshot_recalculation_start_after_delete(date, today));
     if snapshot.source == SnapshotSource::Calculated.as_str() && !requires_remediation {
         return Err("This entry comes from account activity and can't be deleted here. Update or delete the related activity instead.".to_string());
     }
@@ -1683,13 +1682,13 @@ pub async fn delete_snapshot(
 
     // Delete via the service so snapshot deletion stays behind one entry point.
     if let Some(snapshot_id) = snapshot_id.as_deref() {
-        state
+        context
             .snapshot_service()
             .delete_snapshot_for_account_by_id(&account_id, snapshot_id)
             .await
             .map_err(|e| format!("Failed to delete snapshot: {}", e))?;
     } else if let Some(target_date) = target_date {
-        state
+        context
             .snapshot_service()
             .delete_snapshot_for_account(&account_id, &[target_date])
             .await
@@ -1702,15 +1701,14 @@ pub async fn delete_snapshot(
         "Deleted {:?} snapshot for account {} on date {}",
         snapshot.source, account_id, date
     );
-    state.health_service().clear_cache().await;
+    context.health_service().clear_cache().await;
 
     // Trigger portfolio update to recalculate valuations
     let payload = PortfolioRequestPayload::builder()
         .account_ids(Some(vec![account_id.clone()]))
         .market_sync_mode(MarketSyncMode::Incremental { asset_ids: None })
-        .since_date(recalculation_start)
         .build();
-    emit_portfolio_trigger_recalculate(&handle, payload);
+    emit_portfolio_trigger_recalculate(&handle, payload, &context);
 
     Ok(())
 }

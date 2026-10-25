@@ -2,6 +2,7 @@ import { memo, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { Account } from "@/lib/types";
+import { AccountType } from "@/lib/constants";
 import { cn } from "@/lib/utils";
 import { Card, Icons, PrivacyAmount, useDateFormatting } from "@wealthfolio/ui";
 
@@ -17,6 +18,11 @@ import { ActionPalette } from "@/components/action-palette";
 import { QuickCategorizePopover } from "./quick-categorize-popover";
 import { SelectionCheckbox } from "./selection-checkbox";
 import { QuickEventPopover } from "./quick-event-popover";
+import {
+  NEEDS_REVIEW_CARD_CLASS,
+  NeedsReviewMark,
+  NeedsReviewStripe,
+} from "@/components/needs-review";
 
 interface TransactionCardProps {
   row: TransactionRowVM;
@@ -40,6 +46,8 @@ interface TransactionCardProps {
   onDelete: (row: TransactionRowVM) => void;
   onLinkTransfer?: (row: TransactionRowVM) => void;
   onUnlinkTransfer?: (row: TransactionRowVM) => void;
+  /** Count a withdrawal as a loan payment, or stop counting it. */
+  onLoanPayment?: (row: TransactionRowVM) => void;
 }
 
 /**
@@ -70,6 +78,7 @@ function TransactionCardImpl({
   onDelete,
   onLinkTransfer,
   onUnlinkTransfer,
+  onLoanPayment,
 }: TransactionCardProps) {
   const { formatTime } = useDateFormatting();
   const [menuOpen, setMenuOpen] = useState(false);
@@ -86,6 +95,9 @@ function TransactionCardImpl({
   const transferLinkStatus = getTransferLinkStatus(a);
   const canMarkReimbursement =
     isIncome && !isCreditCardAccountType(account?.accountType) && activityType !== "CREDIT";
+  // Loans take payments only as withdrawals from a cash account.
+  const canPayLoan =
+    !!onLoanPayment && activityType === "WITHDRAWAL" && account?.accountType === AccountType.CASH;
   // Minutes only, matching the desktop row — the seconds-bearing formatDateTime
   // is too verbose for a line that now carries just the time and the account.
   const time = formatTime(a.activityDate, {
@@ -97,16 +109,11 @@ function TransactionCardImpl({
   return (
     <Card
       data-state={isSelected ? "selected" : undefined}
-      className={cn(
-        "relative overflow-hidden p-2.5",
-        row.needsReview && "border-amber-500/40 bg-amber-500/5",
-      )}
+      className={cn("relative overflow-hidden p-2.5", row.needsReview && NEEDS_REVIEW_CARD_CLASS)}
     >
       {/* Same leading marker the table row uses, so review state costs no width
           in the name and no height in the card. */}
-      {row.needsReview && (
-        <span className="absolute inset-y-0 left-0 w-[3px] bg-amber-500" aria-hidden="true" />
-      )}
+      {row.needsReview && <NeedsReviewStripe />}
       {/* Centred rather than top-aligned: on a two-line card the selection
           control and the row menu read as belonging to the whole row, which is
           also how the investment activity card places them. */}
@@ -126,12 +133,7 @@ function TransactionCardImpl({
             {/* See the table row: the amber stripe is decorative, so the state
                 needs a form that survives both a screen reader and a reader who
                 cannot separate the colours. */}
-            {row.needsReview && (
-              <span className="shrink-0 text-amber-600 dark:text-amber-500">
-                <Icons.AlertTriangle className="h-3.5 w-3.5" aria-hidden="true" />
-                <span className="sr-only">{t("spending:transactions.review")}</span>
-              </span>
-            )}
+            {row.needsReview && <NeedsReviewMark label={t("spending:transactions.review")} />}
             <span className="text-foreground min-w-0 flex-1 truncate text-sm font-medium">
               {a.notes ?? <span className="text-muted-foreground italic">—</span>}
             </span>
@@ -155,7 +157,7 @@ function TransactionCardImpl({
           {/* Everything secondary shares one line: the day heading above owns
               the date, and the category sits inline the way the table row shows
               it rather than in a chip row of its own. */}
-          <div className="text-muted-foreground mt-0.5 flex items-center gap-1.5 text-[11px]">
+          <div className="text-muted-foreground text-2xs mt-0.5 flex items-center gap-1.5">
             <span className="shrink-0">{time}</span>
             <span aria-hidden="true">·</span>
             {isNeutral ? (
@@ -249,6 +251,12 @@ function TransactionCardImpl({
                 </button>
               }
             />
+            {a.cashBalance != null && a.cashBalanceCurrency && (
+              <span className="shrink-0 tabular-nums">
+                {t("activity:table_balance")}{" "}
+                <PrivacyAmount value={Number(a.cashBalance)} currency={a.cashBalanceCurrency} />
+              </span>
+            )}
           </div>
         </div>
 
@@ -303,6 +311,15 @@ function TransactionCardImpl({
                       },
                     ]
                   : []),
+                ...(canPayLoan
+                  ? [
+                      {
+                        icon: Icons.Link,
+                        label: t("asset:loanPayments.menu"),
+                        onClick: () => onLoanPayment(row),
+                      },
+                    ]
+                  : []),
               ],
             },
             {
@@ -319,7 +336,7 @@ function TransactionCardImpl({
           trigger={
             <button
               type="button"
-              className="hover:bg-muted -mr-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-md transition-colors"
+              className="hover:bg-muted -me-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-md transition-colors"
               aria-label={t("spending:transactions.rowActions")}
             >
               <Icons.MoreVertical className="h-4 w-4" aria-hidden="true" />

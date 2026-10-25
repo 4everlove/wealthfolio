@@ -139,3 +139,58 @@ pub struct ResolvedQuote {
     pub price: Option<Decimal>,
     pub resolved_provider_id: Option<String>,
 }
+
+/// Result of an explicitly requested provider-history replacement.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResetProviderHistoryResult {
+    pub asset_id: String,
+    pub source: String,
+    pub from_date: String,
+    pub to_date: String,
+    pub inserted_count: usize,
+    pub deleted_count: usize,
+}
+
+/// Per-asset results of an explicitly requested global provider-history reset.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ResetAllProviderHistoryResult {
+    pub results: Vec<ResetProviderHistoryResult>,
+    pub failures: Vec<ProviderHistoryResetFailure>,
+    pub skipped: Vec<ProviderHistoryResetSkipped>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderHistoryResetFailure {
+    pub asset_id: String,
+    pub error: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderHistoryResetSkipped {
+    pub asset_id: String,
+    pub reason: String,
+}
+
+/// Configuration captured before a destructive replacement fetch.
+#[derive(Debug, Clone)]
+pub struct ProviderHistoryResetContext {
+    pub asset: crate::assets::Asset,
+    pub fingerprint: String,
+    pub earliest_provider_date: Option<chrono::NaiveDate>,
+    pub provider_configuration: Vec<(String, i32)>,
+}
+
+impl ProviderHistoryResetContext {
+    pub fn ensure_eligible(&self) -> crate::errors::Result<()> {
+        if let Some(reason) = super::sync::asset_skip_reason(&self.asset, true) {
+            return Err(crate::errors::Error::Asset(format!(
+                "Cannot reset provider history: {reason:?}"
+            )));
+        }
+        Ok(())
+    }
+}

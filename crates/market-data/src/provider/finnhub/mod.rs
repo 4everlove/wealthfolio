@@ -164,10 +164,10 @@ pub struct FinnhubProvider {
 impl FinnhubProvider {
     /// Create a new Finnhub provider with the given API key.
     pub fn new(api_key: String) -> Self {
-        let client = Client::builder()
+        let client = wealthfolio_http::client_builder()
             .timeout(Duration::from_secs(30))
             .build()
-            .unwrap_or_else(|_| Client::new());
+            .unwrap_or_else(|_| wealthfolio_http::client());
 
         Self { client, api_key }
     }
@@ -284,7 +284,7 @@ impl FinnhubProvider {
             }
             ProviderInstrument::FxSymbol { symbol } => {
                 // Try to parse and format
-                if symbol.len() == 6 {
+                if symbol.len() == 6 && symbol.is_char_boundary(3) {
                     let from = &symbol[..3];
                     let to = &symbol[3..];
                     Ok(format!("OANDA:{}_{}", from, to))
@@ -530,6 +530,7 @@ impl FinnhubProvider {
         }
 
         Ok(AssetProfile {
+            bond: None,
             source: Some(PROVIDER_ID.to_string()),
             name: response.name,
             quote_type: Some("EQUITY".to_string()), // Finnhub only supports equities
@@ -939,5 +940,15 @@ mod tests {
         assert_eq!(response.weburl, Some("https://www.apple.com/".to_string()));
         // Market cap in millions
         assert_eq!(response.market_capitalization, Some(2800000.0));
+    }
+
+    #[test]
+    fn test_extract_symbol_non_ascii_fx_symbol() {
+        // 6 bytes, with byte 3 inside the '€'
+        let provider = FinnhubProvider::new("test_key".to_string());
+        let instrument = ProviderInstrument::FxSymbol {
+            symbol: "US€D".into(),
+        };
+        assert_eq!(provider.extract_symbol(&instrument).unwrap(), "US€D");
     }
 }

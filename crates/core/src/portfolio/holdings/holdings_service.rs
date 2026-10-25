@@ -1,6 +1,8 @@
 use crate::activities::{
-    Activity, ActivityRepositoryTrait, ACTIVITY_SUBTYPE_OPTION_EXPIRY, ACTIVITY_TYPE_ADJUSTMENT,
+    Activity, ActivityRepositoryTrait, NewActivity, ACTIVITY_SUBTYPE_NOTIONAL_DISTRIBUTION,
+    ACTIVITY_SUBTYPE_OPTION_EXPIRY, ACTIVITY_SUBTYPE_RETURN_OF_CAPITAL, ACTIVITY_TYPE_ADJUSTMENT,
     ACTIVITY_TYPE_BUY, ACTIVITY_TYPE_DIVIDEND, ACTIVITY_TYPE_INTEREST, ACTIVITY_TYPE_SELL,
+    ACTIVITY_TYPE_TRANSFER_IN,
 };
 use crate::assets::{
     Asset, AssetClassificationService, AssetKind, AssetServiceTrait, InstrumentType,
@@ -9,8 +11,10 @@ use crate::constants::DECIMAL_PRECISION;
 use crate::errors::{CalculatorError, Error as CoreError, Result};
 use crate::fx::currency::{get_normalization_rule, normalize_currency_code};
 use crate::fx::FxServiceTrait;
-use crate::lots::{LotRecord, LotRepositoryTrait};
+use crate::lots::{AssetLotView, LotRecord, LotRepositoryTrait};
+use crate::portfolio::coordinator::blocking;
 use crate::portfolio::holdings::holdings_model::{Holding, HoldingType, Instrument, MonetaryValue};
+use crate::portfolio::projection::{ActivityIssueKind, ProjectionStoreTrait};
 use crate::portfolio::snapshot::{self, SnapshotServiceTrait};
 use crate::utils::time_utils::{activity_date_in_tz, parse_user_timezone_or_default, user_today};
 use async_trait::async_trait;
@@ -27,6 +31,16 @@ use super::HoldingsValuationServiceTrait;
 #[async_trait]
 pub trait HoldingsServiceTrait: Send + Sync {
     async fn get_holdings(&self, account_id: &str, base_currency: &str) -> Result<Vec<Holding>>;
+
+    /// An asset's lot view: its transaction lots and, when asked, each
+    /// holdings account's latest snapshot position, read today (carried
+    /// across the splits recorded since, engine rules R1.5). The one entry
+    /// to the lot view: the lot repository returns positions as stored.
+    async fn get_asset_lot_view(
+        &self,
+        asset_id: &str,
+        include_snapshot_positions: bool,
+    ) -> Result<Vec<AssetLotView>>;
 
     async fn get_holdings_with_options(
         &self,
@@ -99,6 +113,7 @@ pub trait HoldingIncomeServiceTrait: Send + Sync {
 pub struct HoldingIncomeService {
     activity_repository: Arc<dyn ActivityRepositoryTrait>,
     fx_service: Arc<dyn FxServiceTrait>,
+    projections: Arc<dyn ProjectionStoreTrait>,
     timezone: Arc<RwLock<String>>,
 }
 
@@ -106,11 +121,13 @@ impl HoldingIncomeService {
     pub fn new(
         activity_repository: Arc<dyn ActivityRepositoryTrait>,
         fx_service: Arc<dyn FxServiceTrait>,
+        projections: Arc<dyn ProjectionStoreTrait>,
         timezone: Arc<RwLock<String>>,
     ) -> Self {
         Self {
             activity_repository,
             fx_service,
+            projections,
             timezone,
         }
     }
@@ -126,9 +143,24 @@ impl HoldingIncomeServiceTrait for HoldingIncomeService {
         let activities = self
             .activity_repository
             .get_activities_by_account_ids(account_ids)?;
-        let timezone = parse_user_timezone_or_default(&self.timezone.read().unwrap());
+        // What the engine rejected contributed nothing, so it is no income
+        // either, as the performance read path leaves it out.
+        let rejected: HashSet<String> = self
+            .projections
+            .activity_issues(account_ids)?
+            .into_iter()
+            .filter(|issue| issue.kind == ActivityIssueKind::Rejected)
+            .map(|issue| issue.activity_id)
+            .collect();
+        let timezone = parse_user_timezone_or_default(
+            &self
+                .timezone
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        );
         Ok(calculate_asset_income(
             &activities,
+            &rejected,
             asset_currencies,
             base_currency,
             self.fx_service.as_ref(),
@@ -239,18 +271,25 @@ impl HoldingsService {
         mut self,
         activity_repository: Arc<dyn ActivityRepositoryTrait>,
         fx_service: Arc<dyn FxServiceTrait>,
+        projections: Arc<dyn ProjectionStoreTrait>,
     ) -> Self {
         let timezone = self.timezone.clone();
         self.activity_repository = Some(activity_repository.clone());
         self.with_income_service(Arc::new(HoldingIncomeService::new(
             activity_repository,
             fx_service,
+            projections,
             timezone,
         )))
     }
 
     fn today_in_user_timezone(&self) -> chrono::NaiveDate {
-        let tz = parse_user_timezone_or_default(&self.timezone.read().unwrap());
+        let tz = parse_user_timezone_or_default(
+            &self
+                .timezone
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        );
         user_today(tz)
     }
 
@@ -511,17 +550,23 @@ impl HoldingsService {
         embedded_lots: &VecDeque<snapshot::Lot>,
     ) -> Option<VecDeque<snapshot::Lot>> {
         if let Some(lot_repository) = &self.lot_repository {
-            match lot_repository
-                .get_open_lots_for_account_asset(account_id, asset_id)
-                .await
-            {
-                Ok(records) if !records.is_empty() => {
-                    return Some(
-                        records
-                            .into_iter()
-                            .map(|record| lot_record_to_display_lot(position_id, record))
-                            .collect(),
-                    );
+            let lot_repository = lot_repository.clone();
+            let account = account_id.to_string();
+            let asset = asset_id.to_string();
+            let position = position_id.to_string();
+            let handle = tokio::runtime::Handle::current();
+            let read_lots = async move {
+                let records = lot_repository
+                    .get_open_lots_for_account_asset(&account, &asset)
+                    .await?;
+                Ok(records
+                    .into_iter()
+                    .map(|record| lot_record_to_display_lot(&position, record))
+                    .collect::<VecDeque<_>>())
+            };
+            match blocking(move || handle.block_on(read_lots)).await {
+                Ok(lots) if !lots.is_empty() => {
+                    return Some(lots);
                 }
                 Ok(_) => {
                     // No open lots in the table: fall back to embedded lots
@@ -567,76 +612,102 @@ impl HoldingsService {
             return;
         }
 
-        let open_lots_result = if let Some(asset_id) = asset_id_filter {
-            lot_repository
-                .get_open_lots_for_account_asset(account_id, asset_id)
-                .await
-        } else {
-            lot_repository.get_open_lots_for_account(account_id).await
-        };
+        let lot_repository = lot_repository.clone();
+        let account = account_id.to_string();
+        let base = base_currency.to_string();
+        let asset_id_filter = asset_id_filter.map(str::to_owned);
+        let handle = tokio::runtime::Handle::current();
+        let read_totals = async move {
+            let account_id = account.as_str();
+            let base_currency = base.as_str();
+            let asset_id_filter = asset_id_filter.as_deref();
+            let open_lots_result = if let Some(asset_id) = asset_id_filter {
+                lot_repository
+                    .get_open_lots_for_account_asset(account_id, asset_id)
+                    .await
+            } else {
+                lot_repository.get_open_lots_for_account(account_id).await
+            };
 
-        let open_lots = match open_lots_result {
-            Ok(lots) => lots,
-            Err(e) => {
+            let open_lots = match open_lots_result {
+                Ok(lots) => lots,
+                Err(e) => {
+                    warn!(
+                        "Failed to load open lots for account {} while applying historical cost basis: {}",
+                        account_id, e
+                    );
+                    return Ok(HashMap::new());
+                }
+            };
+            if open_lots.is_empty() {
+                return Ok(HashMap::new());
+            }
+
+            let requested_base_currency = normalize_currency_code(base_currency);
+            let mut cost_basis_base_by_asset: HashMap<String, Decimal> = HashMap::new();
+            let mut mismatched_base_assets: HashSet<String> = HashSet::new();
+            let mut invalid_base_cost_assets: HashSet<String> = HashSet::new();
+
+            for lot in open_lots {
+                if !security_asset_ids.contains(&lot.asset_id) {
+                    continue;
+                }
+
+                let lot_base_currency = normalize_currency_code(&lot.base_currency);
+                if lot_base_currency != requested_base_currency {
+                    mismatched_base_assets.insert(lot.asset_id.clone());
+                    continue;
+                }
+
+                let remaining_cost_basis_base = match lot
+                    .remaining_cost_basis_base
+                    .parse::<Decimal>()
+                {
+                    Ok(value) => value,
+                    Err(e) => {
+                        invalid_base_cost_assets.insert(lot.asset_id.clone());
+                        warn!(
+                            "Skipping historical cost basis seeding for asset {} in account {} because an open lot has invalid base cost basis: {}",
+                            lot.asset_id, account_id, e
+                        );
+                        continue;
+                    }
+                };
+                cost_basis_base_by_asset
+                    .entry(lot.asset_id)
+                    .and_modify(|total| *total += remaining_cost_basis_base)
+                    .or_insert(remaining_cost_basis_base);
+            }
+
+            for asset_id in invalid_base_cost_assets {
+                cost_basis_base_by_asset.remove(&asset_id);
+            }
+
+            for asset_id in mismatched_base_assets {
+                cost_basis_base_by_asset.remove(&asset_id);
                 warn!(
-                    "Failed to load open lots for account {} while applying historical cost basis: {}",
-                    account_id, e
+                    "Skipping historical cost basis seeding for asset {} in account {} because lot base currency does not match requested base currency {}.",
+                    asset_id, account_id, base_currency
+                );
+            }
+
+            if cost_basis_base_by_asset.is_empty() {
+                return Ok(HashMap::new());
+            }
+
+            Ok(cost_basis_base_by_asset)
+        };
+        let cost_basis_base_by_asset_result = blocking(move || handle.block_on(read_totals)).await;
+        let cost_basis_base_by_asset = match cost_basis_base_by_asset_result {
+            Ok(totals) => totals,
+            Err(error) => {
+                warn!(
+                    "Failed to calculate historical cost basis for account {}: {}",
+                    account_id, error
                 );
                 return;
             }
         };
-        if open_lots.is_empty() {
-            return;
-        }
-
-        let requested_base_currency = normalize_currency_code(base_currency);
-        let mut cost_basis_base_by_asset: HashMap<String, Decimal> = HashMap::new();
-        let mut mismatched_base_assets: HashSet<String> = HashSet::new();
-        let mut invalid_base_cost_assets: HashSet<String> = HashSet::new();
-
-        for lot in open_lots {
-            if !security_asset_ids.contains(&lot.asset_id) {
-                continue;
-            }
-
-            let lot_base_currency = normalize_currency_code(&lot.base_currency);
-            if lot_base_currency != requested_base_currency {
-                mismatched_base_assets.insert(lot.asset_id.clone());
-                continue;
-            }
-
-            let remaining_cost_basis_base = match lot.remaining_cost_basis_base.parse::<Decimal>() {
-                Ok(value) => value,
-                Err(e) => {
-                    invalid_base_cost_assets.insert(lot.asset_id.clone());
-                    warn!(
-                        "Skipping historical cost basis seeding for asset {} in account {} because an open lot has invalid base cost basis: {}",
-                        lot.asset_id, account_id, e
-                    );
-                    continue;
-                }
-            };
-            cost_basis_base_by_asset
-                .entry(lot.asset_id)
-                .and_modify(|total| *total += remaining_cost_basis_base)
-                .or_insert(remaining_cost_basis_base);
-        }
-
-        for asset_id in invalid_base_cost_assets {
-            cost_basis_base_by_asset.remove(&asset_id);
-        }
-
-        for asset_id in mismatched_base_assets {
-            cost_basis_base_by_asset.remove(&asset_id);
-            warn!(
-                "Skipping historical cost basis seeding for asset {} in account {} because lot base currency does not match requested base currency {}.",
-                asset_id, account_id, base_currency
-            );
-        }
-
-        if cost_basis_base_by_asset.is_empty() {
-            return;
-        }
 
         for holding in holdings {
             if holding.holding_type != HoldingType::Security {
@@ -683,24 +754,6 @@ impl HoldingsService {
         let Some(lot_repository) = &self.lot_repository else {
             return;
         };
-        let disposals = match lot_repository
-            .get_lot_disposals_for_account(account_id)
-            .await
-        {
-            Ok(disposals) => disposals,
-            Err(e) => {
-                warn!(
-                    "Failed to load lot disposals for account {} while calculating realized gains: {}",
-                    account_id, e
-                );
-                return;
-            }
-        };
-        if disposals.is_empty() {
-            return;
-        }
-        let disposal_trade_activity_ids = self.disposal_trade_activity_ids_for_account(account_id);
-
         #[derive(Default)]
         struct Totals {
             realized_local: Decimal,
@@ -709,19 +762,60 @@ impl HoldingsService {
             disposed_cost_base: Decimal,
         }
 
-        let mut totals_by_asset: HashMap<String, Totals> = HashMap::new();
-        for disposal in disposals {
-            if let Some(disposal_trade_activity_ids) = &disposal_trade_activity_ids {
-                if !disposal_trade_activity_ids.contains(&disposal.disposal_activity_id) {
-                    continue;
+        let lot_repository = lot_repository.clone();
+        let activity_repository = self.activity_repository.clone();
+        let account = account_id.to_string();
+        let handle = tokio::runtime::Handle::current();
+        let read_totals = async move {
+            let account_id = account.as_str();
+            let disposals = match lot_repository
+                .get_lot_disposals_for_account(account_id)
+                .await
+            {
+                Ok(disposals) => disposals,
+                Err(e) => {
+                    warn!(
+                        "Failed to load lot disposals for account {} while calculating realized gains: {}",
+                        account_id, e
+                    );
+                    return Ok(HashMap::new());
                 }
+            };
+            if disposals.is_empty() {
+                return Ok(HashMap::new());
             }
-            let totals = totals_by_asset.entry(disposal.asset_id).or_default();
-            totals.realized_local += parse_decimal_lossy(&disposal.realized_pnl);
-            totals.realized_base += parse_decimal_lossy(&disposal.realized_pnl_base);
-            totals.disposed_cost_local += parse_decimal_lossy(&disposal.cost_basis);
-            totals.disposed_cost_base += parse_decimal_lossy(&disposal.cost_basis_base);
-        }
+            let disposal_trade_activity_ids = Self::disposal_trade_activity_ids_for_account(
+                activity_repository.as_deref(),
+                account_id,
+            );
+
+            let mut totals_by_asset: HashMap<String, Totals> = HashMap::new();
+            for disposal in disposals {
+                if let Some(disposal_trade_activity_ids) = &disposal_trade_activity_ids {
+                    if !disposal_trade_activity_ids.contains(&disposal.disposal_activity_id) {
+                        continue;
+                    }
+                }
+                let totals = totals_by_asset.entry(disposal.asset_id).or_default();
+                totals.realized_local += parse_decimal_lossy(&disposal.realized_pnl);
+                totals.realized_base += parse_decimal_lossy(&disposal.realized_pnl_base);
+                totals.disposed_cost_local += parse_decimal_lossy(&disposal.cost_basis);
+                totals.disposed_cost_base += parse_decimal_lossy(&disposal.cost_basis_base);
+            }
+
+            Ok(totals_by_asset)
+        };
+        let totals_by_asset_result = blocking(move || handle.block_on(read_totals)).await;
+        let totals_by_asset = match totals_by_asset_result {
+            Ok(totals) => totals,
+            Err(error) => {
+                warn!(
+                    "Failed to calculate realized gains for account {}: {}",
+                    account_id, error
+                );
+                return;
+            }
+        };
 
         for holding in holdings {
             if !matches!(
@@ -774,8 +868,11 @@ impl HoldingsService {
         }
     }
 
-    fn disposal_trade_activity_ids_for_account(&self, account_id: &str) -> Option<HashSet<String>> {
-        let activity_repository = self.activity_repository.as_ref()?;
+    fn disposal_trade_activity_ids_for_account(
+        activity_repository: Option<&dyn ActivityRepositoryTrait>,
+        account_id: &str,
+    ) -> Option<HashSet<String>> {
+        let activity_repository = activity_repository?;
         match activity_repository.get_activities_by_account_id(account_id) {
             Ok(activities) => Some(
                 activities
@@ -789,7 +886,19 @@ impl HoldingsService {
                             && activity.subtype.as_deref().is_some_and(|subtype| {
                                 subtype.eq_ignore_ascii_case(ACTIVITY_SUBTYPE_OPTION_EXPIRY)
                             });
-                        is_trade || is_option_expiry
+                        // Units a transfer delivers into a short cover it and realize; a
+                        // transfer out moves lots at their cost and realizes nothing
+                        // (engine rules R2.4).
+                        let is_transfer_in = activity_type == ACTIVITY_TYPE_TRANSFER_IN;
+                        // A return of capital realizes what exceeds the cost basis as
+                        // a capital gain, and in base its currency move (engine rules R7.4).
+                        let is_return_of_capital = (activity_type == ACTIVITY_TYPE_ADJUSTMENT
+                            || activity_type == ACTIVITY_TYPE_DIVIDEND)
+                            && activity.subtype.as_deref().is_some_and(|subtype| {
+                                NewActivity::canonicalize_subtype(Some(subtype)).as_deref()
+                                    == Some(ACTIVITY_SUBTYPE_RETURN_OF_CAPITAL)
+                            });
+                        is_trade || is_option_expiry || is_transfer_in || is_return_of_capital
                     })
                     .map(|activity| activity.id)
                     .collect(),
@@ -822,7 +931,7 @@ impl HoldingsService {
         }
     }
 
-    fn apply_income_and_total_return_best_effort(
+    async fn apply_income_and_total_return_best_effort(
         &self,
         account_ids: &[String],
         base_currency: &str,
@@ -845,11 +954,14 @@ impl HoldingsService {
         } else {
             match &self.income_service {
                 Some(income_service) => {
-                    match income_service.get_asset_income(
-                        account_ids,
-                        &asset_currencies,
-                        base_currency,
-                    ) {
+                    let income_service = income_service.clone();
+                    let scope = account_ids.to_vec();
+                    let base_currency = base_currency.to_string();
+                    match blocking(move || {
+                        income_service.get_asset_income(&scope, &asset_currencies, &base_currency)
+                    })
+                    .await
+                    {
                         Ok(income) => income,
                         Err(e) => {
                             warn!(
@@ -951,6 +1063,7 @@ fn refresh_total_return(holding: &mut Holding) {
 
 fn calculate_asset_income(
     activities: &[Activity],
+    rejected: &HashSet<String>,
     asset_currencies: &HashMap<String, String>,
     base_currency: &str,
     fx_service: &dyn FxServiceTrait,
@@ -959,14 +1072,13 @@ fn calculate_asset_income(
     let mut income_by_asset: HashMap<String, MonetaryValue> = HashMap::new();
 
     for activity in activities {
-        if !activity.is_posted() {
+        if !activity.is_posted() || rejected.contains(&activity.id) {
             continue;
         }
 
-        let activity_type = activity.effective_type();
-        if activity_type != ACTIVITY_TYPE_DIVIDEND && activity_type != ACTIVITY_TYPE_INTEREST {
+        let Some(amount) = asset_income_amount(activity) else {
             continue;
-        }
+        };
 
         let Some(asset_id) = activity.asset_id.as_ref() else {
             continue;
@@ -975,7 +1087,6 @@ fn calculate_asset_income(
             continue;
         };
 
-        let amount = activity_income_amount(activity);
         if amount.is_zero() {
             continue;
         }
@@ -1013,6 +1124,31 @@ fn calculate_asset_income(
     }
 
     income_by_asset
+}
+
+/// What an activity adds to its asset's income, as the portfolio engine counts
+/// it (engine rules R7.4): a dividend's or interest's gross amount, except a
+/// dividend of capital, which is none. A return of capital adjustment takes its
+/// amount back out of dividends already counted; a notional distribution adds
+/// it. Their cost basis changes are in the holding's gains, so the total return
+/// counts each once.
+fn asset_income_amount(activity: &Activity) -> Option<Decimal> {
+    let activity_type = activity.effective_type();
+    let subtype = NewActivity::canonicalize_subtype(activity.subtype.as_deref());
+    let return_of_capital = subtype.as_deref() == Some(ACTIVITY_SUBTYPE_RETURN_OF_CAPITAL);
+    let notional = subtype.as_deref() == Some(ACTIVITY_SUBTYPE_NOTIONAL_DISTRIBUTION);
+    let adjusted = || activity.amount.unwrap_or_default().abs();
+    if activity_type == ACTIVITY_TYPE_DIVIDEND && return_of_capital {
+        None
+    } else if activity_type == ACTIVITY_TYPE_DIVIDEND || activity_type == ACTIVITY_TYPE_INTEREST {
+        Some(activity_income_amount(activity))
+    } else if activity_type == ACTIVITY_TYPE_ADJUSTMENT && return_of_capital {
+        Some(-adjusted())
+    } else if activity_type == ACTIVITY_TYPE_ADJUSTMENT && notional {
+        Some(adjusted())
+    } else {
+        None
+    }
 }
 
 fn activity_income_amount(activity: &Activity) -> Decimal {
@@ -1281,6 +1417,24 @@ mod expired_option_metadata_tests {
 
 #[async_trait]
 impl HoldingsServiceTrait for HoldingsService {
+    async fn get_asset_lot_view(
+        &self,
+        asset_id: &str,
+        include_snapshot_positions: bool,
+    ) -> Result<Vec<AssetLotView>> {
+        let Some(lot_repository) = &self.lot_repository else {
+            return Err(CoreError::Unexpected(
+                "the asset lot view needs the lot repository".to_string(),
+            ));
+        };
+        let mut rows = lot_repository
+            .get_asset_lot_view(asset_id, include_snapshot_positions)
+            .await?;
+        self.snapshot_service
+            .carry_lot_view_rows(&mut rows, self.today_in_user_timezone())?;
+        Ok(rows)
+    }
+
     async fn get_holdings(&self, account_id: &str, base_currency: &str) -> Result<Vec<Holding>> {
         self.get_holdings_with_options(account_id, base_currency, false)
             .await
@@ -1344,7 +1498,8 @@ impl HoldingsServiceTrait for HoldingsService {
             &[account_id.to_string()],
             base_currency,
             &mut holdings,
-        );
+        )
+        .await;
         apply_portfolio_weights(account_id, &mut holdings);
 
         // Load taxonomy classifications for all holdings
@@ -1594,7 +1749,8 @@ impl HoldingsServiceTrait for HoldingsService {
             &[account_id.to_string()],
             base_currency,
             &mut holdings,
-        );
+        )
+        .await;
         apply_portfolio_weights(account_id, &mut holdings);
         for holding in &mut holdings {
             normalize_holding_currency(holding);
@@ -1813,8 +1969,8 @@ mod tests {
     };
     use crate::errors::Error;
     use crate::fx::{denormalization_multiplier, ExchangeRate, FxServiceTrait, NewExchangeRate};
-    use crate::lots::{AssetLotView, LotClosure, LotRecord};
-    use crate::portfolio::snapshot::{AccountStateSnapshot, Position, SnapshotRecalcMode};
+    use crate::lots::{AssetLotView, LotRecord};
+    use crate::portfolio::snapshot::{AccountStateSnapshot, Position};
     use crate::snapshot::Lot;
     use crate::taxonomies::{
         AssetTaxonomyAssignment, Category, NewAssetTaxonomyAssignment, NewCategory, NewTaxonomy,
@@ -1949,14 +2105,6 @@ mod tests {
 
     #[async_trait::async_trait]
     impl SnapshotServiceTrait for MockSnapshotService {
-        async fn recalculate_holdings_snapshots(
-            &self,
-            _account_ids: Option<&[String]>,
-            _mode: SnapshotRecalcMode,
-        ) -> Result<usize> {
-            unimplemented!("unused in holdings service tests")
-        }
-
         fn get_holdings_keyframes(
             &self,
             _account_id: &str,
@@ -1987,19 +2135,27 @@ mod tests {
             ))
         }
 
+        fn get_latest_snapshots_as_of(
+            &self,
+            _account_ids: &[String],
+            _day: NaiveDate,
+        ) -> Result<HashMap<String, AccountStateSnapshot>> {
+            Ok(HashMap::new())
+        }
+
+        fn carry_lot_view_rows(
+            &self,
+            _rows: &mut [crate::lots::AssetLotView],
+            _day: NaiveDate,
+        ) -> Result<()> {
+            Ok(())
+        }
+
         async fn save_manual_snapshot(
             &self,
             _account_id: &str,
             _snapshot: AccountStateSnapshot,
         ) -> Result<()> {
-            unimplemented!("unused in holdings service tests")
-        }
-
-        async fn update_snapshots_source(
-            &self,
-            _account_id: &str,
-            _new_source: &str,
-        ) -> Result<usize> {
             unimplemented!("unused in holdings service tests")
         }
 
@@ -2181,6 +2337,7 @@ mod tests {
     }
 
     struct MockHoldingIncomeService {
+        async_worker_thread: Option<std::thread::ThreadId>,
         income_by_account: HashMap<String, HashMap<String, MonetaryValue>>,
         scopes: Arc<Mutex<Vec<Vec<String>>>>,
     }
@@ -2188,6 +2345,7 @@ mod tests {
     impl MockHoldingIncomeService {
         fn new(income_by_account: HashMap<String, HashMap<String, MonetaryValue>>) -> Self {
             Self {
+                async_worker_thread: None,
                 income_by_account,
                 scopes: Arc::new(Mutex::new(Vec::new())),
             }
@@ -2205,6 +2363,13 @@ mod tests {
             _asset_currencies: &HashMap<String, String>,
             _base_currency: &str,
         ) -> Result<HashMap<String, MonetaryValue>> {
+            if let Some(worker) = self.async_worker_thread {
+                assert_ne!(
+                    std::thread::current().id(),
+                    worker,
+                    "history work held the async worker"
+                );
+            }
             self.scopes.lock().unwrap().push(account_ids.to_vec());
             let mut result = HashMap::new();
             for account_id in account_ids {
@@ -2222,6 +2387,7 @@ mod tests {
     }
 
     struct MockLotRepository {
+        async_worker_thread: Option<std::thread::ThreadId>,
         open_lots: Vec<LotRecord>,
         disposals: Vec<crate::lots::LotDisposal>,
         open_lots_calls: Arc<AtomicUsize>,
@@ -2231,6 +2397,7 @@ mod tests {
     impl MockLotRepository {
         fn new(open_lots: Vec<LotRecord>) -> Self {
             Self {
+                async_worker_thread: None,
                 open_lots,
                 disposals: Vec::new(),
                 open_lots_calls: Arc::new(AtomicUsize::new(0)),
@@ -2253,6 +2420,7 @@ mod tests {
     }
 
     struct MockActivityRepository {
+        async_worker_thread: Option<std::thread::ThreadId>,
         activities: Vec<Activity>,
         fail_get_activities_by_account_id: bool,
     }
@@ -2260,6 +2428,7 @@ mod tests {
     impl MockActivityRepository {
         fn new(activities: Vec<Activity>) -> Self {
             Self {
+                async_worker_thread: None,
                 activities,
                 fail_get_activities_by_account_id: false,
             }
@@ -2267,6 +2436,7 @@ mod tests {
 
         fn failing_get_activities_by_account_id() -> Self {
             Self {
+                async_worker_thread: None,
                 activities: Vec::new(),
                 fail_get_activities_by_account_id: true,
             }
@@ -2283,26 +2453,18 @@ mod tests {
                 .ok_or_else(|| CoreError::Repository(format!("Activity not found: {activity_id}")))
         }
 
-        fn find_transfer_counterpart(
-            &self,
-            group_id: &str,
-            exclude_id: &str,
-        ) -> Result<Option<Activity>> {
-            Ok(self
-                .activities
-                .iter()
-                .find(|activity| {
-                    activity.source_group_id.as_deref() == Some(group_id)
-                        && activity.id != exclude_id
-                })
-                .cloned())
-        }
-
         fn get_activities(&self) -> Result<Vec<Activity>> {
             Ok(self.activities.clone())
         }
 
         fn get_activities_by_account_id(&self, account_id: &str) -> Result<Vec<Activity>> {
+            if let Some(worker) = self.async_worker_thread {
+                assert_ne!(
+                    std::thread::current().id(),
+                    worker,
+                    "history work held the async worker"
+                );
+            }
             if self.fail_get_activities_by_account_id {
                 return Err(CoreError::Repository(
                     "failed to load account activities".to_string(),
@@ -2491,10 +2653,6 @@ mod tests {
             Ok(())
         }
 
-        fn calculate_average_cost(&self, _account_id: &str, _asset_id: &str) -> Result<Decimal> {
-            Ok(Decimal::ZERO)
-        }
-
         fn get_income_activities_data(
             &self,
             _account_ids: Option<&[String]>,
@@ -2562,6 +2720,13 @@ mod tests {
         }
 
         async fn get_open_lots_for_account(&self, _account_id: &str) -> Result<Vec<LotRecord>> {
+            if let Some(worker) = self.async_worker_thread {
+                assert_ne!(
+                    std::thread::current().id(),
+                    worker,
+                    "history work held the async worker"
+                );
+            }
             self.open_lots_calls.fetch_add(1, Ordering::SeqCst);
             Ok(self
                 .open_lots
@@ -2576,6 +2741,13 @@ mod tests {
             _account_id: &str,
             asset_id: &str,
         ) -> Result<Vec<LotRecord>> {
+            if let Some(worker) = self.async_worker_thread {
+                assert_ne!(
+                    std::thread::current().id(),
+                    worker,
+                    "history work held the async worker"
+                );
+            }
             self.open_lots_for_asset_calls
                 .fetch_add(1, Ordering::SeqCst);
             Ok(self
@@ -2590,6 +2762,13 @@ mod tests {
             &self,
             account_id: &str,
         ) -> Result<Vec<crate::lots::LotDisposal>> {
+            if let Some(worker) = self.async_worker_thread {
+                assert_ne!(
+                    std::thread::current().id(),
+                    worker,
+                    "history work held the async worker"
+                );
+            }
             Ok(self
                 .disposals
                 .iter()
@@ -2620,14 +2799,6 @@ mod tests {
             unimplemented!("unused in holdings service tests")
         }
 
-        async fn get_lots_as_of_date(
-            &self,
-            _account_ids: &[String],
-            _date: NaiveDate,
-        ) -> Result<Vec<LotRecord>> {
-            unimplemented!("unused in holdings service tests")
-        }
-
         async fn get_all_lots_for_account(&self, _account_id: &str) -> Result<Vec<LotRecord>> {
             unimplemented!("unused in holdings service tests")
         }
@@ -2645,15 +2816,6 @@ mod tests {
         }
 
         async fn get_all_lots(&self) -> Result<Vec<LotRecord>> {
-            unimplemented!("unused in holdings service tests")
-        }
-
-        async fn sync_lots_for_account(
-            &self,
-            _account_id: &str,
-            _open_lots: &[LotRecord],
-            _closures: &[LotClosure],
-        ) -> Result<()> {
             unimplemented!("unused in holdings service tests")
         }
 
@@ -2923,6 +3085,84 @@ mod tests {
                 EmptyTaxonomyService,
             ))),
         )
+    }
+
+    #[tokio::test]
+    async fn holdings_history_reads_run_off_the_async_worker() {
+        let worker = std::thread::current().id();
+        let frozen = "2025-01-15T12:00:00Z".parse().unwrap();
+        let _clock = crate::utils::clock::freeze(frozen);
+        let account_id = "acc-1";
+        let asset_id = "AAPL";
+        let disposal = test_lot_disposal(
+            account_id,
+            asset_id,
+            dec!(100),
+            dec!(100),
+            dec!(20),
+            dec!(20),
+        );
+        let activity = test_income_activity(
+            &disposal.disposal_activity_id,
+            account_id,
+            Some(asset_id),
+            ACTIVITY_TYPE_SELL,
+            dec!(120),
+            "USD",
+            frozen.date_naive(),
+        );
+        let mut activities = MockActivityRepository::new(vec![activity]);
+        activities.async_worker_thread = Some(worker);
+        let mut lots = MockLotRepository::new(vec![test_lot_record(
+            account_id,
+            asset_id,
+            "USD",
+            dec!(100),
+        )])
+        .with_disposals(vec![disposal]);
+        lots.async_worker_thread = Some(worker);
+        let mut income = MockHoldingIncomeService::new(HashMap::from([(
+            account_id.to_string(),
+            HashMap::from([(
+                asset_id.to_string(),
+                MonetaryValue {
+                    local: dec!(5),
+                    base: dec!(5),
+                },
+            )]),
+        )]));
+        income.async_worker_thread = Some(worker);
+        let scopes = income.scopes();
+        let service = test_service(
+            AccountStateSnapshot {
+                account_id: account_id.into(),
+                currency: "USD".into(),
+                positions: HashMap::from([(asset_id.into(), test_position(account_id, asset_id))]),
+                ..Default::default()
+            },
+            vec![test_asset(asset_id, "AAPL", InstrumentType::Equity)],
+            HashMap::from([(asset_id.into(), dec!(130))]),
+        )
+        .with_lot_repository(Arc::new(lots))
+        .with_income_service(Arc::new(income));
+        // The production wiring installs this alongside the income service.
+        let service = HoldingsService {
+            activity_repository: Some(Arc::new(activities)),
+            ..service
+        };
+        let holdings = service.get_holdings(account_id, "USD").await.unwrap();
+        let holding = service
+            .get_holding(account_id, asset_id, "USD")
+            .await
+            .unwrap()
+            .unwrap();
+        for holding in [&holdings[0], &holding] {
+            assert_eq!(holding.as_of_date, frozen.date_naive());
+            assert_eq!(holding.income.as_ref().unwrap().base, dec!(5));
+            assert_eq!(holding.realized_gain.as_ref().unwrap().base, dec!(20));
+            assert_eq!(holding.cost_basis.as_ref().unwrap().base, dec!(100));
+        }
+        assert_eq!(scopes.lock().unwrap().len(), 2);
     }
 
     #[tokio::test]
@@ -3425,6 +3665,7 @@ mod tests {
 
         let income_by_asset = calculate_asset_income(
             &activities,
+            &HashSet::new(),
             &asset_currencies,
             "USD",
             &fx_service,
@@ -3435,6 +3676,113 @@ mod tests {
         let income = income_by_asset.get("AAPL").unwrap();
         assert_eq!(income.local, dec!(15));
         assert_eq!(income.base, dec!(11));
+    }
+
+    #[test]
+    fn asset_income_counts_returns_of_capital_and_notional_distributions_as_the_engine_does() {
+        // Engine rules R7.4: a dividend of capital is no income; a return of
+        // capital adjustment takes dividends back out; a notional distribution
+        // is income.
+        let date = NaiveDate::from_ymd_opt(2025, 2, 3).unwrap();
+        let fx_service = MockFxService::new(vec![]);
+        let asset_currencies = HashMap::from([("XEQT".to_string(), "CAD".to_string())]);
+        let activity = |id: &str, activity_type: &str, subtype: Option<&str>, amount| {
+            let mut activity = test_income_activity(
+                id,
+                "acc-1",
+                Some("XEQT"),
+                activity_type,
+                amount,
+                "CAD",
+                date,
+            );
+            activity.subtype = subtype.map(str::to_string);
+            activity
+        };
+        let activities = vec![
+            activity("dividend", ACTIVITY_TYPE_DIVIDEND, None, dec!(100)),
+            activity(
+                "capital",
+                ACTIVITY_TYPE_DIVIDEND,
+                Some("Return of Capital"),
+                dec!(40),
+            ),
+            activity(
+                "reclassified",
+                ACTIVITY_TYPE_ADJUSTMENT,
+                Some("return-of-capital"),
+                dec!(25),
+            ),
+            activity(
+                "notional",
+                ACTIVITY_TYPE_ADJUSTMENT,
+                Some("Notional Distribution"),
+                dec!(10),
+            ),
+            activity(
+                "expiry",
+                ACTIVITY_TYPE_ADJUSTMENT,
+                Some("OPTION_EXPIRY"),
+                dec!(7),
+            ),
+        ];
+
+        let income_by_asset = calculate_asset_income(
+            &activities,
+            &HashSet::new(),
+            &asset_currencies,
+            "CAD",
+            &fx_service,
+            chrono_tz::UTC,
+        );
+
+        let income = income_by_asset.get("XEQT").unwrap();
+        assert_eq!(income.local, dec!(85));
+        assert_eq!(income.base, dec!(85));
+    }
+
+    #[test]
+    fn asset_income_leaves_out_what_the_engine_rejected() {
+        // A notional distribution dated before the first purchase finds no
+        // units: the engine rejects it, so it is no income.
+        let date = NaiveDate::from_ymd_opt(2025, 2, 3).unwrap();
+        let fx_service = MockFxService::new(vec![]);
+        let asset_currencies = HashMap::from([("XEQT".to_string(), "CAD".to_string())]);
+        let mut notional = test_income_activity(
+            "notional",
+            "acc-1",
+            Some("XEQT"),
+            ACTIVITY_TYPE_ADJUSTMENT,
+            dec!(10),
+            "CAD",
+            date,
+        );
+        notional.subtype = Some(ACTIVITY_SUBTYPE_NOTIONAL_DISTRIBUTION.to_string());
+        let activities = vec![
+            notional,
+            test_income_activity(
+                "dividend",
+                "acc-1",
+                Some("XEQT"),
+                ACTIVITY_TYPE_DIVIDEND,
+                dec!(100),
+                "CAD",
+                date,
+            ),
+        ];
+
+        let income_by_asset = calculate_asset_income(
+            &activities,
+            &HashSet::from(["notional".to_string()]),
+            &asset_currencies,
+            "CAD",
+            &fx_service,
+            chrono_tz::UTC,
+        );
+
+        let income = income_by_asset.get("XEQT").unwrap();
+        assert_eq!(income.local, dec!(100));
+        assert_eq!(income.base, dec!(100));
     }
 
     #[test]
@@ -3461,6 +3809,7 @@ mod tests {
 
         let income_by_asset = calculate_asset_income(
             &[activity],
+            &HashSet::new(),
             &asset_currencies,
             "USD",
             &fx_service,
@@ -3489,6 +3838,7 @@ mod tests {
 
         let income_by_asset = calculate_asset_income(
             &activities,
+            &HashSet::new(),
             &asset_currencies,
             "GBP",
             &fx_service,
@@ -3711,6 +4061,73 @@ mod tests {
         assert_eq!(holding.realized_gain.as_ref().unwrap().base, dec!(-100));
         assert_eq!(holding.realized_gain_pct, Some(dec!(-1)));
         assert_eq!(holding.total_gain.as_ref().unwrap().base, dec!(-100));
+    }
+
+    #[tokio::test]
+    async fn closed_short_realized_gain_includes_transfer_in_cover_disposal() {
+        let account_id = "acc-1";
+        let asset_id = "AAPL";
+        let mut position = test_position(account_id, asset_id);
+        position.quantity = Decimal::ZERO;
+        position.average_cost = Decimal::ZERO;
+        position.total_cost_basis = Decimal::ZERO;
+
+        let snapshot = AccountStateSnapshot {
+            account_id: account_id.to_string(),
+            currency: "USD".to_string(),
+            positions: HashMap::from([(asset_id.to_string(), position)]),
+            ..Default::default()
+        };
+
+        // A short of 10 sold at 150, covered by 10 units transferred in at
+        // their cost of 100: the engine realizes 500 on the transfer.
+        let mut cover_disposal = test_lot_disposal(
+            account_id,
+            asset_id,
+            dec!(-1500),
+            dec!(-1500),
+            dec!(500),
+            dec!(500),
+        );
+        cover_disposal.id = "cover-disposal".to_string();
+        cover_disposal.disposal_activity_id = "transfer-in-1".to_string();
+
+        let transfer_in_activity = test_income_activity(
+            "transfer-in-1",
+            account_id,
+            Some(asset_id),
+            ACTIVITY_TYPE_TRANSFER_IN,
+            Decimal::ZERO,
+            "USD",
+            NaiveDate::from_ymd_opt(2025, 2, 3).unwrap(),
+        );
+
+        let mut service = test_service(
+            snapshot,
+            vec![test_asset(asset_id, "AAPL", InstrumentType::Equity)],
+            HashMap::from([(asset_id.to_string(), Decimal::ZERO)]),
+        )
+        .with_lot_repository(Arc::new(
+            MockLotRepository::new(Vec::new()).with_disposals(vec![cover_disposal]),
+        ));
+        service.activity_repository = Some(Arc::new(MockActivityRepository::new(vec![
+            transfer_in_activity,
+        ])));
+
+        let holdings = service
+            .get_holdings_with_options(account_id, "USD", true)
+            .await
+            .unwrap();
+
+        assert_eq!(holdings.len(), 1);
+        let holding = &holdings[0];
+        assert!(holding.is_closed);
+        assert_eq!(holding.realized_gain.as_ref().unwrap().local, dec!(500));
+        assert_eq!(holding.realized_gain.as_ref().unwrap().base, dec!(500));
+        assert_eq!(holding.realized_gain_pct, Some(dec!(0.33333333)));
+        assert_eq!(holding.return_basis.as_ref().unwrap().local, dec!(-1500));
+        assert_eq!(holding.total_gain.as_ref().unwrap().base, dec!(500));
+        assert_eq!(holding.total_gain_pct, Some(dec!(0.33333333)));
     }
 
     #[tokio::test]

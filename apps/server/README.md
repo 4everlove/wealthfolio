@@ -2,7 +2,7 @@ Wealthfolio Server
 
 Overview
 - This crate runs the HTTP API (Axum) and serves static files for the web build.
-- It uses the shared `src-core` for all business logic, repositories, and migrations.
+- It uses the shared Rust crates for business logic, repositories, and migrations.
 
 Run locally (Rust only)
 - From the repo root:
@@ -16,13 +16,19 @@ Key environment variables
 - `WF_LISTEN_ADDR`: Bind address, default `0.0.0.0:8088`.
 - `WF_DB_PATH`: Path to the SQLite database file (or a directory; if a directory is provided, `app.db` is used inside it). Example: `./db/app.db`.
 - `WF_CORS_ALLOW_ORIGINS`: Comma-separated list of allowed origins for CORS. Example: `http://localhost:1420`.
-- `WF_REQUEST_TIMEOUT_MS`: Request timeout in milliseconds. Default `30000`.
+- `WF_REQUEST_TIMEOUT_MS`: Request timeout in milliseconds. Default `300000`.
 - `WF_STATIC_DIR`: Directory to serve static assets from (the web build output). Default `dist`.
-- `WF_SECRET_KEY`: Required 32-byte key used to encrypt secrets at rest and sign JWTs. Must decode to exactly 32 bytes.
+- `WF_SECRET_KEY`: 32-byte key (required unless `WF_SECRET_KEY_FILE` is set) used to encrypt secrets at rest and sign JWTs. Must decode to exactly 32 bytes.
   Can be provided as:
   - Base64-encoded string (recommended): Generate with `openssl rand -base64 32` or `head -c 32 /dev/urandom | base64`
   - 32-byte ASCII string: Must be exactly 32 characters (less secure if contains only printable characters)
   Example: `WF_SECRET_KEY=$(openssl rand -base64 32)`.
+
+- `WF_SECRET_KEY_FILE`: Optional path to a UTF-8 file containing the same master key.
+  Read once at startup; LF/CRLF endings are accepted. Leave `WF_SECRET_KEY` unset or
+  empty when using this. Conflicting inputs or unreadable/invalid files fail startup.
+  Reuse the existing key when switching inputs. In Docker, mount it read-only and
+  use its container path. Keep the key separate from encrypted vault backups.
 - `WF_AUTH_PASSWORD_HASH`: Enables password-only authentication for web mode when set to an Argon2id PHC string.
   Generate via online tools like [argon2.online](https://argon2.online/) or the CLI (`argon2-utils` package):
   ```bash
@@ -47,8 +53,67 @@ Key environment variables
   - `WF_OIDC_POST_LOGOUT_REDIRECT_URL`: **Optional**. When the IdP advertises an `end_session_endpoint`, sign-out performs RP-Initiated Logout (ends the IdP session too); otherwise logout is local-only. Set this to return to the app after IdP logout — it must be **registered** with the IdP (e.g. Keycloak's "Valid post logout redirect URIs"). If unset, the IdP shows its own logged-out page.
   - `WF_OIDC_RP_LOGOUT`: **Optional**, default `true`. Set to `false` to force local-only logout even when the IdP supports RP-Initiated Logout.
 - `WF_SECRET_FILE`: Optional override for where encrypted secrets are stored. Defaults to `<data-root>/secrets.json`.
+- `WF_DB_REQUIRE_ENCRYPTION`: Optional, default `0`. Requires the live database to
+  match the configured encryption policy. `1` creates a new encrypted database,
+  but does not convert an existing plaintext file. Stop the server and use
+  `wealthfolio-server db encrypt` or `db decrypt` for conversion, preserving the
+  same master key and setting the startup flag to match afterward.
 
 Notes
 - The server also honors `DATABASE_URL`; when running in this workspace, `WF_DB_PATH` is preferred and propagated to `DATABASE_URL` internally so the core layer uses the expected path.
 - Database migrations are embedded and applied automatically on startup.
 - Secrets in web/server mode are stored in an encrypted JSON file derived from the database directory using `WF_SECRET_KEY`.
+
+Existing vault files keep their ownership, permissions, ACLs and link targets.
+Individual file mounts and writable vaults in non-writable directories remain
+supported. Existing-file updates happen in place, as before; they are not
+crash-atomic. File creation retains the existing platform permission behavior.
+Unreadable or corrupt vaults report errors on secret operations without preventing unrelated server
+features from starting. Run one server process per vault, including upgrades.
+
+## File-based master key
+
+Use `WF_SECRET_KEY_FILE` instead of `WF_SECRET_KEY` to read the existing master
+key from a UTF-8 file at startup. Use the same key value when switching inputs.
+Protect the file and grant the server account read access.
+
+macOS/Linux:
+
+```bash
+unset WF_SECRET_KEY
+export WF_SECRET_KEY_FILE=/protected/wealthfolio-key
+cargo run --manifest-path apps/server/Cargo.toml
+```
+
+Windows PowerShell:
+
+```powershell
+Remove-Item Env:WF_SECRET_KEY -ErrorAction SilentlyContinue
+$env:WF_SECRET_KEY_FILE = 'C:\protected\wealthfolio-key.txt'
+cargo run --manifest-path apps/server/Cargo.toml
+```
+
+Also remove or leave empty `WF_SECRET_KEY` in any `.env` file loaded by the
+server. Both nonempty inputs are rejected. The file contents use the same key
+format as the environment input; LF/CRLF endings are accepted. Restart after
+changing the input file: it is not watched or reloaded.
+
+For container mounts and deployment examples, see
+[self-hosting configuration](../../docs/self-host/README.md#master-key-configuration).
+The [credential storage architecture](../../docs/architecture/credential-storage.md)
+explains the native backends and server vault.
+
+## Backups and portable recovery
+
+The Backups screen creates managed snapshots and exports password-protected
+portable files. Server restore is offline: stop the service, then run
+`wealthfolio-server db restore <file> [--password-stdin] [--yes]` with the same
+key, database path, user and encryption policy. Without `--yes`, validation shows
+a summary without replacing the database. Passwords are accepted only through
+non-terminal standard input, never command arguments.
+
+The command requires an existing readable destination, validates the backup and
+saves a pre-restore snapshot. A portable backup password is independent of the
+server master key. There are no web restore/upload or maintenance/retry endpoints.
+See [the operator backup guide](../../docs/self-host/backups.md) for safe password
+input, container commands, cross-platform transfers and failed-startup recovery.

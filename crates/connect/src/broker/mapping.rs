@@ -19,6 +19,30 @@ use wealthfolio_core::fx::currency::{get_normalization_rule, normalize_amount, r
 /// Minimum confidence score to consider a mapping reliable
 const CONFIDENCE_THRESHOLD: f64 = 0.7;
 
+/// Converts a provider JSON number to `Decimal` without `Decimal::from_f64`
+/// drift.
+///
+/// `from_f64` rounds the binary value one digit at a time, so from about 4.2
+/// million it turns cent amounts like 4196049.73 into 4196049.730000001. A
+/// number with at most 15 significant digits survives the f64 round trip, so
+/// its shortest display string is exactly what the provider sent. Zero, longer
+/// strings (float noise such as 0.30000000000000004) and values outside
+/// `Decimal`'s range or scale keep the `from_f64` result.
+pub(crate) fn decimal_from_f64(value: f64) -> Option<Decimal> {
+    if !value.is_finite() {
+        return None;
+    }
+    let shortest = value.to_string();
+    let digits: String = shortest.chars().filter(char::is_ascii_digit).collect();
+    let significant_digits = digits.trim_start_matches('0').trim_end_matches('0').len();
+    if (1..=15).contains(&significant_digits) {
+        if let Ok(decimal) = Decimal::from_str_exact(&shortest) {
+            return Some(decimal);
+        }
+    }
+    Decimal::from_f64(value)
+}
+
 fn normalize_activity_token(value: &str) -> String {
     value
         .split(|c: char| c.is_whitespace() || c == '-' || c == '_')
@@ -294,7 +318,7 @@ pub fn is_broker_crypto(code: Option<&str>) -> bool {
 fn is_broker_bond(code: Option<&str>) -> bool {
     matches!(
         code.map(|c| c.to_uppercase()).as_deref(),
-        Some("BOND" | "FIXEDINCOME" | "FIXED_INCOME" | "FIXED INCOME" | "DEBT")
+        Some("BND" | "BOND" | "FIXEDINCOME" | "FIXED_INCOME" | "FIXED INCOME" | "DEBT")
     )
 }
 
@@ -573,12 +597,12 @@ pub fn map_broker_activity(
         .or(activity.settlement_date.clone())
         .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
 
-    let quantity = activity.units.and_then(Decimal::from_f64).map(|d| d.abs());
-    let unit_price = activity.price.and_then(Decimal::from_f64).map(|d| d.abs());
-    let fee = activity.fee.and_then(Decimal::from_f64).map(|d| d.abs());
+    let quantity = activity.units.and_then(decimal_from_f64).map(|d| d.abs());
+    let unit_price = activity.price.and_then(decimal_from_f64).map(|d| d.abs());
+    let fee = activity.fee.and_then(decimal_from_f64).map(|d| d.abs());
     // Preserve provider provenance: preparation derives a missing total only
     // after resolving the asset's multiplier and quote currency.
-    let amount = activity.amount.and_then(Decimal::from_f64).map(|d| d.abs());
+    let amount = activity.amount.and_then(decimal_from_f64).map(|d| d.abs());
     let is_trade = matches!(
         activity_type.as_str(),
         activities::ACTIVITY_TYPE_BUY | activities::ACTIVITY_TYPE_SELL
@@ -595,7 +619,7 @@ pub fn map_broker_activity(
         // but surface the ambiguity for user review.
         needs_review_flag = true;
     }
-    let fx_rate = activity.fx_rate.and_then(Decimal::from_f64);
+    let fx_rate = activity.fx_rate.and_then(decimal_from_f64);
 
     // Normalize minor currency units (e.g., GBp -> GBP) and convert amounts
     let (unit_price, quantity, fee, amount, currency_code) =
@@ -642,11 +666,15 @@ pub fn map_broker_activity(
         source_system: normalize_source_system(activity.source_system.as_deref())
             .or_else(|| normalize_source_system(activity.provider_type.as_deref()))
             .or_else(|| Some("SNAPTRADE".to_string())),
-        source_record_id: activity
-            .source_record_id
-            .clone()
-            .or(activity.external_reference_id.clone())
-            .or(activity.id.clone()),
+        source_record_id: [
+            activity.source_record_id.as_ref(),
+            activity.provider_activity_id.as_ref(),
+            activity.id.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        .find(|value| !value.trim().is_empty())
+        .cloned(),
         source_group_id: activity.source_group_id.clone(),
         idempotency_key: None,
         import_run_id: None,
@@ -685,6 +713,51 @@ mod tests {
 
     fn map_test_activity(activity: &AccountUniversalActivity) -> NewActivity {
         map_broker_activity(activity, "acct-1", Some("USD"), Some("USD")).unwrap()
+    }
+
+    #[test]
+    fn decimal_from_f64_returns_the_number_the_provider_sent() {
+        assert_eq!(decimal_from_f64(4196049.73), Some(decimal("4196049.73")));
+        assert_eq!(decimal_from_f64(-4196049.73), Some(decimal("-4196049.73")));
+        assert_eq!(
+            decimal_from_f64(0.000123456789),
+            Some(decimal("0.000123456789"))
+        );
+        assert_eq!(
+            decimal_from_f64(123456.123456789),
+            Some(decimal("123456.123456789"))
+        );
+        assert_eq!(decimal_from_f64(f64::NAN), None);
+        assert_eq!(decimal_from_f64(f64::INFINITY), None);
+        assert_eq!(decimal_from_f64(f64::NEG_INFINITY), None);
+    }
+
+    #[test]
+    fn decimal_from_f64_otherwise_keeps_the_from_f64_result() {
+        let cases = [
+            // Already exact under from_f64: same value and scale.
+            12.34,
+            99.76,
+            0.00000001,
+            1e20,
+            // Zero keeps from_f64's sign.
+            0.0,
+            -0.0,
+            // More than 15 significant digits: float noise is still rounded away.
+            0.1 + 0.2,
+            1234.5600000000002,
+            // Beyond Decimal's 28 decimal places or its range.
+            1e-29,
+            1.2345678901234567e-20,
+            1e29,
+        ];
+        for value in cases {
+            assert_eq!(
+                decimal_from_f64(value).map(|d| d.to_string()),
+                Decimal::from_f64(value).map(|d| d.to_string()),
+                "{value}"
+            );
+        }
     }
 
     #[test]
@@ -780,7 +853,7 @@ mod tests {
     }
 
     #[test]
-    fn test_map_broker_activity_uses_provider_and_external_reference_fallbacks() {
+    fn test_map_broker_activity_preserves_external_reference_without_using_it_as_identity() {
         let activity = AccountUniversalActivity {
             id: Some("act-1".to_string()),
             activity_type: Some("BUY".to_string()),
@@ -792,12 +865,66 @@ mod tests {
         let mapped = map_test_activity(&activity);
 
         assert_eq!(mapped.source_system.as_deref(), Some("SNAPTRADE"));
-        assert_eq!(mapped.source_record_id.as_deref(), Some("ext-123"));
+        assert_eq!(mapped.source_record_id.as_deref(), Some("act-1"));
 
         let metadata_json = mapped.metadata.expect("metadata should be present");
         let metadata: serde_json::Value = serde_json::from_str(&metadata_json).unwrap();
         assert_eq!(metadata["provider_type"], "snaptrade");
         assert_eq!(metadata["external_reference_id"], "ext-123");
+    }
+
+    #[test]
+    fn source_identity_uses_first_nonblank_candidate() {
+        for source in [
+            None,
+            Some(""),
+            Some(" \t\n"),
+            Some("kraken:composite:1"),
+            Some("external-1"),
+            Some(" supplied-id "),
+        ] {
+            for provider in [None, Some(""), Some(" \t\n"), Some("provider-1")] {
+                let activity: AccountUniversalActivity =
+                    serde_json::from_value(serde_json::json!({
+                        "id": "act-1",
+                        "type": "BUY",
+                        "source_record_id": source,
+                        "provider_activity_id": provider,
+                        "source_group_id": "group-1",
+                        "external_reference_id": "external-1",
+                    }))
+                    .unwrap();
+                let mapped = map_test_activity(&activity);
+                let expected = source
+                    .filter(|s| !s.trim().is_empty())
+                    .or(provider.filter(|s| !s.trim().is_empty()))
+                    .unwrap_or("act-1");
+                assert_eq!(mapped.source_record_id.as_deref(), Some(expected));
+                assert_eq!(mapped.id.as_deref(), Some("act-1"));
+                assert_eq!(mapped.source_group_id.as_deref(), Some("group-1"));
+                let metadata: serde_json::Value =
+                    serde_json::from_str(mapped.metadata.as_deref().unwrap()).unwrap();
+                assert_eq!(metadata["source_group_id"], "group-1");
+                assert_eq!(metadata["external_reference_id"], "external-1");
+                if let Some(source) = source {
+                    assert_eq!(metadata["source_record_id"], source);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn source_identity_does_not_replace_required_incoming_id() {
+        for id in [None, Some(""), Some(" \t\n")] {
+            let activity: AccountUniversalActivity = serde_json::from_value(serde_json::json!({
+                "id": id,
+                "source_record_id": "composite-1",
+                "provider_activity_id": "provider-1",
+                "external_reference_id": "external-1",
+            }))
+            .unwrap();
+            assert!(map_broker_activity(&activity, "acct-1", Some("USD"), Some("USD")).is_none());
+        }
     }
 
     #[test]
@@ -836,6 +963,25 @@ mod tests {
 
         assert_eq!(mapped.amount.unwrap().round_dp(2), decimal("990.00"));
         let asset = mapped.asset.expect("bond activity should produce an asset");
+        assert_eq!(asset.kind.as_deref(), Some("BOND"));
+        assert_eq!(asset.instrument_type.as_deref(), Some("BOND"));
+    }
+
+    #[test]
+    fn test_map_broker_activity_recognizes_snaptrade_bnd_cusip() {
+        let activity = AccountUniversalActivity {
+            id: Some("act-bond-cusip-buy".to_string()),
+            activity_type: Some("BUY".to_string()),
+            symbol: Some(broker_symbol("912810TH1", "bnd")),
+            units: Some(1000.0),
+            price: Some(0.955),
+            amount: Some(955.0),
+            ..Default::default()
+        };
+
+        let mapped = map_test_activity(&activity);
+        let asset = mapped.asset.expect("bond activity should produce an asset");
+        assert_eq!(asset.symbol.as_deref(), Some("912810TH1"));
         assert_eq!(asset.kind.as_deref(), Some("BOND"));
         assert_eq!(asset.instrument_type.as_deref(), Some("BOND"));
     }
@@ -917,6 +1063,20 @@ mod tests {
         let mapped = map_test_activity(&activity);
 
         assert_eq!(mapped.amount.unwrap().round_dp(2), decimal("12.34"));
+    }
+
+    #[test]
+    fn test_map_broker_activity_keeps_large_cent_amount_exact() {
+        let activity = AccountUniversalActivity {
+            id: Some("act-large-deposit".to_string()),
+            activity_type: Some("DEPOSIT".to_string()),
+            amount: Some(4196049.73),
+            ..Default::default()
+        };
+
+        let mapped = map_test_activity(&activity);
+
+        assert_eq!(mapped.amount, Some(decimal("4196049.73")));
     }
 
     #[test]

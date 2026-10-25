@@ -25,7 +25,7 @@ vi.mock("@/components/ticker-search", () => ({
           onSelectResult("VWRPL.XC", {
             symbol: "VWRPL.XC",
             canonicalSymbol: "VWRPL",
-            canonicalExchangeMic: "CXE",
+            canonicalExchangeMic: "BCXE",
             longName: "Vanguard FTSE All-World UCITS ETF",
             shortName: "VWRP",
             exchange: "CXE",
@@ -44,19 +44,19 @@ vi.mock("@/components/ticker-search", () => ({
         type="button"
         data-testid="select-provider-ref"
         onClick={() =>
-          onSelectResult("SHOP.TO", {
-            symbol: "SHOP.TO",
-            canonicalSymbol: "SHOP",
-            canonicalExchangeMic: "XTSE",
-            longName: "Shopify Inc.",
-            shortName: "Shopify",
-            exchange: "TOR",
-            exchangeMic: "XTSE",
+          onSelectResult("ABC.ZZ", {
+            symbol: "ABC.ZZ",
+            canonicalSymbol: "ABC",
+            canonicalExchangeMic: "XNAS",
+            longName: "Provider-confirmed security",
+            shortName: "ABC",
+            exchange: "NASDAQ",
+            exchangeMic: "XNAS",
             quoteType: "EQUITY",
             currency: "CAD",
             dataSource: "YAHOO",
             providerId: "YAHOO",
-            providerSymbol: "SHOP.TO",
+            providerSymbol: "ABC.ZZ",
           })
         }
       >
@@ -163,6 +163,126 @@ function TestForm() {
   );
 }
 
+interface ManualFormValues extends FormValues {
+  existingAssetId?: string;
+}
+
+const storedManualValues: ManualFormValues = {
+  assetId: "RETYPEOLD",
+  exchangeMic: "XTSE",
+  currency: "CAD",
+  symbolQuoteCcy: "USD",
+  symbolInstrumentType: "EQUITY",
+  quoteMode: "MANUAL",
+  existingAssetId: "asset-retypeold",
+  assetMetadata: {
+    name: "Claims RETYPEOLD EQUITY",
+    kind: "INVESTMENT",
+    providerId: "CUSTOM",
+    providerSymbol: "RETYPEOLD.CUSTOM",
+  },
+};
+
+const otherStoredValues: ManualFormValues = {
+  assetId: "OTHER",
+  currency: "USD",
+  symbolQuoteCcy: "EUR",
+  symbolInstrumentType: "ETF",
+  quoteMode: "MANUAL",
+  existingAssetId: "asset-other",
+  assetMetadata: { name: "Other fund" },
+};
+
+function ManualTestForm() {
+  const methods = useForm<ManualFormValues>({ defaultValues: storedManualValues });
+  const values = methods.watch();
+
+  return (
+    <FormProvider {...methods}>
+      <form>
+        <SymbolSearch<ManualFormValues>
+          name="assetId"
+          isManualAsset
+          exchangeMicName="exchangeMic"
+          currencyName="currency"
+          quoteCcyName="symbolQuoteCcy"
+          instrumentTypeName="symbolInstrumentType"
+          existingAssetIdName="existingAssetId"
+          quoteModeName="quoteMode"
+          assetMetadataName="assetMetadata"
+        />
+        <output data-testid="values">{JSON.stringify(values)}</output>
+        <button type="button" onClick={() => methods.reset(otherStoredValues)}>
+          Reset to other
+        </button>
+      </form>
+    </FormProvider>
+  );
+}
+
+function manualValues() {
+  return JSON.parse(screen.getByTestId("values").textContent ?? "{}") as ManualFormValues;
+}
+
+describe("SymbolSearch manual input", () => {
+  it("drops the previous security's details when another symbol is typed", async () => {
+    const user = userEvent.setup();
+    render(<ManualTestForm />);
+
+    await user.clear(screen.getByTestId("symbol-input"));
+    await user.type(screen.getByTestId("symbol-input"), "btc");
+
+    // JSON drops undefined fields, so only what is kept remains.
+    expect(manualValues()).toEqual({
+      assetId: "BTC",
+      currency: "CAD",
+      quoteMode: "MANUAL",
+      assetMetadata: {},
+    });
+  });
+
+  it("keeps the details when only spacing changes", async () => {
+    const user = userEvent.setup();
+    render(<ManualTestForm />);
+
+    await user.type(screen.getByTestId("symbol-input"), " ");
+
+    expect(manualValues()).toEqual({ ...storedManualValues, assetId: "RETYPEOLD " });
+  });
+
+  it("restores the details when the original symbol is typed back", async () => {
+    const user = userEvent.setup();
+    render(<ManualTestForm />);
+
+    await user.clear(screen.getByTestId("symbol-input"));
+    await user.type(screen.getByTestId("symbol-input"), "BTC");
+    await user.clear(screen.getByTestId("symbol-input"));
+    await user.type(screen.getByTestId("symbol-input"), "retypeold");
+
+    expect(manualValues()).toEqual(storedManualValues);
+  });
+
+  it("follows the defaults of a form reset to another activity", async () => {
+    const user = userEvent.setup();
+    render(<ManualTestForm />);
+
+    await user.clear(screen.getByTestId("symbol-input"));
+    await user.click(screen.getByRole("button", { name: "Reset to other" }));
+    expect(manualValues()).toEqual(otherStoredValues);
+
+    await user.type(screen.getByTestId("symbol-input"), "X");
+    expect(manualValues()).toEqual({
+      assetId: "OTHERX",
+      currency: "USD",
+      quoteMode: "MANUAL",
+      assetMetadata: {},
+    });
+
+    await user.type(screen.getByTestId("symbol-input"), "{Backspace}");
+    expect(manualValues()).toEqual(otherStoredValues);
+  });
+});
+
 describe("SymbolSearch", () => {
   beforeEach(() => {
     resolveSymbolQuoteMock.mockReset();
@@ -184,9 +304,16 @@ describe("SymbolSearch", () => {
     });
 
     expect(screen.getByTestId("asset-id")).toHaveTextContent("VWRPL");
-    expect(screen.getByTestId("exchange-mic")).toHaveTextContent("CXE");
+    expect(screen.getByTestId("exchange-mic")).toHaveTextContent("BCXE");
     expect(screen.getByTestId("asset-name")).toHaveTextContent("Vanguard FTSE All-World UCITS ETF");
-    expect(resolveSymbolQuoteMock).toHaveBeenCalledWith("VWRPL", "CXE", "EQUITY", undefined, "GBp");
+    expect(resolveSymbolQuoteMock).toHaveBeenCalledWith(
+      "VWRPL",
+      "BCXE",
+      "EQUITY",
+      undefined,
+      "GBp",
+      undefined,
+    );
   });
 
   it("does not overwrite an existing asset quote currency with resolver output", async () => {
@@ -207,6 +334,7 @@ describe("SymbolSearch", () => {
         "CRYPTOCURRENCY",
         undefined,
         "EUR",
+        undefined,
       );
     });
 
@@ -226,13 +354,20 @@ describe("SymbolSearch", () => {
     await user.click(screen.getByTestId("select-provider-ref"));
 
     await waitFor(() => {
-      expect(screen.getByTestId("asset-id")).toHaveTextContent("SHOP");
+      expect(screen.getByTestId("asset-id")).toHaveTextContent("ABC");
     });
 
-    expect(screen.getByTestId("exchange-mic")).toHaveTextContent("XTSE");
-    expect(resolveSymbolQuoteMock).toHaveBeenCalledWith("SHOP", "XTSE", "EQUITY", "YAHOO", "CAD");
+    expect(screen.getByTestId("exchange-mic")).toHaveTextContent("XNAS");
+    expect(resolveSymbolQuoteMock).toHaveBeenCalledWith(
+      "ABC",
+      "XNAS",
+      "EQUITY",
+      "YAHOO",
+      "CAD",
+      "ABC.ZZ",
+    );
     expect(screen.getByTestId("provider-ref")).toHaveTextContent(
-      JSON.stringify({ providerId: "YAHOO", providerSymbol: "SHOP.TO" }),
+      JSON.stringify({ providerId: "YAHOO", providerSymbol: "ABC.ZZ" }),
     );
   });
 
@@ -283,7 +418,7 @@ describe("SymbolSearch", () => {
     await user.click(screen.getByTestId("select-provider-ref"));
     await waitFor(() => {
       expect(screen.getByTestId("provider-ref")).toHaveTextContent(
-        JSON.stringify({ providerId: "YAHOO", providerSymbol: "SHOP.TO" }),
+        JSON.stringify({ providerId: "YAHOO", providerSymbol: "ABC.ZZ" }),
       );
     });
 

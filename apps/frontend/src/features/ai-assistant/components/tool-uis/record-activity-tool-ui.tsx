@@ -1,4 +1,5 @@
 import { updateToolResult } from "@/adapters";
+import { Alert, AlertDescription, AlertTitle } from "@wealthfolio/ui/components/ui/alert";
 import { useBalancePrivacy } from "@/hooks/use-balance-privacy";
 import { localizeActivitySubtypeName, localizeActivityTypeName } from "@/lib/activity-utils";
 import { ActivityType, QuoteMode } from "@/lib/constants";
@@ -26,6 +27,8 @@ import {
   useAmountFormatting,
   useDateFormatting,
   type FormattingApi,
+  buttonVariants,
+  Spinner,
 } from "@wealthfolio/ui";
 import { Icons } from "@wealthfolio/ui/components/ui/icons";
 import { parse as dateFnsParse } from "date-fns";
@@ -60,6 +63,11 @@ interface ActivityDraft {
   symbol?: string;
   assetId?: string;
   assetName?: string;
+  exchangeMic?: string;
+  quoteCcy?: string;
+  instrumentType?: string;
+  providerId?: string;
+  providerSymbol?: string;
   quantity?: number;
   unitPrice?: number;
   amount?: number;
@@ -106,6 +114,8 @@ interface ResolvedAsset {
   exchange?: string;
   exchangeMic?: string;
   instrumentType?: string;
+  providerId?: string;
+  providerSymbol?: string;
 }
 
 interface RecordActivityOutput {
@@ -263,6 +273,13 @@ function normalizeResult(result: unknown, fallbackCurrency: string): RecordActiv
     symbol: (draftRaw.symbol as string) ?? undefined,
     assetId: (draftRaw.assetId as string) ?? (draftRaw.asset_id as string) ?? undefined,
     assetName: (draftRaw.assetName as string) ?? (draftRaw.asset_name as string) ?? undefined,
+    exchangeMic: (draftRaw.exchangeMic as string) ?? (draftRaw.exchange_mic as string) ?? undefined,
+    quoteCcy: (draftRaw.quoteCcy as string) ?? (draftRaw.quote_ccy as string) ?? undefined,
+    instrumentType:
+      (draftRaw.instrumentType as string) ?? (draftRaw.instrument_type as string) ?? undefined,
+    providerId: (draftRaw.providerId as string) ?? (draftRaw.provider_id as string) ?? undefined,
+    providerSymbol:
+      (draftRaw.providerSymbol as string) ?? (draftRaw.provider_symbol as string) ?? undefined,
     quantity: finiteNumberValue(draftRaw.quantity),
     unitPrice: finiteNumberValue(draftRaw.unitPrice ?? draftRaw.unit_price),
     amount: finiteNumberValue(draftRaw.amount),
@@ -320,6 +337,10 @@ function normalizeResult(result: unknown, fallbackCurrency: string): RecordActiv
           (assetRaw.exchangeMic as string) ?? (assetRaw.exchange_mic as string) ?? undefined,
         instrumentType:
           (assetRaw.instrumentType as string) ?? (assetRaw.instrument_type as string) ?? undefined,
+        providerId:
+          (assetRaw.providerId as string) ?? (assetRaw.provider_id as string) ?? undefined,
+        providerSymbol:
+          (assetRaw.providerSymbol as string) ?? (assetRaw.provider_symbol as string) ?? undefined,
       }
     : undefined;
 
@@ -468,12 +489,13 @@ function SuccessState({ draft, createdActivityId, currency }: SuccessStateProps)
           )}
         </div>
         <div className="pt-2">
-          <Button variant="outline" size="sm" asChild>
-            <Link to={createdActivityId ? `/activities?id=${createdActivityId}` : "/activities"}>
-              <Icons.ArrowRight className="mr-2 h-4 w-4" />
-              {t("ai:recordActivity.viewInActivities")}
-            </Link>
-          </Button>
+          <Link
+            to={createdActivityId ? `/activities?id=${createdActivityId}` : "/activities"}
+            className={buttonVariants({ variant: "outline", size: "sm" })}
+          >
+            <Icons.ArrowRight className="me-2 h-4 w-4 rtl:rotate-180" />
+            {t("ai:recordActivity.viewInActivities")}
+          </Link>
         </div>
       </CardContent>
     </Card>
@@ -541,8 +563,8 @@ function draftToPseudoActivity(
     currency: draft.currency,
     comment: draft.notes,
     subtype: draft.subtype,
-    exchangeMic: resolvedAsset?.exchangeMic,
-    instrumentType: resolvedAsset?.instrumentType,
+    exchangeMic: resolvedAsset?.exchangeMic ?? draft.exchangeMic,
+    instrumentType: resolvedAsset?.instrumentType ?? draft.instrumentType,
     assetQuoteMode: draft.quoteMode === "MANUAL" ? QuoteMode.MANUAL : QuoteMode.MARKET,
     // metadata.flow.is_external is what TransferForm uses to derive isExternal=true
     metadata: isTransfer ? { flow: { is_external: true } } : undefined,
@@ -560,27 +582,33 @@ function aiSpecificDefaultOverrides(
   const overrides: Record<string, unknown> = {};
 
   // Authoritative quote currency from the AI's symbol resolver, when present.
-  if (resolvedAsset?.currency) {
-    overrides.symbolQuoteCcy = resolvedAsset.currency;
+  if (draft.quoteCcy ?? resolvedAsset?.currency) {
+    overrides.symbolQuoteCcy = draft.quoteCcy ?? resolvedAsset?.currency;
   }
   if (resolvedAsset?.assetId) {
     overrides.existingAssetId = resolvedAsset.assetId;
   }
-  if (resolvedAsset?.instrumentType) {
-    overrides.symbolInstrumentType = resolvedAsset.instrumentType;
+  if (draft.instrumentType ?? resolvedAsset?.instrumentType) {
+    overrides.symbolInstrumentType = draft.instrumentType ?? resolvedAsset?.instrumentType;
   }
   // For AI-flagged custom assets, fall back to the activity currency the user
   // already approved. Safe because the asset is being created fresh — there is
   // no canonical quote currency to conflict with.
-  if (draft.isCustomAsset && draft.currency && !resolvedAsset?.currency) {
+  if (draft.isCustomAsset && draft.currency && !draft.quoteCcy && !resolvedAsset?.currency) {
     overrides.symbolQuoteCcy = draft.currency;
   }
 
   // Asset metadata for the create-on-save path inside BuyForm/SellForm/DividendForm.
-  if (draft.isCustomAsset && (draft.symbol || draft.assetName)) {
+  const providerId = draft.providerId ?? resolvedAsset?.providerId;
+  const providerSymbol = draft.providerSymbol ?? resolvedAsset?.providerSymbol;
+  const exchangeMic = draft.exchangeMic ?? resolvedAsset?.exchangeMic;
+  if (draft.isCustomAsset || providerId || providerSymbol || exchangeMic) {
     overrides.assetMetadata = {
       name: draft.assetName ?? draft.symbol,
       kind: draft.assetKind,
+      exchangeMic,
+      providerId,
+      providerSymbol,
     };
   }
 
@@ -598,19 +626,22 @@ function ValidationHints({ validation }: ValidationHintsProps) {
   }
 
   return (
-    <div className="bg-warning/10 border-warning/30 rounded-md border p-2 text-xs">
-      <p className="font-medium">{t("ai:recordActivity.flaggedIssues")}</p>
-      <ul className="mt-1 list-disc pl-4">
-        {validation.errors.map((e, i) => (
-          <li key={`err-${i}`}>
-            <span className="font-medium">{e.field}:</span> {e.message}
-          </li>
-        ))}
-        {validation.missingFields.map((f) => (
-          <li key={`missing-${f}`}>{t("ai:recordActivity.missing", { field: f })}</li>
-        ))}
-      </ul>
-    </div>
+    <Alert variant="warning" className="p-2 text-xs">
+      <Icons.AlertTriangle />
+      <AlertTitle>{t("ai:recordActivity.flaggedIssues")}</AlertTitle>
+      <AlertDescription>
+        <ul className="list-disc ps-4">
+          {validation.errors.map((e, i) => (
+            <li key={`err-${i}`}>
+              <span className="font-medium">{e.field}:</span> {e.message}
+            </li>
+          ))}
+          {validation.missingFields.map((f) => (
+            <li key={`missing-${f}`}>{t("ai:recordActivity.missing", { field: f })}</li>
+          ))}
+        </ul>
+      </AlertDescription>
+    </Alert>
   );
 }
 
@@ -748,7 +779,7 @@ function DraftReview({
           {t("ai:recordActivity.edit")}
         </Button>
         <Button type="button" size="sm" onClick={onConfirm} disabled={isLoading || !canConfirm}>
-          {isLoading && <Icons.Spinner className="mr-2 h-4 w-4 animate-spin" />}
+          {isLoading && <Spinner className="me-2 h-4 w-4" />}
           {t("ai:recordActivity.confirm")}
         </Button>
       </div>
@@ -881,13 +912,12 @@ function DraftForm({
 
   if (!config) {
     return (
-      <Card className="border-destructive/30 bg-destructive/5">
-        <CardContent className="py-4">
-          <p className="text-destructive text-sm font-medium">
-            {t("ai:recordActivity.unsupportedType", { type: draft.activityType })}
-          </p>
-        </CardContent>
-      </Card>
+      <Alert variant="destructive">
+        <Icons.AlertCircle />
+        <AlertTitle>
+          {t("ai:recordActivity.unsupportedType", { type: draft.activityType })}
+        </AlertTitle>
+      </Alert>
     );
   }
 
@@ -924,7 +954,7 @@ function DraftForm({
             )}
           </div>
           {headerAmountLabel && (
-            <div className="text-right">
+            <div className="text-end">
               <div className="text-muted-foreground text-xs font-medium">
                 {t("ai:recordActivity.estimatedTotal")}
               </div>
@@ -995,24 +1025,22 @@ function RecordActivityToolUIContentImpl({
 
   if (isIncomplete) {
     return (
-      <Card className="border-destructive/30 bg-destructive/5">
-        <CardContent className="py-4">
-          <p className="text-destructive text-sm font-medium">
-            {t("ai:recordActivity.failedPrepare")}
-          </p>
-          <p className="text-muted-foreground mt-1 text-xs">{t("ai:recordActivity.interrupted")}</p>
-        </CardContent>
-      </Card>
+      <Alert variant="destructive">
+        <Icons.AlertCircle />
+        <AlertTitle>{t("ai:recordActivity.failedPrepare")}</AlertTitle>
+        <AlertDescription className="text-xs">
+          {t("ai:recordActivity.interrupted")}
+        </AlertDescription>
+      </Alert>
     );
   }
 
   if (!parsed) {
     return (
-      <Card className="border-destructive/30 bg-destructive/5">
-        <CardContent className="py-4">
-          <p className="text-destructive text-sm font-medium">{t("ai:recordActivity.noData")}</p>
-        </CardContent>
-      </Card>
+      <Alert variant="destructive">
+        <Icons.AlertCircle />
+        <AlertTitle>{t("ai:recordActivity.noData")}</AlertTitle>
+      </Alert>
     );
   }
 

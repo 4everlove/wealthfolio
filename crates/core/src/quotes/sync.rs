@@ -63,7 +63,9 @@ struct SyncLockGuard {
 impl SyncLockGuard {
     /// Try to acquire sync lock for an asset. Returns Some(guard) if acquired, None if already locked.
     fn try_acquire(asset_id: &str) -> Option<Self> {
-        let mut locks = SYNC_LOCKS.lock().unwrap();
+        let mut locks = SYNC_LOCKS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if locks.contains(asset_id) {
             None
         } else {
@@ -77,7 +79,9 @@ impl SyncLockGuard {
 
 impl Drop for SyncLockGuard {
     fn drop(&mut self) {
-        let mut locks = SYNC_LOCKS.lock().unwrap();
+        let mut locks = SYNC_LOCKS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         locks.remove(&self.asset_id);
     }
 }
@@ -190,7 +194,7 @@ fn format_sync_failure_message(error: &Error, provider_id: Option<&str>) -> Stri
     }
 }
 
-fn asset_skip_reason(asset: &Asset, allow_inactive: bool) -> Option<AssetSkipReason> {
+pub(super) fn asset_skip_reason(asset: &Asset, allow_inactive: bool) -> Option<AssetSkipReason> {
     // Only sync market-priced assets (including FX rates for currency conversion)
     if asset.quote_mode != QuoteMode::Market {
         return Some(AssetSkipReason::ManualPricing);
@@ -327,10 +331,6 @@ fn should_allow_inactive_asset(
                 activity_bounds,
                 holdings_bounds,
             ))
-}
-
-fn should_purge_provider_quotes(mode: SyncMode, inputs: &SyncPlanningInputs) -> bool {
-    matches!(mode, SyncMode::BackfillHistory { .. }) && inputs.activity_min.is_some()
 }
 
 fn calculate_targeted_closed_incremental_window(
@@ -642,6 +642,104 @@ where
         }
     }
 
+    /// Explicit replacement is the only synchronization operation allowed to remove history.
+    pub async fn reset_provider_history(
+        &self,
+        asset_id: &str,
+    ) -> Result<super::ResetProviderHistoryResult> {
+        let _guard = SyncLockGuard::try_acquire(asset_id).ok_or_else(|| {
+            Error::Asset("Already refreshing this asset; try again when it finishes".into())
+        })?;
+        let context = self.quote_store.provider_history_reset_context(asset_id)?;
+        let asset = &context.asset;
+        context.ensure_eligible()?;
+        let ids = vec![asset_id.to_owned()];
+        let activity_bounds = self.activity_repo.get_activity_bounds_for_assets(&ids)?;
+        let holdings_bounds = self
+            .activity_repo
+            .get_holdings_snapshot_bounds_for_assets(&ids)?;
+        let (activity_min, activity_max) = merge_bounds(
+            activity_bounds.get(asset_id).copied(),
+            holdings_bounds.get(asset_id).copied(),
+        );
+        let inputs = SyncPlanningInputs {
+            is_active: asset.is_active,
+            position_closed_date: None,
+            activity_min,
+            activity_max,
+            quote_min: None,
+            quote_max: None,
+            history_buffer_days: history_buffer_days_for(asset),
+        };
+        let now = Utc::now();
+        let end = market_fetch_end_date(
+            now,
+            asset.instrument_exchange_mic.as_deref(),
+            asset.instrument_type.as_ref(),
+        );
+        let (normal_start, _) = self.calculate_date_range_for_mode(
+            &inputs,
+            SyncMode::BackfillHistory {
+                days: DEFAULT_HISTORY_DAYS,
+            },
+            end,
+            end,
+            asset,
+        );
+        let start = context
+            .earliest_provider_date
+            .map_or(normal_start, |date| date.min(normal_start));
+        let client = self.client.read().await;
+        if client.provider_configuration() != context.provider_configuration.as_slice() {
+            return Err(Error::Asset(
+                "Provider settings are being updated; please try again".into(),
+            ));
+        }
+        let quotes = client
+            .fetch_history_for_reset(
+                asset,
+                Utc.from_utc_datetime(
+                    &start
+                        .and_hms_opt(0, 0, 0)
+                        .expect("00:00:00 is a valid time"),
+                ),
+                Utc.from_utc_datetime(
+                    &end.and_hms_opt(23, 59, 59)
+                        .expect("23:59:59 is a valid time"),
+                ),
+            )
+            .await?;
+        // Hold the client read lock through commit, keeping in-memory provider configuration stable.
+        let result = self
+            .quote_store
+            .replace_provider_history(context, quotes)
+            .await;
+        drop(client);
+        result
+    }
+
+    /// Reset independently per asset; failures never undo successful replacements.
+    pub async fn reset_all_provider_history(&self) -> Result<super::ResetAllProviderHistoryResult> {
+        let mut result = super::ResetAllProviderHistoryResult::default();
+        for asset in self.asset_repo.list()? {
+            if let Some(reason) = asset_skip_reason(&asset, true) {
+                result.skipped.push(super::ProviderHistoryResetSkipped {
+                    asset_id: asset.id,
+                    reason: reason.to_string(),
+                });
+                continue;
+            }
+            match self.reset_provider_history(&asset.id).await {
+                Ok(reset) => result.results.push(reset),
+                Err(error) => result.failures.push(super::ProviderHistoryResetFailure {
+                    asset_id: asset.id,
+                    error: error.to_string(),
+                }),
+            }
+        }
+        Ok(result)
+    }
+
     /// Check if an asset should be synced.
     fn should_sync_asset(&self, asset: &Asset) -> bool {
         self.get_skip_reason(asset, false).is_none()
@@ -798,8 +896,15 @@ where
     async fn _sync_splits(&self, asset: &Asset, start: NaiveDate, end: NaiveDate) {
         use crate::activities::compute_idempotency_key;
 
-        let start_dt = Utc.from_utc_datetime(&start.and_hms_opt(0, 0, 0).unwrap());
-        let end_dt = Utc.from_utc_datetime(&end.and_hms_opt(23, 59, 59).unwrap());
+        let start_dt = Utc.from_utc_datetime(
+            &start
+                .and_hms_opt(0, 0, 0)
+                .expect("00:00:00 is a valid time"),
+        );
+        let end_dt = Utc.from_utc_datetime(
+            &end.and_hms_opt(23, 59, 59)
+                .expect("23:59:59 is a valid time"),
+        );
 
         let client = self.client.read().await;
         let splits = client.fetch_splits(asset, start_dt, end_dt).await;
@@ -833,7 +938,12 @@ where
 
         let mut upserts: Vec<ActivityUpsert> = Vec::new();
         for split in &splits {
-            let split_dt = Utc.from_utc_datetime(&split.date.and_hms_opt(12, 0, 0).unwrap());
+            let split_dt = Utc.from_utc_datetime(
+                &split
+                    .date
+                    .and_hms_opt(12, 0, 0)
+                    .expect("12:00:00 is a valid time"),
+            );
 
             for account_id in &account_ids {
                 let key = compute_idempotency_key(
@@ -902,7 +1012,7 @@ where
         // Try to acquire per-asset lock (US-012)
         // Guard automatically releases lock when dropped (on success, failure, or panic)
         let _lock_guard = match SyncLockGuard::try_acquire(asset_id_str) {
-            Some(guard) => guard,
+            Some(guard) => Arc::new(guard),
             None => {
                 debug!("Skipping sync for {} - already in progress", asset_id_str);
                 return AssetSyncResult {
@@ -921,8 +1031,18 @@ where
         );
 
         // Convert dates to DateTime<Utc>
-        let start_dt = Utc.from_utc_datetime(&plan.start_date.and_hms_opt(0, 0, 0).unwrap());
-        let end_dt = Utc.from_utc_datetime(&plan.end_date.and_hms_opt(23, 59, 59).unwrap());
+        let start_dt = Utc.from_utc_datetime(
+            &plan
+                .start_date
+                .and_hms_opt(0, 0, 0)
+                .expect("00:00:00 is a valid time"),
+        );
+        let end_dt = Utc.from_utc_datetime(
+            &plan
+                .end_date
+                .and_hms_opt(23, 59, 59)
+                .expect("23:59:59 is a valid time"),
+        );
 
         // Fetch quotes via MarketDataClient
         let client = self.client.read().await;
@@ -938,19 +1058,19 @@ where
                 let quotes_count = quotes.len();
 
                 if quotes_count > 0 {
-                    // Purge stale provider quotes before inserting fresh data
-                    if plan.purge_provider_quotes {
-                        if let Err(e) = self
-                            .quote_store
-                            .delete_provider_quotes_for_asset(&asset_id)
-                            .await
-                        {
-                            warn!("Failed to purge provider quotes for {}: {:?}", asset.id, e);
-                        }
-                    }
-
-                    // Save to store
-                    match self.quote_store.upsert_quotes(&quotes).await {
+                    // Preserve history on every refresh. An owned write retains the guard
+                    // even if the caller is cancelled after enqueueing the SQLite operation.
+                    let store = self.quote_store.clone();
+                    let actual_source = quotes.first().map(|quote| quote.data_source.clone());
+                    let write_quotes = quotes;
+                    let write_guard = _lock_guard.clone();
+                    let saved = tokio::spawn(async move {
+                        let _guard = write_guard;
+                        store.upsert_quotes(&write_quotes).await
+                    })
+                    .await
+                    .unwrap_or_else(|error| Err(Error::Unexpected(error.to_string())));
+                    match saved {
                         Ok(_) => {
                             debug!("Saved {} quotes for {}", quotes_count, asset.id);
 
@@ -965,9 +1085,7 @@ where
                             }
 
                             // Persist the actual provider used so future planning reads correct quote bounds.
-                            if let Some(actual_source) =
-                                quotes.first().map(|q| q.data_source.clone())
-                            {
+                            if let Some(actual_source) = actual_source {
                                 match self.sync_state_store.get_by_asset_id(&asset.id) {
                                     Ok(Some(mut state)) if state.data_source != actual_source => {
                                         state.data_source = actual_source;
@@ -1352,7 +1470,6 @@ where
                             data_source: state.data_source.clone(),
                             quote_symbol: None,
                             currency: asset.quote_ccy.clone(),
-                            purge_provider_quotes: false,
                             suppress_closed_fetch_errors: false,
                         });
                     }
@@ -1380,7 +1497,6 @@ where
                             data_source: state.data_source.clone(),
                             quote_symbol: None,
                             currency: asset.quote_ccy.clone(),
-                            purge_provider_quotes: false,
                             suppress_closed_fetch_errors: false,
                         });
                     }
@@ -1417,7 +1533,6 @@ where
                 data_source: state.data_source.clone(),
                 quote_symbol: None,
                 currency: asset.quote_ccy.clone(),
-                purge_provider_quotes: false,
                 suppress_closed_fetch_errors: false,
             });
         }
@@ -1664,7 +1779,6 @@ where
                             data_source: data_source.clone(),
                             quote_symbol: None,
                             currency: asset.quote_ccy.clone(),
-                            purge_provider_quotes: false,
                             suppress_closed_fetch_errors: false,
                         });
                     }
@@ -1683,7 +1797,6 @@ where
                             data_source: data_source.clone(),
                             quote_symbol: None,
                             currency: asset.quote_ccy.clone(),
-                            purge_provider_quotes: false,
                             suppress_closed_fetch_errors: false,
                         });
                     }
@@ -1718,7 +1831,6 @@ where
                 data_source,
                 quote_symbol: None,
                 currency: asset.quote_ccy.clone(),
-                purge_provider_quotes: should_purge_provider_quotes(mode, &planning_inputs),
                 suppress_closed_fetch_errors: matches!(category, SyncCategory::Closed)
                     && !targeted_sync,
             });
@@ -2323,36 +2435,6 @@ mod tests {
             ),
             (Some(holdings_min), Some(activity_max))
         );
-    }
-
-    #[test]
-    fn test_backfill_purge_requires_authoritative_history_start() {
-        let inputs_without_history_start = SyncPlanningInputs {
-            is_active: true,
-            position_closed_date: None,
-            activity_min: None,
-            activity_max: None,
-            quote_min: None,
-            quote_max: None,
-            history_buffer_days: QUOTE_HISTORY_BUFFER_DAYS,
-        };
-        let inputs_with_history_start = SyncPlanningInputs {
-            activity_min: Some(NaiveDate::from_ymd_opt(2025, 11, 1).unwrap()),
-            ..inputs_without_history_start.clone()
-        };
-
-        assert!(!should_purge_provider_quotes(
-            SyncMode::BackfillHistory { days: 365 },
-            &inputs_without_history_start
-        ));
-        assert!(should_purge_provider_quotes(
-            SyncMode::BackfillHistory { days: 365 },
-            &inputs_with_history_start
-        ));
-        assert!(!should_purge_provider_quotes(
-            SyncMode::RefetchRecent { days: 30 },
-            &inputs_with_history_start
-        ));
     }
 
     #[test]

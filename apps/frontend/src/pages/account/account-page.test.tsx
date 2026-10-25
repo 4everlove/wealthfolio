@@ -1,3 +1,4 @@
+import { cloneElement } from "react";
 import { getHoldingsList } from "@/adapters";
 import { useAccounts } from "@/hooks/use-accounts";
 import { useRecalculatePortfolioMutation } from "@/hooks/use-calculate-portfolio";
@@ -14,10 +15,12 @@ import type {
   Settings,
 } from "@/lib/types";
 import { AccountType } from "@/lib/types";
+import { ActivityForm } from "@/pages/activity/components/activity-form";
+import ActivityTable from "@/pages/activity/components/activity-table/activity-table";
 import { useActivitySearch } from "@/pages/activity/hooks/use-activity-search";
 import { useCalculatePerformanceHistory } from "@/pages/performance/hooks/use-performance-data";
 import { useQuery } from "@tanstack/react-query";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import AccountPage from "./account-page";
 
@@ -73,7 +76,7 @@ vi.mock("@/pages/activity/components/activity-delete-modal", () => ({
 }));
 
 vi.mock("@/pages/activity/components/activity-form", () => ({
-  ActivityForm: () => <div>activity-form</div>,
+  ActivityForm: vi.fn(() => <div>activity-form</div>),
 }));
 
 vi.mock("@/pages/activity/components/activity-pagination", () => ({
@@ -81,7 +84,7 @@ vi.mock("@/pages/activity/components/activity-pagination", () => ({
 }));
 
 vi.mock("@/pages/activity/components/activity-table/activity-table", () => ({
-  default: () => <div>activity-table</div>,
+  default: vi.fn(() => <div>activity-table</div>),
 }));
 
 vi.mock("@/pages/activity/components/activity-table/activity-table-mobile", () => ({
@@ -155,11 +158,14 @@ vi.mock("@tanstack/react-query", () => ({
   useQuery: vi.fn(),
 }));
 
-vi.mock("@wealthfolio/ui", () => {
+vi.mock("@wealthfolio/ui", async () => {
+  const { getInitialIntervalData } =
+    await import("@wealthfolio/ui/components/financial/interval-selector");
   const Icon = () => <span>icon</span>;
   const Passthrough = ({ children }: { children?: React.ReactNode }) => <>{children}</>;
 
   return {
+    getInitialIntervalData,
     AnimatedToggleGroup: ({
       items,
       onValueChange,
@@ -209,19 +215,26 @@ vi.mock("@wealthfolio/ui", () => {
     Tooltip: Passthrough,
     TooltipContent: Passthrough,
     TooltipProvider: Passthrough,
-    TooltipTrigger: Passthrough,
+    TooltipTrigger: ({
+      children,
+      render,
+    }: {
+      children?: React.ReactNode;
+      render?: React.ReactElement;
+    }) => (render ? cloneElement(render, undefined, children) : <>{children}</>),
+    buttonVariants: () => "",
   };
 });
 
 vi.mock("@wealthfolio/ui/components/ui/button", () => ({
   Button: ({
     children,
-    asChild,
+    render,
     ...props
   }: React.ButtonHTMLAttributes<HTMLButtonElement> & {
-    asChild?: boolean;
+    render?: React.ReactElement;
     children?: React.ReactNode;
-  }) => (asChild ? <>{children}</> : <button {...props}>{children}</button>),
+  }) => (render ? cloneElement(render, props, children) : <button {...props}>{children}</button>),
 }));
 
 vi.mock("@wealthfolio/ui/components/ui/command", () => ({
@@ -306,6 +319,8 @@ const mockUseValuationHistory = vi.mocked(useValuationHistory);
 const mockUseSettingsContext = vi.mocked(useSettingsContext);
 const mockUseCalculatePerformanceHistory = vi.mocked(useCalculatePerformanceHistory);
 const mockUseActivitySearch = vi.mocked(useActivitySearch);
+const mockActivityForm = vi.mocked(ActivityForm);
+const mockActivityTable = vi.mocked(ActivityTable);
 const mockUseQuery = vi.mocked(useQuery);
 const mockUseRecalculatePortfolioMutation = vi.mocked(useRecalculatePortfolioMutation);
 
@@ -471,6 +486,104 @@ describe("AccountPage", () => {
     );
   });
 
+  it("scopes activities to a hidden account opened by URL", () => {
+    mockAccountPage([{ ...createAccount(), isActive: false }]);
+
+    render(<AccountPage />);
+
+    expect(screen.getAllByText("Brokerage").length).toBeGreaterThan(0);
+
+    fireEvent.click(screen.getByRole("button", { name: "Activities" }));
+
+    expect(mockUseActivitySearch.mock.calls.at(-1)?.[0]).toMatchObject({
+      mode: "infinite",
+      filters: { accountIds: ["account-1"] },
+    });
+  });
+
+  it.each([AccountType.CASH, AccountType.CREDIT_CARD])(
+    "asks for running balances on a %s account's activities",
+    (accountType) => {
+      mockAccountPage([{ ...createAccount(), accountType, name: "Checking" }]);
+
+      render(<AccountPage />);
+
+      expect(mockUseActivitySearch.mock.calls.at(-1)?.[0]).toMatchObject({
+        filters: { accountIds: ["account-1"] },
+        includeCashBalances: true,
+      });
+    },
+  );
+
+  it("asks for end-of-day cash on an investment account while its list runs in date order", () => {
+    mockAccountPage([createAccount()]);
+    render(<AccountPage />);
+    fireEvent.click(screen.getByRole("button", { name: "Activities" }));
+
+    expect(mockUseActivitySearch.mock.calls.at(-1)?.[0]).toMatchObject({
+      filters: { accountIds: ["account-1"] },
+      includeCashBalances: true,
+    });
+    expect(mockActivityTable.mock.calls.at(-1)?.[0]).toMatchObject({ groupByDay: true });
+
+    // Sorted by another column, the list is flat and has no cash to show.
+    act(() => {
+      mockActivityTable.mock.calls
+        .at(-1)?.[0]
+        .onSortingChange([{ id: "activityType", desc: false }]);
+    });
+
+    expect(mockUseActivitySearch.mock.calls.at(-1)?.[0]).toMatchObject({
+      includeCashBalances: false,
+    });
+    expect(mockActivityTable.mock.calls.at(-1)?.[0]).toMatchObject({ groupByDay: false });
+  });
+
+  it("does not ask for balances on a holdings-mode account", () => {
+    mockAccountPage([
+      { ...createAccount(), accountType: AccountType.CASH, trackingMode: "HOLDINGS" },
+    ]);
+    render(<AccountPage />);
+
+    expect(mockUseActivitySearch.mock.calls.at(-1)?.[0]).toMatchObject({
+      includeCashBalances: false,
+    });
+  });
+
+  it("offers a hidden account in its own activity form and switcher", () => {
+    mockAccountPage([
+      { ...createAccount(), isActive: false },
+      { ...createAccount(), id: "account-2", name: "Savings" },
+      { ...createAccount(), id: "account-3", name: "Old Broker", isActive: false },
+    ]);
+
+    render(<AccountPage />);
+
+    const formProps = mockActivityForm.mock.calls.at(-1)?.[0];
+    const allAccountIds = ["account-1", "account-2", "account-3"];
+    expect(formProps?.accounts.map((option) => option.value)).toEqual(allAccountIds);
+    expect(formProps?.transferAccounts?.map((option) => option.value)).toEqual(allAccountIds);
+
+    expect(screen.getByText("Brokerage (USD)")).toBeInTheDocument();
+    expect(screen.getByText("Savings (USD)")).toBeInTheDocument();
+    expect(screen.queryByText("Old Broker (USD)")).not.toBeInTheDocument();
+  });
+
+  it("loads activity markers for a hidden account", () => {
+    mockAccountPage([{ ...createAccount(), isActive: false }]);
+
+    render(<AccountPage />);
+
+    // The marker toggle is the icon button its tooltip text sits beside.
+    fireEvent.click(screen.getByText("Show snapshot markers").previousElementSibling!);
+
+    const markerQuery = mockUseQuery.mock.calls
+      .map(([options]) => options as { queryKey: unknown[]; enabled?: boolean })
+      .filter((options) => options.queryKey[1] === "markerDates")
+      .at(-1);
+    expect(markerQuery?.enabled).toBe(true);
+  });
+
   it("defaults to the snapshots tab for holdings-mode accounts without a holdings tab", () => {
     mockUseAccounts.mockReturnValue({
       accounts: [{ ...createAccount(), trackingMode: "HOLDINGS" }],
@@ -495,7 +608,50 @@ describe("AccountPage", () => {
 
     expect(screen.getByText("snapshot-history")).toBeInTheDocument();
   });
+  it("uses the configured calendar day for the initial account range", () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-12-31T16:30:00Z"));
+      mockUseSettingsContext.mockReturnValue({
+        settings: { baseCurrency: "USD", timezone: "Asia/Shanghai" },
+      } as ReturnType<typeof useSettingsContext>);
+      render(<AccountPage />);
+      expect(mockUseValuationHistory.mock.calls[0][0]).toEqual({
+        from: new Date(2026, 9, 1),
+        to: new Date(2027, 0, 1),
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
+
+// Mocks `useAccounts` like the real hook, which drops hidden accounts unless
+// `filterActive: false`, and gives the page a valuation to render.
+function mockAccountPage(accounts: Account[]) {
+  mockUseAccounts.mockImplementation(
+    (options) =>
+      ({
+        accounts:
+          options?.filterActive === false ? accounts : accounts.filter((acc) => acc.isActive),
+        isLoading: false,
+      }) as unknown as ReturnType<typeof useAccounts>,
+  );
+  mockUseValuationHistory.mockReturnValue({
+    valuationHistory: [createHistoricalValuation({ totalValue: 100 })],
+    isLoading: false,
+    error: null,
+  } as unknown as ReturnType<typeof useValuationHistory>);
+  mockUseCurrentValuation.mockReturnValue({
+    currentValuation: {
+      summary: createCurrentSummary({ totalValueBase: 125 }),
+      accounts: [createCurrentAccountValuation({ totalValue: 125 })],
+    },
+    isLoading: false,
+    isFetching: false,
+    error: null,
+  } as unknown as ReturnType<typeof useCurrentValuation>);
+}
 
 function createSettings(): Settings {
   return {

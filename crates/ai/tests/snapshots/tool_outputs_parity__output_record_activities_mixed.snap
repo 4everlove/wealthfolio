@@ -1,6 +1,5 @@
 ---
 source: crates/ai/tests/tool_outputs_parity.rs
-assertion_line: 693
 expression: result
 ---
 {
@@ -26,14 +25,20 @@ expression: result
           "assetKind": null,
           "assetName": null,
           "currency": "USD",
+          "exchangeMic": null,
           "fee": null,
+          "instrumentType": null,
           "isCustomAsset": false,
           "notes": null,
           "priceSource": "none",
           "pricingMode": "MARKET",
+          "providerId": null,
+          "providerSymbol": null,
           "quantity": null,
+          "quoteCcy": null,
           "subtype": null,
           "symbol": null,
+          "tax": null,
           "unitPrice": null
         },
         "errors": [],
@@ -57,14 +62,20 @@ expression: result
           "assetKind": null,
           "assetName": null,
           "currency": "USD",
+          "exchangeMic": null,
           "fee": null,
+          "instrumentType": null,
           "isCustomAsset": false,
           "notes": null,
           "priceSource": "none",
           "pricingMode": "MARKET",
+          "providerId": null,
+          "providerSymbol": null,
           "quantity": null,
+          "quoteCcy": null,
           "subtype": null,
           "symbol": null,
+          "tax": null,
           "unitPrice": null
         },
         "errors": [

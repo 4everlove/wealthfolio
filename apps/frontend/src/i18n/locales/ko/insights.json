@@ -64,10 +64,19 @@
       "holdings_count_one": "보유 종목 {{count}}개",
       "holdings_count_other": "보유 종목 {{count}}개",
       "accounts_count_one": "계좌 {{count}}개",
-      "accounts_count_other": "계좌 {{count}}개"
+      "accounts_count_other": "계좌 {{count}}개",
+      "pnl_current_holdings": "현재 보유 종목"
     }
   },
   "networth": {
+    "attention": {
+      "title": "확인이 필요한 항목",
+      "update_value": "평가액 업데이트",
+      "update_balance": "잔액 업데이트",
+      "link_property": "{{name}}에 부동산 연결",
+      "add_property": "{{name}}의 부동산 추가",
+      "link_explanation": "기존 부동산을 연결해도 순자산은 바뀌지 않습니다."
+    },
     "failed_to_load": "순자산을 불러오지 못했습니다",
     "stale_valuations_tooltip": "오래된 평가 (90일 이상):",
     "days_ago": "{{count}}일 전",
@@ -75,9 +84,6 @@
     "breakdown": "세부 내역",
     "no_assets_found": "자산을 찾을 수 없습니다.",
     "add_first_asset": "첫 자산을 추가하세요",
-    "update_valuations": "평가를 업데이트하세요",
-    "assets_count_one": "자산 {{count}}개",
-    "assets_count_other": "자산 {{count}}개",
     "not_updated_over_90_days": "90일 넘게 업데이트되지 않았습니다.",
     "chart": {
       "net_worth": "순자산",
@@ -113,15 +119,48 @@
     },
     "velocity": {
       "monthly_pace": "월간 속도",
-      "over_months_one": "{{count}}개월 동안",
-      "over_months_other": "{{count}}개월 동안",
-      "trailing_pace": " · 최근 12개월 평균 대비 {{multiple}}배",
+      "since": "{{date}} 이후",
+      "trailing_pace": " · 12개월 평균의 {{multiple}}배",
       "drivers_of_change": "변화 요인",
-      "market_returns": "시장 수익률",
+      "investment_gains": "투자 수익",
+      "investment_losses": "투자 손실",
+      "other_assets": "기타 자산",
       "contributions": "납입금",
-      "equity_built": "축적된 자본",
+      "withdrawals": "출금",
+      "debt_paid_down": "부채 상환",
+      "debt_added": "신규 부채",
       "per_month": "/월"
     },
     "days_ago_other": "{{count}}일 전"
+  },
+  "highlights": {
+    "movers": "주요 등락 종목",
+    "concentration": "집중도",
+    "daily": "일일 변동 · 현재 보유 종목",
+    "rank_by": "일일 등락 종목 정렬 기준",
+    "gainers": "상승 종목",
+    "losers": "하락 종목",
+    "no_moves": "변동을 표시할 수 있는 데이터가 없습니다.",
+    "portfolio_share": "현금을 포함한 포트폴리오 가치 대비 비중",
+    "largest": "최대 보유 종목",
+    "top_five": "상위 5개 보유 종목",
+    "concentration_unavailable": "집중도를 표시하려면 보유 종목의 가치가 양수이고 공매도 포지션이 없어야 합니다."
+  },
+  "customize": {
+    "edit": "사용자 지정",
+    "widgets": "위젯",
+    "reset": "레이아웃 초기화",
+    "cancel": "취소",
+    "save": "레이아웃 저장",
+    "saving": "저장 중…",
+    "hint": "위젯의 핸들을 끌어 이동하거나 오른쪽 가장자리에서 너비를 조절하세요.",
+    "description": "표시할 위젯을 선택하세요. 모바일에서도 화살표로 순서를 바꿀 수 있습니다.",
+    "value": "포트폴리오 요약",
+    "breakdown": "세부 내역",
+    "move_up": "{{widget}} 위로 이동",
+    "move_down": "{{widget}} 아래로 이동",
+    "hide": "{{widget}} 숨기기",
+    "drag": "{{widget}} 끌기",
+    "empty": "선택된 위젯이 없습니다. 이 페이지를 사용자 지정하여 위젯을 추가하세요."
   }
 }

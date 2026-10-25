@@ -1,5 +1,6 @@
 import {
   logger,
+  getSyncSessionStatus as getSyncSessionStatusApi,
   storeSyncSession as storeSyncSessionApi,
   clearSyncSession as clearSyncSessionApi,
   postLoginBootstrap as postLoginBootstrapApi,
@@ -12,9 +13,12 @@ import type { PostLoginBootstrapResult } from "@/adapters/types";
  * The backend uses the refresh token to mint fresh access tokens when needed.
  * Works in both desktop (Tauri) and web modes.
  */
-export const storeSyncSession = async (refreshToken: string): Promise<void> => {
+export const storeSyncSession = async (
+  refreshToken: string,
+  confirmRebind = false,
+): Promise<void> => {
   try {
-    await storeSyncSessionApi(refreshToken);
+    await storeSyncSessionApi(refreshToken, confirmRebind);
     logger.debug("Sync session stored in backend");
   } catch (error) {
     logger.error("Error storing sync session in backend");
@@ -49,4 +53,8 @@ export const clearSyncSession = async (): Promise<void> => {
     logger.error("Error clearing sync session from backend");
     throw error;
   }
+};
+
+export const getSyncSessionStatus = (): Promise<{ isConfigured: boolean }> => {
+  return getSyncSessionStatusApi();
 };

@@ -14,6 +14,7 @@ import {
 import { Textarea } from "@wealthfolio/ui/components/ui/textarea";
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { toast } from "sonner";
 import { useGoalMutations } from "../hooks/use-goals";
 
 interface Props {
@@ -99,7 +100,12 @@ export function GoalEditDialog({ goal, open, onClose }: Props) {
         description: trimmedDescription || undefined,
         statusLifecycle: lifecycle,
       },
-      { onSuccess: () => onClose() },
+      {
+        onSuccess: () => {
+          toast.success(t("goals:goal_saved"));
+          onClose();
+        },
+      },
     );
   };
 
@@ -173,7 +179,7 @@ export function GoalEditDialog({ goal, open, onClose }: Props) {
                       aria-pressed={selected}
                       onClick={() => setLifecycle(option.value)}
                       className={cn(
-                        "rounded-xl border p-4 text-left transition-colors",
+                        "rounded-xl border p-4 text-start transition-colors",
                         "focus-visible:ring-ring focus:outline-none focus-visible:ring-2",
                         selected
                           ? "border-primary bg-primary/5"
@@ -184,13 +190,13 @@ export function GoalEditDialog({ goal, open, onClose }: Props) {
                         <span
                           className={cn(
                             "bg-muted inline-flex h-8 w-8 items-center justify-center rounded-full",
-                            option.value === "achieved" && "text-green-600",
+                            option.value === "achieved" && "text-success",
                             option.value === "active" && "text-primary",
                           )}
                         >
                           <Icon className="h-4 w-4" />
                         </span>
-                        <span className="text-muted-foreground text-[11px] font-medium uppercase tracking-wider">
+                        <span className="text-muted-foreground text-2xs font-medium uppercase tracking-wider">
                           {option.hint}
                         </span>
                       </span>

@@ -1,8 +1,9 @@
 # E2E Tests
 
 Wealthfolio E2E tests use [Playwright](https://playwright.dev/) and run against
-the **web app** (not the Tauri desktop app). There are **no mocks** — both
-frontend and backend must be running against a fresh database.
+the **web app** (not the Tauri desktop app). The frontend and Rust backend run
+against a fresh SQLite database. The automated runner uses synthetic market-data
+fixtures; application APIs and persistence are not mocked.
 
 ---
 
@@ -26,6 +27,17 @@ Playwright, and shuts everything down.
 pnpm test:e2e
 ```
 
+The runner replaces supported market-data providers with fixtures and disables
+other providers. Treasury fixtures supply security terms and yield curves to the
+real Treasury parser and calculator. See
+[the fixture contract](fixtures/quotes/README.md).
+
+Run the regular bond regression with the same setup:
+
+```bash
+pnpm test:e2e e2e/22-bond-fixtures.spec.ts
+```
+
 To open the Playwright UI instead:
 
 ```bash
@@ -45,17 +57,23 @@ restarting the server on every run.
 node scripts/prep-e2e.mjs
 ```
 
-This creates a new timestamped SQLite database (e.g.
-`db/app-testing-20260411T120000Z.db`) and writes its path to `.env.web`. **Run
-this every time** before starting the server — it ensures test isolation.
+This creates a unique timestamped data directory (e.g.
+`db/app-testing-20260411T120000Z-XXXXXX/`) and writes its database, vault, and
+addon paths to `.env.web`. The profile registry and profile databases stay in
+that directory too. **Run this every time** before starting the server —
+changing only the database filename would reuse the previous installation's
+profiles.
 
 #### Step 2 — Start the web app
 
 **Option A — watch the terminal output directly:**
 
 ```bash
-pnpm run dev:web
+WEALTHFOLIO_E2E=1 WEALTHFOLIO_FIXTURE_DIR="$PWD/e2e/fixtures/quotes" pnpm run dev:web
 ```
+
+Leave those fixture variables unset only when running the opt-in live-provider
+spec.
 
 Wait until you see Vite's "ready in Xms" and the Rust server binding messages,
 then move on to Step 3 in a separate terminal.
@@ -63,14 +81,16 @@ then move on to Step 3 in a separate terminal.
 **Option B — redirect output to a log file and use the wait script:**
 
 ```bash
-pnpm run dev:web > /tmp/wealthfolio-dev2.log 2>&1 &
+WEALTHFOLIO_E2E=1 WEALTHFOLIO_FIXTURE_DIR="$PWD/e2e/fixtures/quotes" pnpm run dev:web > /tmp/wealthfolio-dev2.log 2>&1 &
 ./scripts/wait-for-both-servers-to-be-ready.sh
 ```
 
-`wait-for-both-servers-to-be-ready.sh` polls the log file until it detects both
-"ready in" (Vite) and the Axum server binding on port 8088, then prints the last
-few lines and exits. The output redirect is required — the script reads from a
-file, not from a live terminal.
+`wait-for-both-servers-to-be-ready.sh` polls Vite and the Axum server's
+`/api/v1/healthz` on port 8088 until both answer, then prints the last few lines
+of the log file. It exits with status 1 if they still don't answer after 60
+attempts with a 2-second pause after each (`-m` and `-i` change these), for
+example while `cargo` is still compiling the server; run it again to keep
+waiting.
 
 > **If the web app is already running:** Stop it first (Ctrl+C), then re-run
 > `prep-e2e.mjs` and restart. The running instance is using a stale database —
@@ -125,6 +145,24 @@ npx playwright test && npx playwright show-report
 | `10-symbol-mapping-validation.spec.ts` | Symbol mapping real-time validation (Yahoo Finance, Börse Frankfurt)                                                        |
 | `13-multi-exchange-import.spec.ts`     | Multi-exchange CSV import: XETRA/LSE/TSX/NASDAQ resolution, region & instrument-type classification (issue #855)            |
 | `16-final-cash-policy.spec.ts`         | Final-cash writer policy through CSV import: persisted amounts + review flags per policy row, fixture-computed ledger total |
+| `20-asset-exchange-edit.spec.ts`       | Asset exchange edits: unchanged keys, duplicate-identity errors, and ISO-only venues                                        |
+| `21-bond-live.spec.ts`                 | Opt-in real-provider bond checks; requires `WF_BOND_LIVE_E2E=1` and a server started without fixture mode                   |
+| `22-bond-fixtures.spec.ts`             | UI bond creation/buy, CUSIP/ISIN reuse, provider terms, numerical Treasury prices, holdings valuation, and type filters     |
+| `23-loan-lifecycle.spec.ts`            | Shared loan fixture lifecycle, net-worth consistency, loan creation, and asset-type presentation                            |
+| `24-loan-editing.spec.ts`              | Loan event management, form validation, interest conventions, balance edits, and recalculation                              |
+| `25-loan-payments.spec.ts`             | Loan payments from a cash account: Paid from, linking from Spending and the loan, suggestions, extra repayments, unlinking  |
+| `26-cost-basis-transfer.spec.ts`       | A transfer between accounts on different cost basis methods; switching the sender's method recalculates the receiver        |
+| `27-cost-basis-methods.spec.ts`        | Switching an account between FIFO, LIFO, HIFO and WAC in the account form, and the book cost each leaves                    |
+| `29-asset-mobile-scroll.spec.ts`       | Mobile asset section switching preserves page scroll while neighboring virtualized activity lists mount                     |
+| `30-activity-scroll.spec.ts`           | Desktop asset/account activity tabs preserve page scroll; Spending selection and mobile tab switching preserve scroll       |
+| `30-activity-sticky-header.spec.ts`    | Activity tables pin their column header below the page header when they fit, and scroll sideways when they don't            |
+| `31-manual-liability.spec.ts`          | Manual loan origination, balance correction/deletion, principal fallback, and net-worth consistency                         |
+| `33-metric-tile-mobile-tap.spec.ts`    | On a phone, tapping a return tile's animated value opens its explanation                                                    |
+| `31-formatting-regions.spec.ts`        | Austria, Romania, and Bulgaria formatting selections persist after saving and reloading settings                            |
+| `33-cash-balance-edit.spec.ts`         | Desktop/mobile cash adjustments persist the selected currency's native delta without changing other currencies              |
+| `34-activity-column-widths.spec.ts`    | The activity table's column widths stay the same while scrolling brings rows with wider values into view                    |
+| `35-holdings-sticky-header.spec.ts`    | Holdings, account Holdings tab, Securities: header stays pinned as rows scroll, in short windows and on Shift+Tab (#2125)   |
+| `36-phone-taps-and-swipes.spec.ts`     | Phone: Spending's Next doesn't save, Performance's Plus stays on screen, swipes scroll period rows                          |
 
 ---
 
@@ -151,6 +189,85 @@ npx playwright test e2e/<spec>.spec.ts --debug
 # Show the last HTML report
 npx playwright show-report
 
-# Record a trace for a failing test (trace is saved on retry)
-# Already configured in playwright.config.ts: trace: "on-first-retry"
+# Open the trace kept for a failed test (playwright.config.ts: trace: "retain-on-failure")
+npx playwright show-trace test-results/<test-folder>/trace.zip
 ```
+
+## Profile startup and switching
+
+The isolated profile suite uses a disposable installation directory, a generated
+server secret, and the production web build. It starts its own server and does
+not run `prep-e2e.mjs` or rewrite `.env.web`.
+
+Run from the repository root:
+
+```bash
+cargo build -p wealthfolio-server
+pnpm build
+pnpm exec playwright test --config playwright.profiles.config.ts
+```
+
+Rebuild for web if the last frontend build targeted Tauri. Chrome must be
+installed and port 18388 available. The suite exercises profile switching,
+appearance, shared-browser tab routing, and mobile navigation. Native privacy
+covers, OS lifecycle events, and native OAuth require device testing.
+
+See the
+[profile architecture](../docs/architecture/multi-profile-and-app-lock.md) for
+access boundaries and additional release verification requirements.
+
+## UI primitive guardrails (on demand)
+
+`e2e/design-system/` checks the `@wealthfolio/ui` primitives on a synthetic
+gallery (`apps/frontend/e2e/design-system/`): screenshots of every component and
+open overlay (light and dark, 390 and 1440 px), overlay and keyboard behaviour,
+and an axe WCAG 2.1 A/AA scan. It runs in Chromium and WebKit, only when asked;
+it is not part of CI.
+
+Screenshots and accessibility results compare against a baseline recorded on the
+same machine from the code before a change, kept in `.local/design-system/`
+(never committed, so baselines never cross platforms):
+
+```bash
+git switch main
+pnpm test:e2e:design-system:baseline   # record the "before" state
+git switch <your-branch>
+pnpm test:e2e:design-system            # compare; differences fail with a diff
+```
+
+The accessibility scan records which rules fail on how many elements, because
+the primitives do not pass cleanly yet: in WebKit it counts the focus guards
+Base UI keeps around open popups, which Safari exposes as buttons without a
+name.
+
+Right-to-left runs through the development-only `?dir=rtl` override, since no
+shipped language is right-to-left yet: `visual.spec.ts` shoots every gallery and
+overlay state again with an `-rtl` suffix, and `rtl.spec.ts` checks the mirrored
+arrows, popup and sheet sides, and a live switch between directions.
+`pnpm ui:design-ratchet` also counts physical left/right classes (`ml-2`,
+`text-left`, `left-0`, `border-r`, `rounded-l-md`), so a new one fails in favour
+of its logical form; classes under `ltr:`/`rtl:` or a physical side variant, and
+centring with `left-1/2 -translate-x-1/2`, are not counted.
+
+`colors.spec.ts` is the colour contract: every role a theme defines, text pairs
+at 4.5:1 and the focus ring at 3:1, in light and dark. Callouts, banners and
+pills on a status use its subtle surface (`bg-warning-subtle`,
+`text-warning-subtle-foreground`, `border-warning-subtle-border`): status text
+on a tint of its own colour (`text-warning` on `bg-warning/10`) can't reach
+4.5:1. `Alert`'s status variants show that surface as glass (60% fill, a
+hairline and `--surface-highlight` along the top), also checked at 4.5:1.
+
+Each test is retried once in a fresh browser: late in a long run WebKit
+sometimes stalls a page load without sending a request. Playwright reports a
+test that only passes on retry as flaky; a real difference fails both attempts.
+
+`pnpm ui:design-ratchet` counts, per file, font sizes off the type scale
+(`text-[11px]`; the scale is `text-2xs` to `text-3xl` in `globals.css`), other
+hard-coded px sizes in class names (`w-[300px]`; borders, rings, shadows and
+offsets up to 4 px stay in px), and raw colours that bypass the theme's roles
+(`text-amber-600`, hex literals, `rgb()`/`hsl()` values) or tint a status colour
+(`bg-warning/10`), and fails when a file gains one. Sizes in rem follow the root
+font size, which the Text size setting will change. Run it with `--update` after
+removing some. A moved or renamed file keeps its recorded counts: a path that
+left the tree hands them to new paths. It runs in the PR checks as the "Design
+ratchet" job.

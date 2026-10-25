@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Path, Query},
     routing::{delete, get, patch, post},
     Json, Router,
 };
@@ -16,18 +16,13 @@ use tracing::{debug, info, warn};
 use crate::api::device_sync_engine;
 use crate::error::{ApiError, ApiResult};
 use crate::main_lib::AppState;
+use wealthfolio_device_sync::engine::{RestoreOperation, StartRestore};
 use wealthfolio_device_sync::{
-    ClaimPairingRequest, ClaimPairingResponse, CommitInitializeKeysRequest,
-    CommitInitializeKeysResponse, CommitRotateKeysRequest, CommitRotateKeysResponse,
-    CompletePairingRequest, CompletePairingResponse, ConfirmPairingRequest, ConfirmPairingResponse,
-    CreatePairingRequest, CreatePairingResponse, Device, DeviceSyncClient, EnrollDeviceResponse,
-    GetPairingResponse, InitializeKeysResult, PairingMessagesResponse, RegisterDeviceRequest,
-    ResetTeamSyncResponse, RotateKeysResponse, SuccessResponse, SyncIdentity, UpdateDeviceRequest,
+    ClaimPairingRequest, ClaimPairingResponse, CompletePairingRequest, CompletePairingResponse,
+    ConfirmPairingRequest, ConfirmPairingResponse, CreatePairingRequest, CreatePairingResponse,
+    Device, DeviceSyncClient, GetPairingResponse, PairingMessagesResponse, ResetTeamSyncResponse,
+    SuccessResponse, UpdateDeviceRequest,
 };
-
-// Storage keys (without prefix - the SecretStore adds "wealthfolio_" prefix)
-const DEVICE_ID_KEY: &str = "sync_device_id";
-const SYNC_IDENTITY_KEY: &str = "sync_identity";
 
 fn cloud_api_base_url() -> String {
     crate::features::cloud_api_base_url().unwrap_or_default()
@@ -40,46 +35,7 @@ async fn get_access_token(state: &AppState) -> ApiResult<String> {
 
 /// Get the device ID from secret store.
 fn get_device_id(state: &AppState) -> Option<String> {
-    // Preferred source: sync_identity (used by DeviceEnrollService).
-    match state.secret_store.get_secret(SYNC_IDENTITY_KEY) {
-        Ok(Some(identity_json)) => match serde_json::from_str::<SyncIdentity>(&identity_json) {
-            Ok(identity) => {
-                if let Some(device_id) = identity.device_id {
-                    debug!(
-                        "[DeviceSync] Using device ID from sync_identity: {}",
-                        device_id
-                    );
-                    return Some(device_id);
-                }
-                debug!("[DeviceSync] sync_identity present but missing deviceId");
-            }
-            Err(e) => {
-                tracing::warn!("[DeviceSync] Failed to parse sync_identity: {}", e);
-            }
-        },
-        Ok(None) => {
-            debug!("[DeviceSync] No sync_identity in store");
-        }
-        Err(e) => {
-            tracing::warn!("[DeviceSync] Failed to read sync_identity: {}", e);
-        }
-    }
-
-    // Legacy fallback for older flows.
-    match state.secret_store.get_secret(DEVICE_ID_KEY) {
-        Ok(Some(id)) => {
-            debug!("[DeviceSync] Using legacy device ID from store: {}", id);
-            Some(id)
-        }
-        Ok(None) => {
-            debug!("[DeviceSync] No legacy device ID in store");
-            None
-        }
-        Err(e) => {
-            tracing::warn!("[DeviceSync] Failed to read legacy device ID: {}", e);
-            None
-        }
-    }
+    device_sync_engine::get_sync_identity_from_store(state).and_then(|identity| identity.device_id)
 }
 
 /// Create a device sync client.
@@ -90,17 +46,6 @@ fn create_client() -> DeviceSyncClient {
 // ─────────────────────────────────────────────────────────────────────────────
 // Request/Response Types
 // ─────────────────────────────────────────────────────────────────────────────
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RegisterDeviceBody {
-    pub display_name: String,
-    pub platform: String,
-    pub os_version: Option<String>,
-    pub app_version: Option<String>,
-    #[serde(alias = "instanceId")]
-    pub device_nonce: String,
-}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -127,16 +72,6 @@ pub struct CompletePairingBody {
     pub encrypted_key_bundle: String,
     pub sas_proof: serde_json::Value,
     pub signature: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CommitInitializeKeysBody {
-    pub key_version: i32,
-    pub device_key_envelope: String,
-    pub signature: String,
-    pub challenge_response: Option<String>,
-    pub recovery_envelope: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -171,17 +106,14 @@ pub struct CompletePairingWithTransferBody {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ConfirmPairingWithBootstrapBody {
-    pub pairing_id: String,
-    pub proof: Option<String>,
-    pub min_snapshot_created_at: Option<String>,
-    pub allow_overwrite: bool,
+pub struct StartRestoreBody {
+    /// The user asked to finish setup; otherwise a recurring check.
+    pub new_attempt: bool,
 }
 
-// Pairing flow coordinator body types
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct BeginPairingConfirmBody {
+pub struct BeginPairingRestoreBody {
     pub pairing_id: String,
     pub proof: String,
     pub min_snapshot_created_at: Option<String>,
@@ -189,56 +121,23 @@ pub struct BeginPairingConfirmBody {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct FlowIdBody {
-    pub flow_id: String,
+pub struct ApproveRestoreBody {
+    pub operation_id: String,
+    pub backup: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoreOperationBody {
+    pub operation_id: String,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Device Management
 // ─────────────────────────────────────────────────────────────────────────────
 
-async fn register_device(
-    State(state): State<Arc<AppState>>,
-    Json(body): Json<RegisterDeviceBody>,
-) -> ApiResult<Json<EnrollDeviceResponse>> {
-    info!("[DeviceSync] Registering device: {}", body.display_name);
-
-    let token = get_access_token(&state).await?;
-    let client = create_client();
-
-    let request = RegisterDeviceRequest {
-        device_nonce: body.device_nonce,
-        display_name: body.display_name,
-        platform: body.platform,
-        os_version: body.os_version,
-        app_version: body.app_version,
-    };
-
-    let result = client
-        .enroll_device(&token, request)
-        .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
-
-    // Extract device_id from the discriminated union response
-    let device_id = match &result {
-        EnrollDeviceResponse::Bootstrap { device_id, .. } => device_id,
-        EnrollDeviceResponse::Pair { device_id, .. } => device_id,
-        EnrollDeviceResponse::Ready { device_id, .. } => device_id,
-    };
-
-    // Store the device ID
-    info!("[DeviceSync] Storing device ID: {}", device_id);
-    state
-        .secret_store
-        .set_secret(DEVICE_ID_KEY, device_id)
-        .map_err(|e| ApiError::Internal(format!("Failed to store device ID: {}", e)))?;
-
-    info!("[DeviceSync] Device enrolled successfully: {}", device_id);
-    Ok(Json(result))
-}
-
 async fn get_device_endpoint(
-    State(state): State<Arc<AppState>>,
+    axum::Extension(state): axum::Extension<Arc<AppState>>,
     Path(device_id): Path<String>,
 ) -> ApiResult<Json<Device>> {
     let token = get_access_token(&state).await?;
@@ -251,7 +150,9 @@ async fn get_device_endpoint(
     Ok(Json(device))
 }
 
-async fn get_current_device(State(state): State<Arc<AppState>>) -> ApiResult<Json<Device>> {
+async fn get_current_device(
+    axum::Extension(state): axum::Extension<Arc<AppState>>,
+) -> ApiResult<Json<Device>> {
     let token = get_access_token(&state).await?;
     let device_id = get_device_id(&state)
         .ok_or_else(|| ApiError::BadRequest("No device ID configured".to_string()))?;
@@ -265,7 +166,7 @@ async fn get_current_device(State(state): State<Arc<AppState>>) -> ApiResult<Jso
 }
 
 async fn list_devices(
-    State(state): State<Arc<AppState>>,
+    axum::Extension(state): axum::Extension<Arc<AppState>>,
     Query(query): Query<ListDevicesQuery>,
 ) -> ApiResult<Json<Vec<Device>>> {
     info!("[DeviceSync] Listing devices (scope: {:?})...", query.scope);
@@ -282,7 +183,7 @@ async fn list_devices(
 }
 
 async fn update_device_endpoint(
-    State(state): State<Arc<AppState>>,
+    axum::Extension(state): axum::Extension<Arc<AppState>>,
     Path(device_id): Path<String>,
     Json(body): Json<UpdateDeviceBody>,
 ) -> ApiResult<Json<SuccessResponse>> {
@@ -309,7 +210,7 @@ async fn update_device_endpoint(
 }
 
 async fn delete_device_endpoint(
-    State(state): State<Arc<AppState>>,
+    axum::Extension(state): axum::Extension<Arc<AppState>>,
     Path(device_id): Path<String>,
 ) -> ApiResult<Json<SuccessResponse>> {
     info!("Deleting device: {}", device_id);
@@ -325,7 +226,7 @@ async fn delete_device_endpoint(
 }
 
 async fn revoke_device_endpoint(
-    State(state): State<Arc<AppState>>,
+    axum::Extension(state): axum::Extension<Arc<AppState>>,
     Path(device_id): Path<String>,
 ) -> ApiResult<Json<SuccessResponse>> {
     info!("Revoking device: {}", device_id);
@@ -344,87 +245,8 @@ async fn revoke_device_endpoint(
 // Team Keys (E2EE)
 // ─────────────────────────────────────────────────────────────────────────────
 
-async fn initialize_team_keys(
-    State(state): State<Arc<AppState>>,
-) -> ApiResult<Json<InitializeKeysResult>> {
-    info!("[DeviceSync] Initializing team keys...");
-
-    let token = get_access_token(&state).await?;
-    let device_id = get_device_id(&state)
-        .ok_or_else(|| ApiError::BadRequest("No device ID configured".to_string()))?;
-
-    let result = create_client()
-        .initialize_team_keys(&token, &device_id)
-        .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
-
-    Ok(Json(result))
-}
-
-async fn commit_initialize_team_keys(
-    State(state): State<Arc<AppState>>,
-    Json(body): Json<CommitInitializeKeysBody>,
-) -> ApiResult<Json<CommitInitializeKeysResponse>> {
-    info!("[DeviceSync] Committing team key initialization...");
-
-    let token = get_access_token(&state).await?;
-    let device_id = get_device_id(&state)
-        .ok_or_else(|| ApiError::BadRequest("No device ID configured".to_string()))?;
-
-    let request = CommitInitializeKeysRequest {
-        device_id,
-        key_version: body.key_version,
-        device_key_envelope: body.device_key_envelope,
-        signature: body.signature,
-        challenge_response: body.challenge_response,
-        recovery_envelope: body.recovery_envelope,
-    };
-
-    let result = create_client()
-        .commit_initialize_team_keys(&token, request)
-        .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
-
-    Ok(Json(result))
-}
-
-async fn rotate_team_keys(
-    State(state): State<Arc<AppState>>,
-) -> ApiResult<Json<RotateKeysResponse>> {
-    info!("[DeviceSync] Starting key rotation...");
-
-    let token = get_access_token(&state).await?;
-    let device_id = get_device_id(&state)
-        .ok_or_else(|| ApiError::BadRequest("No device ID configured".to_string()))?;
-
-    let result = create_client()
-        .rotate_team_keys(&token, &device_id)
-        .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
-
-    Ok(Json(result))
-}
-
-async fn commit_rotate_team_keys(
-    State(state): State<Arc<AppState>>,
-    Json(request): Json<CommitRotateKeysRequest>,
-) -> ApiResult<Json<CommitRotateKeysResponse>> {
-    info!("[DeviceSync] Committing key rotation...");
-
-    let token = get_access_token(&state).await?;
-    let device_id = get_device_id(&state)
-        .ok_or_else(|| ApiError::BadRequest("No device ID configured".to_string()))?;
-
-    let result = create_client()
-        .commit_rotate_team_keys(&token, &device_id, request)
-        .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
-
-    Ok(Json(result))
-}
-
 async fn reset_team_sync(
-    State(state): State<Arc<AppState>>,
+    axum::Extension(state): axum::Extension<Arc<AppState>>,
     Json(body): Json<ResetTeamSyncBody>,
 ) -> ApiResult<Json<ResetTeamSyncResponse>> {
     info!("[DeviceSync] Resetting team sync...");
@@ -444,7 +266,7 @@ async fn reset_team_sync(
 // ─────────────────────────────────────────────────────────────────────────────
 
 async fn create_pairing(
-    State(state): State<Arc<AppState>>,
+    axum::Extension(state): axum::Extension<Arc<AppState>>,
     Json(body): Json<CreatePairingBody>,
 ) -> ApiResult<Json<CreatePairingResponse>> {
     debug!("Creating pairing session...");
@@ -469,7 +291,7 @@ async fn create_pairing(
 }
 
 async fn get_pairing(
-    State(state): State<Arc<AppState>>,
+    axum::Extension(state): axum::Extension<Arc<AppState>>,
     Path(pairing_id): Path<String>,
 ) -> ApiResult<Json<GetPairingResponse>> {
     debug!("Getting pairing session: {}", pairing_id);
@@ -487,7 +309,7 @@ async fn get_pairing(
 }
 
 async fn approve_pairing(
-    State(state): State<Arc<AppState>>,
+    axum::Extension(state): axum::Extension<Arc<AppState>>,
     Path(pairing_id): Path<String>,
 ) -> ApiResult<Json<SuccessResponse>> {
     debug!("Approving pairing session: {}", pairing_id);
@@ -505,7 +327,7 @@ async fn approve_pairing(
 }
 
 async fn complete_pairing(
-    State(state): State<Arc<AppState>>,
+    axum::Extension(state): axum::Extension<Arc<AppState>>,
     Path(pairing_id): Path<String>,
     Json(body): Json<CompletePairingBody>,
 ) -> ApiResult<Json<CompletePairingResponse>> {
@@ -514,13 +336,17 @@ async fn complete_pairing(
     // Snapshot upload is now handled by the frontend issuer flow BEFORE calling
     // this endpoint, so complete_pairing only sends the key bundle.
 
-    let token = get_access_token(&state).await?;
     let device_id = get_device_id(&state)
         .ok_or_else(|| ApiError::BadRequest("No device ID configured".to_string()))?;
 
+    let _ = device_sync_engine::share_backup_access(&state).await;
     let result = create_client()
         .complete_pairing(
-            &token,
+            || async {
+                get_access_token(&state)
+                    .await
+                    .map_err(|e| wealthfolio_device_sync::DeviceSyncError::Auth(e.to_string()))
+            },
             &device_id,
             &pairing_id,
             CompletePairingRequest {
@@ -544,7 +370,7 @@ async fn complete_pairing(
 }
 
 async fn cancel_pairing(
-    State(state): State<Arc<AppState>>,
+    axum::Extension(state): axum::Extension<Arc<AppState>>,
     Path(pairing_id): Path<String>,
 ) -> ApiResult<Json<SuccessResponse>> {
     debug!("Canceling pairing session: {}", pairing_id);
@@ -566,7 +392,7 @@ async fn cancel_pairing(
 // ─────────────────────────────────────────────────────────────────────────────
 
 async fn claim_pairing(
-    State(state): State<Arc<AppState>>,
+    axum::Extension(state): axum::Extension<Arc<AppState>>,
     Json(body): Json<ClaimPairingBody>,
 ) -> ApiResult<Json<ClaimPairingResponse>> {
     debug!("Claiming pairing session with code...");
@@ -591,7 +417,7 @@ async fn claim_pairing(
 }
 
 async fn get_pairing_messages(
-    State(state): State<Arc<AppState>>,
+    axum::Extension(state): axum::Extension<Arc<AppState>>,
     Path(pairing_id): Path<String>,
 ) -> ApiResult<Json<PairingMessagesResponse>> {
     debug!("Getting pairing messages: {}", pairing_id);
@@ -609,7 +435,7 @@ async fn get_pairing_messages(
 }
 
 async fn confirm_pairing_endpoint(
-    State(state): State<Arc<AppState>>,
+    axum::Extension(state): axum::Extension<Arc<AppState>>,
     Path(pairing_id): Path<String>,
     Json(body): Json<ConfirmPairingBody>,
 ) -> ApiResult<Json<ConfirmPairingResponse>> {
@@ -644,6 +470,7 @@ async fn confirm_pairing_endpoint(
                 match wealthfolio_device_sync::normalize_sync_datetime(min_created_at) {
                     Ok(normalized) => {
                         if let Err(err) = device_sync_engine::set_min_snapshot_created_at_in_store(
+                            &state,
                             &device_id,
                             &normalized,
                         ) {
@@ -688,7 +515,7 @@ async fn confirm_pairing_endpoint(
 // ─────────────────────────────────────────────────────────────────────────────
 
 async fn complete_pairing_with_transfer(
-    State(state): State<Arc<AppState>>,
+    axum::Extension(state): axum::Extension<Arc<AppState>>,
     Json(body): Json<CompletePairingWithTransferBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
     device_sync_engine::complete_pairing_with_transfer(
@@ -703,31 +530,67 @@ async fn complete_pairing_with_transfer(
     Ok(Json(serde_json::json!({ "success": true })))
 }
 
-async fn confirm_pairing_with_bootstrap(
-    State(state): State<Arc<AppState>>,
-    Json(body): Json<ConfirmPairingWithBootstrapBody>,
-) -> ApiResult<Json<device_sync_engine::ConfirmPairingWithBootstrapResult>> {
-    let result = device_sync_engine::confirm_pairing_with_bootstrap(
+// ─────────────────────────────────────────────────────────────────────────────
+// Restore Operation
+// ─────────────────────────────────────────────────────────────────────────────
+
+async fn start_restore(
+    axum::Extension(state): axum::Extension<Arc<AppState>>,
+    Json(body): Json<StartRestoreBody>,
+) -> ApiResult<Json<Option<RestoreOperation>>> {
+    let result = device_sync_engine::start_restore(
         state,
-        body.pairing_id,
-        body.proof,
-        body.min_snapshot_created_at,
-        body.allow_overwrite,
+        if body.new_attempt {
+            StartRestore::NewAttempt
+        } else {
+            StartRestore::Recurring
+        },
     )
     .await
     .map_err(ApiError::Internal)?;
     Ok(Json(result))
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Pairing Flow Coordinator
-// ─────────────────────────────────────────────────────────────────────────────
+/// Read-only: polling never starts or advances restoration.
+async fn get_restore(
+    axum::Extension(state): axum::Extension<Arc<AppState>>,
+) -> ApiResult<Json<Option<RestoreOperation>>> {
+    let result = device_sync_engine::get_restore(&state).map_err(ApiError::Internal)?;
+    Ok(Json(result))
+}
 
-async fn begin_pairing_confirm(
-    State(state): State<Arc<AppState>>,
-    Json(body): Json<BeginPairingConfirmBody>,
-) -> ApiResult<Json<wealthfolio_device_sync::engine::PairingFlowResponse>> {
-    let result = device_sync_engine::begin_pairing_confirm(
+async fn approve_restore(
+    axum::Extension(state): axum::Extension<Arc<AppState>>,
+    Json(body): Json<ApproveRestoreBody>,
+) -> ApiResult<Json<RestoreOperation>> {
+    let result = device_sync_engine::approve_restore(state, &body.operation_id, body.backup)
+        .map_err(ApiError::BadRequest)?;
+    Ok(Json(result))
+}
+
+async fn retry_restore(
+    axum::Extension(state): axum::Extension<Arc<AppState>>,
+    Json(body): Json<RestoreOperationBody>,
+) -> ApiResult<Json<RestoreOperation>> {
+    let result = device_sync_engine::retry_restore(state, &body.operation_id)
+        .map_err(ApiError::BadRequest)?;
+    Ok(Json(result))
+}
+
+async fn cancel_restore(
+    axum::Extension(state): axum::Extension<Arc<AppState>>,
+    Json(body): Json<RestoreOperationBody>,
+) -> ApiResult<Json<RestoreOperation>> {
+    let result = device_sync_engine::cancel_restore(state, &body.operation_id)
+        .map_err(ApiError::BadRequest)?;
+    Ok(Json(result))
+}
+
+async fn begin_pairing_restore(
+    axum::Extension(state): axum::Extension<Arc<AppState>>,
+    Json(body): Json<BeginPairingRestoreBody>,
+) -> ApiResult<Json<RestoreOperation>> {
+    let result = device_sync_engine::begin_pairing_restore(
         state,
         body.pairing_id,
         body.proof,
@@ -735,36 +598,6 @@ async fn begin_pairing_confirm(
     )
     .await
     .map_err(ApiError::Internal)?;
-    Ok(Json(result))
-}
-
-async fn get_pairing_flow_state(
-    State(state): State<Arc<AppState>>,
-    Json(body): Json<FlowIdBody>,
-) -> ApiResult<Json<wealthfolio_device_sync::engine::PairingFlowResponse>> {
-    let result = device_sync_engine::get_pairing_flow_state_handler(state, body.flow_id)
-        .await
-        .map_err(ApiError::Internal)?;
-    Ok(Json(result))
-}
-
-async fn approve_pairing_overwrite_endpoint(
-    State(state): State<Arc<AppState>>,
-    Json(body): Json<FlowIdBody>,
-) -> ApiResult<Json<wealthfolio_device_sync::engine::PairingFlowResponse>> {
-    let result = device_sync_engine::approve_pairing_overwrite_handler(state, body.flow_id)
-        .await
-        .map_err(ApiError::Internal)?;
-    Ok(Json(result))
-}
-
-async fn cancel_pairing_flow(
-    State(state): State<Arc<AppState>>,
-    Json(body): Json<FlowIdBody>,
-) -> ApiResult<Json<wealthfolio_device_sync::engine::PairingFlowResponse>> {
-    let result = device_sync_engine::cancel_pairing_flow_handler(state, body.flow_id)
-        .await
-        .map_err(ApiError::Internal)?;
     Ok(Json(result))
 }
 
@@ -772,14 +605,13 @@ async fn cancel_pairing_flow(
 // Router
 // ─────────────────────────────────────────────────────────────────────────────
 
-pub fn router() -> Router<Arc<AppState>> {
+pub fn router<S: Clone + Send + Sync + 'static>() -> Router<S> {
     if !crate::features::device_sync_enabled() {
         return Router::new();
     }
 
     Router::new()
         // Device management
-        .route("/sync/device/register", post(register_device))
         .route("/sync/device/current", get(get_current_device))
         .route("/sync/devices", get(list_devices))
         .route("/sync/device/{device_id}", get(get_device_endpoint))
@@ -789,14 +621,7 @@ pub fn router() -> Router<Arc<AppState>> {
             "/sync/device/{device_id}/revoke",
             post(revoke_device_endpoint),
         )
-        // Team keys (E2EE)
-        .route("/sync/keys/initialize", post(initialize_team_keys))
-        .route(
-            "/sync/keys/initialize/commit",
-            post(commit_initialize_team_keys),
-        )
-        .route("/sync/keys/rotate", post(rotate_team_keys))
-        .route("/sync/keys/rotate/commit", post(commit_rotate_team_keys))
+        // Sync reset
         .route("/sync/team/reset", post(reset_team_sync))
         // Pairing (Issuer - Trusted Device)
         .route("/sync/pairing", post(create_pairing))
@@ -822,16 +647,12 @@ pub fn router() -> Router<Arc<AppState>> {
             "/sync/pairing/complete-with-transfer",
             post(complete_pairing_with_transfer),
         )
-        .route(
-            "/sync/pairing/confirm-with-bootstrap",
-            post(confirm_pairing_with_bootstrap),
-        )
-        // Pairing flow coordinator
-        .route("/sync/pairing/flow/begin", post(begin_pairing_confirm))
-        .route("/sync/pairing/flow/state", post(get_pairing_flow_state))
-        .route(
-            "/sync/pairing/flow/approve-overwrite",
-            post(approve_pairing_overwrite_endpoint),
-        )
-        .route("/sync/pairing/flow/cancel", post(cancel_pairing_flow))
+        // Restore operation (receiving device)
+        .route("/sync/pairing/begin-restore", post(begin_pairing_restore))
+        .route("/sync/restore", get(get_restore))
+        .route("/sync/restore/start", post(start_restore))
+        .route("/sync/restore/approve", post(approve_restore))
+        .route("/sync/restore/retry", post(retry_restore))
+        .route("/sync/restore/cancel", post(cancel_restore))
+        .route_layer(axum::middleware::from_fn(crate::profiles::admit_connect))
 }

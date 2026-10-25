@@ -2,7 +2,7 @@ import { useMemo, useState, type FC } from "react";
 import { useTranslation } from "react-i18next";
 
 import { useBalancePrivacy } from "@/hooks/use-balance-privacy";
-import { cn } from "@/lib/utils";
+import { cn, parseLocalDate } from "@/lib/utils";
 import {
   Button,
   Icons,
@@ -13,21 +13,33 @@ import {
 } from "@wealthfolio/ui";
 
 import { useMonthCalendar } from "../../../hooks/use-month-calendar";
+import { getZonedDateParts } from "../../../lib/timezone";
 import type { EventSpendingSummary } from "../../../types/event";
 import { useEventDialog } from "../../event-dialog-provider";
 import { getEventColors } from "./event-colors";
 
 const CARD_CLASS = "border-border/60 bg-card/40 rounded-2xl border p-4 backdrop-blur-xl";
-const LABEL_CLASS = "text-muted-foreground/70 text-[10px] font-normal uppercase tracking-[0.12em]";
+const LABEL_CLASS = "text-muted-foreground/70 text-2xs font-normal uppercase tracking-[0.12em]";
 
 interface Props {
   events: EventSpendingSummary[];
   currency: string;
   selectedId: string | null;
   onSelect: (id: string) => void;
+  rangeStart?: Date;
+  rangeEnd?: Date;
+  timezone?: string | null;
 }
 
-export const EventsCalendarCard: FC<Props> = ({ events, currency, selectedId, onSelect }) => {
+export const EventsCalendarCard: FC<Props> = ({
+  events,
+  currency,
+  selectedId,
+  onSelect,
+  rangeStart,
+  rangeEnd,
+  timezone,
+}) => {
   const formatting = useAmountFormatting();
   const dateFormatting = useDateFormatting();
   const numberFormatting = useNumberFormatting();
@@ -35,7 +47,28 @@ export const EventsCalendarCard: FC<Props> = ({ events, currency, selectedId, on
   const { isBalanceHidden } = useBalancePrivacy();
   const { openEventDialog } = useEventDialog();
   const today = useMemo(() => stripTime(new Date()), []);
-  const [cursor, setCursor] = useState<Date>(() => startOfMonth(today));
+  const firstMonth = rangeStart ? monthInTimezone(rangeStart, timezone) : null;
+  const lastMonth = rangeEnd ? monthInTimezone(rangeEnd, timezone) : null;
+  const selectedStart = firstMonth
+    ? events.find((event) => event.eventId === selectedId)?.startDate
+    : undefined;
+  const eventMonth = selectedStart ? startOfMonth(parseLocalDate(selectedStart)) : null;
+  const initialMonth =
+    eventMonth && firstMonth
+      ? new Date(
+          Math.max(
+            firstMonth.getTime(),
+            Math.min(eventMonth.getTime(), lastMonth?.getTime() ?? Infinity),
+          ),
+        )
+      : (firstMonth ?? startOfMonth(today));
+  const rangeKey = `${rangeStart?.getTime() ?? ""}:${rangeEnd?.getTime() ?? ""}:${timezone ?? ""}:${selectedStart ?? ""}`;
+  const [cursorBinding, setCursorBinding] = useState(() => ({
+    rangeKey,
+    month: initialMonth,
+  }));
+  const cursor = cursorBinding.rangeKey === rangeKey ? cursorBinding.month : initialMonth;
+  const setCursor = (month: Date) => setCursorBinding({ rangeKey, month });
 
   const { monthLabel, weekStartsOn, monthStart, monthEnd, weeks, monthEvents } = useMonthCalendar(
     events,
@@ -61,25 +94,27 @@ export const EventsCalendarCard: FC<Props> = ({ events, currency, selectedId, on
               variant="outline"
               size="icon"
               aria-label={t("spending:calendar.previousMonth")}
+              disabled={!!firstMonth && cursor <= firstMonth}
               className="h-7 w-7"
               onClick={() => setCursor(addMonths(cursor, -1))}
             >
-              <Icons.ChevronLeft className="h-4 w-4" />
+              <Icons.ChevronLeft className="h-4 w-4 rtl:rotate-180" />
             </Button>
             <Button
               variant="outline"
               size="icon"
               aria-label={t("spending:calendar.nextMonth")}
+              disabled={!!lastMonth && cursor >= lastMonth}
               className="h-7 w-7"
               onClick={() => setCursor(addMonths(cursor, 1))}
             >
-              <Icons.ChevronRight className="h-4 w-4" />
+              <Icons.ChevronRight className="h-4 w-4 rtl:rotate-180" />
             </Button>
             <Button
               variant="outline"
               size="icon"
               aria-label={t("spending:events.createEvent")}
-              className="ml-1 h-7 w-7 rounded-full"
+              className="ms-1 h-7 w-7 rounded-full"
               onClick={() =>
                 openEventDialog({
                   prefill: { startDate: monthStart, endDate: monthEnd },
@@ -91,7 +126,7 @@ export const EventsCalendarCard: FC<Props> = ({ events, currency, selectedId, on
             </Button>
           </div>
         </div>
-        <div className="text-muted-foreground/80 mt-1 text-[11px]">
+        <div className="text-muted-foreground/80 text-2xs mt-1">
           {t("spending:calendar.monthSummary", {
             count: monthEvents.length,
             month: monthLabel,
@@ -124,7 +159,7 @@ export const EventsCalendarCard: FC<Props> = ({ events, currency, selectedId, on
                 <div
                   key={`d-${di}`}
                   className={cn(
-                    "flex h-7 items-center justify-center text-[11px] tabular-nums",
+                    "text-2xs flex h-7 items-center justify-center tabular-nums",
                     !inMonth && "text-muted-foreground/40",
                     inMonth && "text-foreground/80",
                     isToday && "font-semibold",
@@ -157,7 +192,7 @@ export const EventsCalendarCard: FC<Props> = ({ events, currency, selectedId, on
                       : formatting.formatAmount(bar.event.totalSpending, currency)
                   }`}
                   className={cn(
-                    "min-h-[16px] truncate rounded-sm px-1 text-left text-[10px] leading-[16px]",
+                    "text-2xs min-h-4 truncate rounded-sm px-1 text-start leading-[1rem]",
                     isSel ? "font-semibold" : "hover:brightness-95",
                   )}
                   style={{
@@ -187,6 +222,11 @@ function stripTime(d: Date): Date {
 
 function startOfMonth(d: Date): Date {
   return new Date(d.getFullYear(), d.getMonth(), 1);
+}
+
+function monthInTimezone(date: Date, timezone?: string | null): Date {
+  const parts = getZonedDateParts(date, timezone);
+  return new Date(parts.year, parts.month - 1, 1);
 }
 
 function addMonths(d: Date, n: number): Date {

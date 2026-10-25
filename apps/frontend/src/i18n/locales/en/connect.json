@@ -1,4 +1,5 @@
 {
+  "opensInBrowser": "Opens in browser",
   "page": {
     "title": "Sync & Connections",
     "subtitle": "Your devices, all in one place.",
@@ -13,7 +14,10 @@
     "noDevicesSyncing": "No devices syncing yet",
     "noDevicesDescription": "Set up device sync in settings to keep your data in sync across devices.",
     "noActivity": "No activity yet",
-    "noActivityDescription": "Updates will appear here once your data starts syncing."
+    "noActivityDescription": "Updates will appear here once your data starts syncing.",
+    "showMore_one": "Show {{count}} more",
+    "showMore_other": "Show {{count}} more",
+    "showLess": "Show less"
   },
   "emptyState": {
     "optional": "Optional",
@@ -23,20 +27,21 @@
     "learnMore": "Learn more about Connect",
     "features": {
       "brokerageSync": {
-        "title": "Brokerage Sync",
-        "description": "Auto-sync accounts and transactions daily."
+        "title": "Connected accounts",
+        "description": "Automatically sync transactions from your brokers."
       },
       "deviceSync": {
-        "title": "Device Sync",
-        "description": "Sync across devices with E2E encryption."
+        "title": "Device Sync & Backup",
+        "description": "End-to-end encrypted sync and automatic cloud backups."
       },
       "householdView": {
-        "title": "Household View",
-        "description": "Share accounts with family members."
+        "title": "Family portfolios",
+        "description": "A shared view of your family’s investments."
       }
     }
   },
   "flow": {
+    "aggregatorExample": "(e.g. SnapTrade)",
     "yourDevice": "Your Device",
     "localDatabase": "Local database",
     "dataStaysHere": "Data stays here",
@@ -69,7 +74,8 @@
     "noDataYet": "No data yet",
     "dataAsOf": "Data as of {{date}}",
     "emptyTitle": "No accounts synced yet",
-    "emptyDescription": "Connect a broker to start syncing your accounts."
+    "emptyDescription": "Connect a broker to start syncing your accounts.",
+    "needsSetup": "Needs Setup"
   },
   "connections": {
     "title": "Broker connections",
@@ -86,7 +92,11 @@
     "accountsSyncing_one": "{{count}} account syncing",
     "accountsSyncing_other": "{{count}} accounts syncing",
     "partialSyncing_one": "{{syncing}} of {{total}} accounts syncing · {{excluded}} account excluded",
-    "partialSyncing_other": "{{syncing}} of {{total}} accounts syncing · {{excluded}} accounts excluded"
+    "partialSyncing_other": "{{syncing}} of {{total}} accounts syncing · {{excluded}} accounts excluded",
+    "accountCount_one": "{{count}} account",
+    "accountCount_other": "{{count}} accounts",
+    "excludedCount_one": "{{count}} excluded",
+    "excludedCount_other": "{{count}} excluded"
   },
   "sync": {
     "syncNow": "Sync Now",
@@ -180,20 +190,33 @@
   "attention": {
     "title": "Broker sync needs attention",
     "description_one": "{{count}} account needs a retry or broker review.",
-    "description_other": "{{count}} accounts need a retry or broker review."
+    "description_other": "{{count}} accounts need a retry or broker review.",
+    "heading": "Needs attention",
+    "connectionLost": "Connection lost",
+    "accountsNotSyncing_one": "{{count}} account not syncing",
+    "accountsNotSyncing_other": "{{count}} accounts not syncing",
+    "syncFailed": "Last sync failed"
   },
   "setup": {
     "newAccountsTitle": "New accounts need setup",
     "newAccountsDescription_one": "{{count}} account needs a quick setup before we can start syncing.",
     "newAccountsDescription_other": "{{count}} accounts need a quick setup before we can start syncing.",
-    "reviewAccounts": "Review accounts"
+    "reviewAccounts": "Review accounts",
+    "setUp": "Set up"
   },
   "devices": {
     "thisDevice": "This device",
     "activeNow": "Active now",
     "lastSeen": "Last seen {{time}}",
     "online": "Online",
-    "never": "Never"
+    "never": "Never",
+    "showInactive_one": "Show {{count}} inactive device",
+    "showInactive_other": "Show {{count}} inactive devices",
+    "hideInactive": "Hide inactive devices",
+    "platforms": {
+      "server": "Server",
+      "web": "Web"
+    }
   },
   "deviceStatus": {
     "syncError": "Sync error",
@@ -222,6 +245,10 @@
     "lastUsed": "Last used"
   },
   "subscription": {
+    "copySupportEmail": "Copy support email",
+    "syncPausedTooltip": "Sync paused — active subscription required",
+    "syncPausedTitle": "Sync is paused",
+    "syncPausedDescription": "An active subscription is required to sync. Your local data and pending changes are preserved.",
     "comingSoon": "Coming Soon",
     "getStarted": "Get Started",
     "perMonthShort": "mo",
@@ -282,5 +309,16 @@
   },
   "errors": {
     "unknown": "Unknown error"
+  },
+  "session": {
+    "restoring": "Restoring Connect…",
+    "unavailable": "Connect is temporarily unavailable",
+    "localAvailable": "Your local portfolio is available. Retry to reconnect."
+  },
+  "rebind": {
+    "title": "Change this profile’s Connect connection?",
+    "description": "You are connecting a different account or household. Your local portfolio data will stay, but its existing broker links and device sync setup will be removed. The new account can add broker data to this profile. Set up device sync again when you are ready. Use a new profile if you want to keep the data separate.",
+    "cancel": "Cancel",
+    "confirm": "Change connection"
   }
 }

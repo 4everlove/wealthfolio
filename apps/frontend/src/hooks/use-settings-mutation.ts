@@ -7,9 +7,12 @@ import { Settings } from "@/lib/types";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 
+// Appearance changes show the moment they apply, so saving them needs no confirmation.
+const appearanceKeys = new Set(["theme", "font", "menuBarVisible"]);
+
 export function useSettingsMutation(
   setSettings: React.Dispatch<React.SetStateAction<Settings | null>>,
-  applySettingsToDocument: (newSettings: Settings) => void,
+  applySettingsToDocument: (newSettings: Settings) => void | Promise<void>,
 ) {
   const queryClient = useQueryClient();
   const { t, i18n } = useTranslation();
@@ -33,12 +36,23 @@ export function useSettingsMutation(
         // setting travels in the request, so nothing else would evict them.
         invalidateSpendingCaches(queryClient);
       }
+      if ("timezone" in variables) {
+        queryClient.invalidateQueries({ queryKey: [QueryKeys.RETIREMENT_OVERVIEW] });
+        queryClient.invalidateQueries({ queryKey: [QueryKeys.SAVE_UP_OVERVIEW] });
+        queryClient.invalidateQueries({ queryKey: [QueryKeys.SAVE_UP_PREVIEW] });
+        // Loan payments are dated by their day in that zone, as are the date
+        // ranges of activity searches, including a loan's payment candidates.
+        queryClient.invalidateQueries({ queryKey: [QueryKeys.ALTERNATIVE_HOLDINGS] });
+        queryClient.invalidateQueries({ queryKey: [QueryKeys.ASSET_DATA] });
+        queryClient.invalidateQueries({ queryKey: [QueryKeys.ACTIVITIES] });
+      }
       setSettings(updatedSettings);
-      applySettingsToDocument(updatedSettings);
+      await applySettingsToDocument(updatedSettings);
       // Don't show toast during onboarding
       const isOnboarding =
         "onboardingCompleted" in variables || !updatedSettings.onboardingCompleted;
-      if (!isOnboarding) {
+      const appearanceOnly = Object.keys(variables).every((key) => appearanceKeys.has(key));
+      if (!isOnboarding && !appearanceOnly) {
         try {
           await i18n.loadLanguages(updatedSettings.language);
         } catch {

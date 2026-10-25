@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::panic, reason = "test code")]
 use std::{net::SocketAddr, time::Duration};
 
 use axum::{
@@ -18,6 +19,8 @@ fn test_config(db_path: String, addons_root: String) -> Config {
         addons_root,
         raw_secret_key: vec![7; 32],
         secrets_encryption_key: [7; 32],
+        database_key: [9; 32],
+        db_encryption_required: false,
         auth: None,
         oidc: None,
         mcp_enabled: false,
@@ -41,7 +44,7 @@ async fn income_summary_query_returns_empty_data_for_empty_resolved_portfolio_sc
         .into_owned();
     let config = test_config(db_path, addons_root);
     let state = build_state(&config).await.unwrap();
-    let app = app_router(state, &config);
+    let app = app_router(state, &config).unwrap();
 
     let response = app
         .oneshot(

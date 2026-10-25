@@ -15,7 +15,7 @@ export interface DateRange {
 interface IntervalData {
   code: TimePeriod;
   description: string;
-  calculateRange: () => DateRange | undefined;
+  calculateRange: (asOf: Date) => DateRange | undefined;
 }
 
 const intervalDescriptions: Record<TimePeriod, string> = {
@@ -34,47 +34,47 @@ const intervals: IntervalData[] = [
   {
     code: "1D",
     description: intervalDescriptions["1D"],
-    calculateRange: () => ({ from: subDays(new Date(), 1), to: new Date() }),
+    calculateRange: (asOf) => ({ from: subDays(asOf, 1), to: asOf }),
   },
   {
     code: "1W",
     description: intervalDescriptions["1W"],
-    calculateRange: () => ({ from: subWeeks(new Date(), 1), to: new Date() }),
+    calculateRange: (asOf) => ({ from: subWeeks(asOf, 1), to: asOf }),
   },
   {
     code: "1M",
     description: intervalDescriptions["1M"],
-    calculateRange: () => ({ from: subMonths(new Date(), 1), to: new Date() }),
+    calculateRange: (asOf) => ({ from: subMonths(asOf, 1), to: asOf }),
   },
   {
     code: "3M",
     description: intervalDescriptions["3M"],
-    calculateRange: () => ({ from: subMonths(new Date(), 3), to: new Date() }),
+    calculateRange: (asOf) => ({ from: subMonths(asOf, 3), to: asOf }),
   },
   {
     code: "6M",
     description: intervalDescriptions["6M"],
-    calculateRange: () => ({ from: subMonths(new Date(), 6), to: new Date() }),
+    calculateRange: (asOf) => ({ from: subMonths(asOf, 6), to: asOf }),
   },
   {
     code: "YTD",
     description: intervalDescriptions.YTD,
-    calculateRange: () => ({ from: startOfYear(new Date()), to: new Date() }),
+    calculateRange: (asOf) => ({ from: startOfYear(asOf), to: asOf }),
   },
   {
     code: "1Y",
     description: intervalDescriptions["1Y"],
-    calculateRange: () => ({ from: subYears(new Date(), 1), to: new Date() }),
+    calculateRange: (asOf) => ({ from: subYears(asOf, 1), to: asOf }),
   },
   {
     code: "5Y",
     description: intervalDescriptions["5Y"],
-    calculateRange: () => ({ from: subYears(new Date(), 5), to: new Date() }),
+    calculateRange: (asOf) => ({ from: subYears(asOf, 5), to: asOf }),
   },
   {
     code: "ALL",
     description: intervalDescriptions.ALL,
-    calculateRange: () => ({ from: new Date("1970-01-01"), to: new Date() }),
+    calculateRange: (asOf) => ({ from: new Date("1970-01-01"), to: asOf }),
   },
 ];
 
@@ -90,6 +90,8 @@ interface IntervalSelectorProps {
   className?: string;
   isLoading?: boolean;
   defaultValue?: TimePeriod;
+  /** Controlled selection; the parent owns persistence when provided. */
+  value?: TimePeriod;
   /** LocalStorage key to persist selection. When provided, selection is persisted. */
   storageKey?: string;
   /** Optional callback for haptic feedback */
@@ -100,6 +102,7 @@ const IntervalSelector: React.FC<IntervalSelectorProps> = ({
   onIntervalSelect,
   className,
   defaultValue = DEFAULT_INTERVAL_CODE,
+  value,
   storageKey,
   onHaptic,
 }) => {
@@ -112,23 +115,25 @@ const IntervalSelector: React.FC<IntervalSelectorProps> = ({
   );
   const [localValue, setLocalValue] = useState<TimePeriod>(defaultValue);
 
-  const currentValue = storageKey ? persistedValue : localValue;
+  const currentValue = value ?? (storageKey ? persistedValue : localValue);
 
   const handleValueChange = useCallback(
-    (value: TimePeriod) => {
+    (nextValue: TimePeriod) => {
       // Update state
-      if (storageKey) {
-        setPersistedValue(value);
-      } else {
-        setLocalValue(value);
+      if (value === undefined) {
+        if (storageKey) {
+          setPersistedValue(nextValue);
+        } else {
+          setLocalValue(nextValue);
+        }
       }
       // Notify parent
-      const data = getIntervalData(value);
-      onIntervalSelect(data.code, data.description, data.calculateRange());
+      const data = getIntervalData(nextValue);
+      onIntervalSelect(data.code, data.description, data.calculateRange(new Date()));
       // Trigger haptic feedback
       onHaptic?.();
     },
-    [onIntervalSelect, storageKey, setPersistedValue, onHaptic],
+    [onIntervalSelect, storageKey, setPersistedValue, onHaptic, value],
   );
 
   const items = intervals.map((interval) => ({
@@ -138,7 +143,9 @@ const IntervalSelector: React.FC<IntervalSelectorProps> = ({
   }));
 
   return (
-    <div className={cn("pointer-events-none relative w-full min-w-0", className)}>
+    // data-no-swipe-drag: on a swipe page, a sideways drag scrolls the intervals instead of
+    // switching the page's view.
+    <div className={cn("pointer-events-none relative w-full min-w-0", className)} data-no-swipe-drag>
       <div
         className={cn(
           "pointer-events-none relative z-30 flex w-full justify-center overflow-x-auto overflow-y-hidden",
@@ -163,12 +170,12 @@ const IntervalSelector: React.FC<IntervalSelectorProps> = ({
 };
 
 /** Helper to get interval data for a given code - use to derive range/description from a code */
-const getInitialIntervalData = (code: TimePeriod = DEFAULT_INTERVAL_CODE) => {
+const getInitialIntervalData = (code: TimePeriod = DEFAULT_INTERVAL_CODE, asOf: Date = new Date()) => {
   const data = getIntervalData(code);
   return {
     code: data.code,
     description: data.description,
-    range: data.calculateRange(),
+    range: data.calculateRange(asOf),
   };
 };
 

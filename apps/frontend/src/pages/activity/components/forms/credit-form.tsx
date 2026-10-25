@@ -8,6 +8,7 @@ import { useMemo } from "react";
 import { FormProvider, useForm, type Resolver } from "react-hook-form";
 import { useTranslation } from "react-i18next";
 import { z } from "zod";
+import { useActivityCurrency } from "../../hooks/use-activity-currency";
 import {
   AccountSelect,
   AdvancedOptionsSection,
@@ -18,6 +19,7 @@ import {
   NotesInput,
   type AccountSelectOption,
 } from "./fields";
+import { Spinner } from "@wealthfolio/ui";
 
 type MsgFn = TFunction | undefined;
 const msg = (t: MsgFn, key: string, en: string) => (t ? t(key) : en);
@@ -49,7 +51,8 @@ export const createCreditFormSchema = (t?: TFunction) =>
       .positive({
         message: msg(t, "activity:form.err_fxrate_positive", "FX Rate must be positive."),
       })
-      .optional(),
+      .optional()
+      .nullable(),
     subtype: z.string().optional().nullable(),
   });
 
@@ -99,6 +102,8 @@ export function CreditForm({
     },
   });
 
+  useActivityCurrency(form, accounts, { isEditing });
+
   const accountId = form.watch("accountId");
   const currency = form.watch("currency");
   const selectedAccount = useMemo(
@@ -115,7 +120,7 @@ export function CreditForm({
     <FormProvider {...form}>
       <form onSubmit={handleSubmit} className="space-y-4">
         <FormSection title={t("activity:form.section_account")}>
-          <AccountSelect name="accountId" accounts={accounts} currencyName="currency" />
+          <AccountSelect name="accountId" accounts={accounts} />
           <DatePicker name="activityDate" label={t("activity:field_date")} />
         </FormSection>
 
@@ -147,11 +152,11 @@ export function CreditForm({
             </Button>
           )}
           <Button type="submit" disabled={isLoading}>
-            {isLoading && <Icons.Spinner className="mr-2 h-4 w-4 animate-spin" />}
+            {isLoading && <Spinner className="me-2 h-4 w-4" />}
             {isEditing ? (
-              <Icons.Check className="mr-2 h-4 w-4" />
+              <Icons.Check className="me-2 h-4 w-4" />
             ) : (
-              <Icons.Plus className="mr-2 h-4 w-4" />
+              <Icons.Plus className="me-2 h-4 w-4" />
             )}
             {isEditing
               ? t("activity:form.button_update")

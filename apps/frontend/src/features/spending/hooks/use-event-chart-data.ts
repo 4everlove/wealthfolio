@@ -3,10 +3,10 @@ import { useMemo } from "react";
 import type { Activity, TaxonomyCategory } from "@/lib/types";
 import { parseLocalDate } from "@/lib/utils";
 
-import { getActivitySpendingAmount } from "../lib/constants";
+import { getVisibleSpendingAmount } from "../lib/constants";
 import { inclusiveDays } from "../lib/date-utils";
 import type { EventSpendingSummary } from "../types/event";
-import { computeBaselinePace } from "./use-baseline-pace";
+import { computeBaselinePace, type BaselinePeriod } from "./use-baseline-pace";
 
 export interface EventCategoryRow {
   id: string;
@@ -124,7 +124,7 @@ function buildWindowSeries(
   start.setHours(0, 0, 0, 0);
   const series = new Array(windowDays).fill(0);
   for (const a of activities) {
-    const amt = getActivitySpendingAmount(a, accountTypeById?.get(a.accountId));
+    const amt = getVisibleSpendingAmount(a, accountTypeById?.get(a.accountId));
     if (amt <= 0) continue;
     const idx = Math.floor((new Date(a.activityDate).getTime() - start.getTime()) / 86_400_000);
     if (idx >= 0 && idx < windowDays) series[idx] += amt;
@@ -176,6 +176,7 @@ export function useEventChartData(
   accountTypeById: Map<string, string> | undefined,
   taxonomyCategories: TaxonomyCategory[],
   dailySpendByDate?: Map<string, number>,
+  baselinePeriod?: BaselinePeriod,
 ): EventChartData {
   const startDate = useMemo(() => parseLocalDate(event.startDate), [event.startDate]);
   const endDate = useMemo(() => parseLocalDate(event.endDate), [event.endDate]);
@@ -185,8 +186,15 @@ export function useEventChartData(
 
   const baseline = useMemo(
     () =>
-      computeBaselinePace(heatmapActivities, [event], 12 * 7, accountTypeById, dailySpendByDate),
-    [accountTypeById, dailySpendByDate, heatmapActivities, event],
+      computeBaselinePace(
+        heatmapActivities,
+        [event],
+        baselinePeriod?.days ?? 12 * 7,
+        accountTypeById,
+        dailySpendByDate,
+        baselinePeriod,
+      ),
+    [accountTypeById, dailySpendByDate, heatmapActivities, event, baselinePeriod],
   );
 
   // Floor `expected` at zero before computing lift. `computeBaselinePace`

@@ -36,6 +36,11 @@
     "transactionCount_other": "{{count}} 筆交易",
     "editCategoryTitle": "編輯類別",
     "deleteCategoryTitle": "刪除類別",
+    "excludeLabel": "排除於支出之外",
+    "excludeDescription": "不計入總額、圖表、洞察與預算",
+    "excludeDisabledParent": "因上層類別已排除而一併排除",
+    "excludedTooltip": "已排除於支出之外",
+    "excludedWithParent": "隨 {{name}} 一併排除",
     "categoryActions": "類別操作",
     "deleteTitle": "刪除類別",
     "deleteConfirm": "確定要刪除「{{name}}」嗎？",
@@ -44,6 +49,13 @@
     "searchCategories": "搜尋類別……",
     "noCategoriesFound": "找不到類別。",
     "clearCategory": "清除類別"
+  },
+  "activityTypes": {
+    "balanceTransferCashAdvance": "餘額轉移／預借現金",
+    "charge": "消費",
+    "interestCharge": "利息費用",
+    "refundCredit": "退款／回饋",
+    "reimbursementRefund": "費用補償／退款"
   },
   "rules": {
     "editTitle": "編輯規則",
@@ -219,7 +231,13 @@
     "viewingMonth": "正在查看 {{label}}，點選可變更",
     "pickMonth": "選取特定月份",
     "selectMonth": "選取月份",
-    "clearMonth": "清除月份選取"
+    "clearMonth": "清除月份選取",
+    "selectDates": "選擇日期",
+    "chooseCustomDates": "選擇自訂日期",
+    "chooseMonth": "選擇月份",
+    "startDate": "開始日期",
+    "endDate": "結束日期",
+    "invalidRange": "結束日期必須與開始日期相同或晚於開始日期"
   },
   "presets": {
     "loading": "正在載入預設……",
@@ -394,7 +412,8 @@
     "largest": "最大",
     "noSpending": "此時段內無支出。",
     "outlier": "異常值",
-    "weekOf": "{{date}} 所在週"
+    "weekOf": "{{date}} 所在週",
+    "customSubtitle": "所選期間的交易"
   },
   "split": {
     "title": "拆分交易",
@@ -542,7 +561,11 @@
     "brighter": "更亮",
     "moreSpend": "代表支出較多。",
     "less": "更少",
-    "more": "更多"
+    "more": "更多",
+    "customSubtitle": "所選期間 · 依星期與時段顯示支出強度。",
+    "customSubtitleShort": "所選期間",
+    "customNoActivity": "所選期間沒有現金活動。",
+    "customLegendIntro": "每一格代表所選期間內的一個星期與時段。"
   },
   "eventDetail": {
     "previousEvent": "上一個事件",
@@ -695,12 +718,7 @@
     "noIncome": "此週期內所選帳戶沒有收入。",
     "spent": "已花費",
     "saved": "已儲蓄",
-    "incomeSaving": "收入與儲蓄",
-    "nonSpendingCashflow": "{{period}} 的非支出現金流。",
-    "moneyIn": "流入",
-    "incomeSources": "收入來源",
     "setAside": "預留",
-    "savingDestinations": "儲蓄去向",
     "sortSpent": "支出",
     "sortChange": "變化",
     "sortName": "名稱",
@@ -714,9 +732,54 @@
     "sortByLabel": "依 {{label}} 排序",
     "categoriesShown_one": "顯示 {{shown}} 個類別，共 {{total}} 個",
     "categoriesShown_other": "顯示 {{shown}} 個類別，共 {{total}} 個",
+    "excludedInSettings_one": "設定中已排除 {{count}} 個",
+    "excludedInSettings_other": "設定中已排除 {{count}} 個",
     "openTransactions": "開啟交易 →",
     "moreCount_other": "+{{count}} 筆",
-    "moreCount_one": "+{{count}} 筆"
+    "moreCount_one": "+{{count}} 筆",
+    "vsRange": "相較於 {{from}} – {{to}}"
+  },
+  "moneyFlow": {
+    "title": "資金流向",
+    "subtitle": "{{period}} 的資金來源與去向。",
+    "focusSubtitle": "{{period}} 的所有類別。",
+    "focusSubcategoriesSubtitle": "{{period}} 的所有子類別。",
+    "back": "全部流向",
+    "backTo": "返回{{name}}",
+    "chartLabel": "資金流向圖。使用方向鍵在各項之間移動。",
+    "nodeAria": "{{name}}，{{amount}}",
+    "nodeActionAria": "{{name}}，{{amount}}。{{action}}",
+    "shareOfIncome": "佔收入的 {{pct}}",
+    "shareOfTotal": "佔總額的 {{pct}}",
+    "clickTransactions": "點擊查看交易",
+    "clickCategories": "點擊查看所有類別",
+    "clickSubcategories": "點擊查看子類別",
+    "action": {
+      "categories": "查看所有類別",
+      "subcategories": "查看子類別",
+      "transactions": "查看交易"
+    },
+    "node": {
+      "total": "總額",
+      "shortfall": "缺口",
+      "refunds": "淨退款",
+      "surplus": "剩餘",
+      "uncategorizedIncome": "未歸類收入",
+      "netSpending": "淨支出"
+    },
+    "hint": {
+      "total": "流入加上淨退款和任何缺口，始終等於流出。",
+      "totalOut": "退款前的全部支出與預留金額。",
+      "shortfall": "超出流入的支出與儲蓄。",
+      "refunds": "退款超過支出的類別。",
+      "saved": "轉入儲蓄和投資帳戶的資金。",
+      "surplus": "已流入但未支出或預留的資金。",
+      "uncategorized": "尚未歸類的支出。",
+      "net": "扣除退款後該類別的花費。",
+      "direct": "直接歸入該類別本身，而非子類別。"
+    },
+    "groupRefunds": "未扣除 {{amount}} 淨退款。",
+    "categoryRefunds": "未扣除 {{refunds}} 淨退款。淨支出：{{net}}。"
   },
   "budgetChart": {
     "overBudget": "超出預算",
@@ -852,6 +915,8 @@
     "automateMatching": "自動比對經常消費的商家",
     "loadError": "無法載入支出資料。",
     "spentLabel": "已花費",
+    "excludedCategoriesHint_one": "已排除 {{count}} 個類別",
+    "excludedCategoriesHint_other": "已排除 {{count}} 個類別",
     "noSpendingInPeriod": "此週期內沒有支出",
     "whereItWent": "支出去向",
     "whereItWentView": "支出去向檢視",
@@ -966,6 +1031,7 @@
     "addSource_other": "新增來源（{{count}} 個可用）",
     "overridesTitle_other": "自訂設定 · {{count}}",
     "addSource_one": "新增來源（{{count}} 個可用）",
-    "overridesTitle_one": "覆寫 · {{count}}"
+    "overridesTitle_one": "覆寫 · {{count}}",
+    "sourceMonth": "來源月份"
   }
 }

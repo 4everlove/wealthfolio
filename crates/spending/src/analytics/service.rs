@@ -25,6 +25,10 @@ use crate::activity_classification::{
     within_spending_transfer_groups, SpendingClassification,
 };
 use crate::activity_splits::ActivitySplitRepositoryTrait;
+use crate::budget::service::category_meta;
+use crate::category_exclusions::{
+    excluded_spending_native, split_spending_allocations, ExclusionIndex,
+};
 use crate::events::EventsService;
 use crate::settings::SpendingSettingsService;
 
@@ -124,6 +128,7 @@ impl AnalyticsService {
         let s = self.settings.get().await?;
         if !s.enabled || s.account_ids.is_empty() {
             return Ok(MonthlyReport {
+                base_currency: base_currency.to_string(),
                 current: PeriodSummary::default(),
                 prior: PeriodSummary::default(),
                 spending_breakdown: vec![],
@@ -142,6 +147,7 @@ impl AnalyticsService {
         };
         if requested_accounts.is_empty() {
             return Ok(MonthlyReport {
+                base_currency: base_currency.to_string(),
                 current: PeriodSummary::default(),
                 prior: PeriodSummary::default(),
                 spending_breakdown: vec![],
@@ -155,6 +161,7 @@ impl AnalyticsService {
             self.resolve_spending_account_types(&s.account_ids)?;
         if all_spending_accounts.is_empty() {
             return Ok(MonthlyReport {
+                base_currency: base_currency.to_string(),
                 current: PeriodSummary::default(),
                 prior: PeriodSummary::default(),
                 spending_breakdown: vec![],
@@ -172,6 +179,7 @@ impl AnalyticsService {
             .collect();
         if target_account_ids.is_empty() {
             return Ok(MonthlyReport {
+                base_currency: base_currency.to_string(),
                 current: PeriodSummary::default(),
                 prior: PeriodSummary::default(),
                 spending_breakdown: vec![],
@@ -227,6 +235,15 @@ impl AnalyticsService {
         let assignments_by_activity = group_assignments(all_assignments);
         let splits_by_activity =
             group_splits(self.split_repo.list_for_activities(&assignment_ids).await?);
+        // Excluded categories (and descendants) leave every surface of the
+        // report — headline outflow, daily series, and spending breakdown —
+        // via the same allocation-derived filter, so they stay reconciled.
+        // The index only ever applies to spending_categories allocations.
+        let spending_taxonomy = self.taxonomy_service.get_taxonomy(SPENDING_TAXONOMY)?;
+        let spending_categories = spending_taxonomy.map(|t| t.categories).unwrap_or_default();
+        let spending_meta = category_meta(&spending_categories);
+        let exclusions = ExclusionIndex::new(&s.excluded_category_ids, &spending_meta);
+        let no_exclusions = ExclusionIndex::empty();
         // FX as-of: end of the active window for current, end of the prior
         // window for prior. Matches insight's per-window snapshot convention.
         let fx_as_of_current = end.date_naive();
@@ -236,6 +253,9 @@ impl AnalyticsService {
             &current_acts,
             &account_types,
             &transfer_groups,
+            &assignments_by_activity,
+            &splits_by_activity,
+            &exclusions,
             fx,
             base_currency,
             fx_as_of_current,
@@ -244,6 +264,9 @@ impl AnalyticsService {
             &prior_acts,
             &account_types,
             &transfer_groups,
+            &assignments_by_activity,
+            &splits_by_activity,
+            &exclusions,
             fx,
             base_currency,
             fx_as_of_prior,
@@ -263,6 +286,17 @@ impl AnalyticsService {
             if income_native == Decimal::ZERO && spending_native == Decimal::ZERO {
                 continue;
             }
+            // Match the headline: excluded-category spend leaves the daily
+            // series so day buckets still roll up to `current.outflow`.
+            let spending_native = spending_native
+                - excluded_spending_native(
+                    &a.id,
+                    SPENDING_TAXONOMY,
+                    spending_native,
+                    &assignments_by_activity,
+                    &splits_by_activity,
+                    &exclusions,
+                );
             let income_amount = crate::fx::convert(
                 fx,
                 income_native,
@@ -340,6 +374,7 @@ impl AnalyticsService {
                 spending_native,
                 &assignments_by_activity,
                 &splits_by_activity,
+                &exclusions,
                 fx,
                 &a.currency,
                 base_currency,
@@ -355,6 +390,7 @@ impl AnalyticsService {
                 income_native,
                 &assignments_by_activity,
                 &splits_by_activity,
+                &no_exclusions,
                 fx,
                 &a.currency,
                 base_currency,
@@ -370,6 +406,7 @@ impl AnalyticsService {
                 saving_native,
                 &assignments_by_activity,
                 &splits_by_activity,
+                &no_exclusions,
                 fx,
                 &a.currency,
                 base_currency,
@@ -447,6 +484,7 @@ impl AnalyticsService {
         by_day_by_category.sort_by(|a, b| a.date.cmp(&b.date));
 
         Ok(MonthlyReport {
+            base_currency: base_currency.to_string(),
             current,
             prior,
             spending_breakdown,
@@ -458,10 +496,14 @@ impl AnalyticsService {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn summarize(
     acts: &[&Activity],
     account_types: &HashMap<String, String>,
     within_groups: &std::collections::HashSet<String>,
+    assignments_by_activity: &AssignmentsByActivity,
+    splits_by_activity: &SplitsByActivity,
+    exclusions: &ExclusionIndex,
     fx: &dyn wealthfolio_core::fx::FxServiceTrait,
     target_currency: &str,
     fx_as_of: NaiveDate,
@@ -481,6 +523,23 @@ fn summarize(
         let income_native = classification.income_amount(amt);
         let spending_native = classification.spending_amount(amt);
         let saving_native = classification.saving_amount(amt);
+        if income_native == Decimal::ZERO
+            && spending_native == Decimal::ZERO
+            && saving_native == Decimal::ZERO
+        {
+            continue;
+        }
+        // Excluded-category spend leaves the headline; a fully-excluded
+        // spend-only activity contributes nothing and is not counted.
+        let spending_native = spending_native
+            - excluded_spending_native(
+                &a.id,
+                SPENDING_TAXONOMY,
+                spending_native,
+                assignments_by_activity,
+                splits_by_activity,
+                exclusions,
+            );
         if income_native == Decimal::ZERO
             && spending_native == Decimal::ZERO
             && saving_native == Decimal::ZERO
@@ -525,6 +584,7 @@ fn add_report_breakdown_allocations(
     native_amount: Decimal,
     assignments_by_activity: &AssignmentsByActivity,
     splits_by_activity: &SplitsByActivity,
+    exclusions: &ExclusionIndex,
     fx: &dyn wealthfolio_core::fx::FxServiceTrait,
     from_currency: &str,
     target_currency: &str,
@@ -536,14 +596,20 @@ fn add_report_breakdown_allocations(
         return;
     }
 
-    let allocations = allocations_for_taxonomy(
+    let (allocations, excluded_native) = split_spending_allocations(
         activity_id,
         taxonomy_id,
         native_amount,
         assignments_by_activity,
         splits_by_activity,
+        exclusions,
     );
     if allocations.is_empty() {
+        // Uncategorized only when the activity truly has no allocations — a
+        // fully-excluded activity lands here too but must emit nothing.
+        if excluded_native != Decimal::ZERO {
+            return;
+        }
         let amount =
             crate::fx::convert(fx, native_amount, from_currency, target_currency, fx_as_of)
                 .unwrap_or(Decimal::ZERO);
@@ -717,11 +783,14 @@ impl AnalyticsService {
         let today_local =
             wealthfolio_core::utils::time_utils::activity_date_in_user_timezone(now, timezone);
         let year_now = today_local.year();
-        let ytd_start = NaiveDate::from_ymd_opt(year_now, 1, 1).unwrap();
-        let last_year_start = NaiveDate::from_ymd_opt(year_now - 1, 1, 1).unwrap();
-        let last_year_end = NaiveDate::from_ymd_opt(year_now - 1, 12, 31).unwrap();
-        let two_years_ago_start = NaiveDate::from_ymd_opt(year_now - 2, 1, 1).unwrap();
-        let two_years_ago_end = NaiveDate::from_ymd_opt(year_now - 2, 12, 31).unwrap();
+        let jan_1 = |year| NaiveDate::from_ymd_opt(year, 1, 1).expect("every year has January 1");
+        let dec_31 =
+            |year| NaiveDate::from_ymd_opt(year, 12, 31).expect("every year has December 31");
+        let ytd_start = jan_1(year_now);
+        let last_year_start = jan_1(year_now - 1);
+        let last_year_end = dec_31(year_now - 1);
+        let two_years_ago_start = jan_1(year_now - 2);
+        let two_years_ago_end = dec_31(year_now - 2);
 
         // Report currency = caller's base. Per-activity native amounts are
         // FX-converted to this inside build_summary. Previous behavior picked
@@ -1298,6 +1367,14 @@ impl AnalyticsService {
                 )
             })
             .collect();
+        // Event totals sit next to the dashboard numbers, so they filter
+        // excluded categories the same way insight/monthly_report do.
+        let exclusions = ExclusionIndex::from_parent_pairs(
+            &s.excluded_category_ids,
+            categories
+                .iter()
+                .map(|c| (c.id.as_str(), c.parent_id.as_deref())),
+        );
 
         // Event reporting is tag-based: the request window chooses which
         // events are visible, but every in-scope activity tagged to those
@@ -1369,6 +1446,20 @@ impl AnalyticsService {
                 if amt_native == Decimal::ZERO {
                     continue;
                 }
+                // Excluded-category portions leave the event totals too; a
+                // fully-excluded activity drops out here (included == 0).
+                let (allocations, excluded_native) = split_spending_allocations(
+                    &a.id,
+                    SPENDING_TAXONOMY,
+                    amt_native,
+                    &assignments_by_activity,
+                    &splits_by_activity,
+                    &exclusions,
+                );
+                let amt_native = amt_native - excluded_native;
+                if amt_native == Decimal::ZERO {
+                    continue;
+                }
                 // FX-convert to the report currency at fx_as_of, matching
                 // insight + monthly_report so event totals reconcile with
                 // the broader period numbers.
@@ -1393,13 +1484,6 @@ impl AnalyticsService {
                 let day = format!("{:04}-{:02}-{:02}", dt.year(), dt.month(), dt.day());
                 *daily.entry(day).or_insert(Decimal::ZERO) += amt;
 
-                let allocations = allocations_for_taxonomy(
-                    &a.id,
-                    SPENDING_TAXONOMY,
-                    amt_native,
-                    &assignments_by_activity,
-                    &splits_by_activity,
-                );
                 if allocations.is_empty() {
                     add_event_category_allocation(None, amt, &cat_meta, &mut by_category);
                 } else {
@@ -1774,6 +1858,7 @@ mod tests {
             Decimal::new(100, 0),
             &assignments,
             &splits,
+            &ExclusionIndex::empty(),
             &PassthroughFx,
             "USD",
             "USD",
@@ -1787,6 +1872,109 @@ mod tests {
             Some(&(Decimal::new(100, 0), 1)),
         );
         assert!(by_day_cat_acc.is_empty());
+    }
+
+    #[test]
+    fn report_breakdown_drops_excluded_categories_from_both_accumulators() {
+        let (charge, charge_assignment) =
+            spending_activity("charge", "WITHDRAWAL", 100, "travel", 1);
+        let (kept, kept_assignment) = spending_activity("kept", "WITHDRAWAL", 40, "groceries", 1);
+        let assignments = group_assignments(vec![charge_assignment, kept_assignment]);
+        let splits = SplitsByActivity::new();
+        let exclusions = ExclusionIndex::from_parent_pairs(
+            &["travel".to_string()],
+            [("travel", None), ("groceries", None)].into_iter(),
+        );
+        let mut spending_acc: HashMap<(String, String), (Decimal, usize)> = HashMap::new();
+        let mut by_day_cat_acc: HashMap<(String, String, String), (Decimal, usize)> =
+            HashMap::new();
+
+        for activity in [&charge, &kept] {
+            add_report_breakdown_allocations(
+                &mut spending_acc,
+                &mut by_day_cat_acc,
+                &activity.id,
+                SPENDING_TAXONOMY,
+                activity.amount.unwrap(),
+                &assignments,
+                &splits,
+                &exclusions,
+                &PassthroughFx,
+                "USD",
+                "USD",
+                NaiveDate::from_ymd_opt(2024, 1, 10).unwrap(),
+                "2024-01-10",
+                true,
+            );
+        }
+
+        assert!(!spending_acc.contains_key(&(SPENDING_TAXONOMY.to_string(), "travel".to_string())));
+        assert_eq!(
+            spending_acc.get(&(SPENDING_TAXONOMY.to_string(), "groceries".to_string())),
+            Some(&(Decimal::new(40, 0), 1)),
+        );
+        assert!(!by_day_cat_acc.contains_key(&(
+            "2024-01-10".to_string(),
+            SPENDING_TAXONOMY.to_string(),
+            "travel".to_string()
+        )));
+        assert_eq!(
+            by_day_cat_acc.get(&(
+                "2024-01-10".to_string(),
+                SPENDING_TAXONOMY.to_string(),
+                "groceries".to_string()
+            )),
+            Some(&(Decimal::new(40, 0), 1)),
+        );
+        // A fully-excluded activity must not fall back to the uncategorized bucket.
+        assert!(!spending_acc.contains_key(&(
+            SPENDING_TAXONOMY.to_string(),
+            UNCATEGORIZED_CATEGORY_ID.to_string()
+        )));
+    }
+
+    #[test]
+    fn summarize_removes_excluded_spend_but_keeps_income() {
+        let (charge, charge_assignment) =
+            spending_activity("charge", "WITHDRAWAL", 100, "travel", 1);
+        let (kept, kept_assignment) = spending_activity("kept", "WITHDRAWAL", 40, "groceries", 1);
+        let (income, income_assignment) = spending_activity("income", "DEPOSIT", 900, "salary", 1);
+        let income = Activity {
+            account_id: "cash-account".to_string(),
+            ..income
+        };
+        let assignments =
+            group_assignments(vec![charge_assignment, kept_assignment, income_assignment]);
+        let splits = SplitsByActivity::new();
+        let exclusions = ExclusionIndex::from_parent_pairs(
+            &["travel".to_string()],
+            [("travel", None), ("groceries", None)].into_iter(),
+        );
+        let acts: Vec<&Activity> = vec![&charge, &kept, &income];
+        let account_types = HashMap::from([
+            (
+                "card-account".to_string(),
+                account_types::CREDIT_CARD.to_string(),
+            ),
+            ("cash-account".to_string(), account_types::CASH.to_string()),
+        ]);
+
+        let summary = summarize(
+            &acts,
+            &account_types,
+            &within_spending_transfer_groups(&acts),
+            &assignments,
+            &splits,
+            &exclusions,
+            &PassthroughFx,
+            "USD",
+            NaiveDate::from_ymd_opt(2024, 1, 31).unwrap(),
+        );
+
+        assert_eq!(summary.outflow, 40.0);
+        assert_eq!(summary.income, 900.0);
+        // The fully-excluded charge contributes nothing and is not counted.
+        assert_eq!(summary.count, 2);
     }
 
     fn build_credit_card_summary(activities: &[Activity]) -> SpendingSummary {

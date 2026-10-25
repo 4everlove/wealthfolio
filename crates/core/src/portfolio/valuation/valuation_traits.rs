@@ -3,15 +3,12 @@
 use async_trait::async_trait;
 use chrono::NaiveDate;
 
-use super::{DailyAccountValuation, NegativeBalanceInfo};
+use super::{DailyAccountValuation, DailyCashBalance, NegativeBalanceInfo};
 use crate::errors::Result;
 
 /// Repository trait for managing daily account valuations.
 #[async_trait]
 pub trait ValuationRepositoryTrait: Send + Sync {
-    /// Save multiple valuation records to the database.
-    async fn save_valuations(&self, valuation_records: &[DailyAccountValuation]) -> Result<()>;
-
     /// Atomically replace valuation rows for an account/date range.
     /// If `since_date` is `None`, replaces all rows for the account.
     async fn replace_valuations_for_account(
@@ -28,6 +25,26 @@ pub trait ValuationRepositoryTrait: Send + Sync {
         start_date: Option<NaiveDate>,
         end_date: Option<NaiveDate>,
     ) -> Result<Vec<DailyAccountValuation>>;
+
+    /// Each day's cash from `get_historical_valuations`. Storage reads only
+    /// those columns; the default converts whole valuations.
+    fn get_daily_cash_balances(
+        &self,
+        account_id: &str,
+        start_date: Option<NaiveDate>,
+        end_date: Option<NaiveDate>,
+    ) -> Result<Vec<DailyCashBalance>> {
+        Ok(self
+            .get_historical_valuations(account_id, start_date, end_date)?
+            .into_iter()
+            .map(|valuation| DailyCashBalance {
+                valuation_date: valuation.valuation_date,
+                cash_balance: valuation.cash_balance,
+                account_currency: valuation.account_currency,
+                value_status: valuation.value_status,
+            })
+            .collect())
+    }
 
     /// Get historical valuations for multiple real accounts in one ordered read.
     fn get_historical_valuations_for_accounts(
@@ -55,9 +72,6 @@ pub trait ValuationRepositoryTrait: Send + Sync {
         Ok(max_calculated_at)
     }
 
-    /// Get the latest valuation date for a specific account.
-    fn load_latest_valuation_date(&self, account_id: &str) -> Result<Option<NaiveDate>>;
-
     /// Delete valuations for a specific account.
     /// If `since_date` is `Some(date)`, deletes only records on or after that date.
     /// If `since_date` is `None`, deletes all records for the account.
@@ -77,7 +91,7 @@ pub trait ValuationRepositoryTrait: Send + Sync {
         date: NaiveDate,
     ) -> Result<Vec<DailyAccountValuation>>;
 
-    /// Returns info about accounts that have at least one negative total_value in their history.
+    /// Returns, per account, the first day its cash balance or total value was negative.
     fn get_accounts_with_negative_balance(
         &self,
         account_ids: &[String],

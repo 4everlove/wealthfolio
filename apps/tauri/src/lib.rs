@@ -3,10 +3,16 @@
 
 mod commands;
 mod context;
+mod data_dir;
+mod database;
 mod domain_events;
 mod events;
 mod listeners;
 mod mcp;
+mod portfolio_jobs;
+mod profile_lifecycle;
+mod profile_startup;
+mod profiles;
 mod scheduler;
 mod secret_store;
 mod services;
@@ -24,68 +30,14 @@ use log::error;
 use log::warn;
 use tauri::{AppHandle, Emitter, Manager};
 
-use events::{emit_app_ready, emit_portfolio_trigger_recalculate, PortfolioRequestPayload};
+use events::emit_app_ready;
 use tauri_plugin_deep_link::DeepLinkExt;
-
-fn portfolio_history_backfill_needed(context: &Arc<context::ServiceContext>) -> bool {
-    let accounts = match context.account_service().get_non_archived_accounts() {
-        Ok(accounts) => accounts,
-        Err(err) => {
-            error!("Failed to inspect accounts for valuation backfill: {}", err);
-            return false;
-        }
-    };
-    let account_ids: Vec<String> = accounts.into_iter().map(|account| account.id).collect();
-    if account_ids.is_empty() {
-        return false;
-    }
-
-    let latest = match context
-        .valuation_service()
-        .get_latest_valuations(&account_ids)
-    {
-        Ok(latest) => latest,
-        Err(err) => {
-            error!("Failed to inspect valuation history for backfill: {}", err);
-            return false;
-        }
-    };
-    let accounts_with_valuations: std::collections::HashSet<_> = latest
-        .into_iter()
-        .map(|valuation| valuation.account_id)
-        .collect();
-    let missing_ids: Vec<String> = account_ids
-        .into_iter()
-        .filter(|account_id| !accounts_with_valuations.contains(account_id))
-        .collect();
-    if missing_ids.is_empty() {
-        return false;
-    }
-
-    if matches!(
-        context
-            .activity_service()
-            .get_first_activity_date(Some(&missing_ids)),
-        Ok(Some(_))
-    ) {
-        return true;
-    }
-
-    missing_ids.iter().any(|account_id| {
-        matches!(
-            context
-                .snapshot_service()
-                .get_latest_holdings_snapshot(account_id),
-            Ok(Some(_))
-        )
-    })
-}
 
 #[cfg(feature = "device-sync")]
 fn start_sync_outbox_wake_worker(
     mut receiver: tokio::sync::mpsc::Receiver<()>,
     context: Arc<context::ServiceContext>,
-) {
+) -> tauri::async_runtime::JoinHandle<()> {
     tauri::async_runtime::spawn(async move {
         while receiver.recv().await.is_some() {
             while receiver.try_recv().is_ok() {}
@@ -104,7 +56,7 @@ fn start_sync_outbox_wake_worker(
                 context.device_sync_runtime().notify_sync_work_available();
             }
         }
-    });
+    })
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -117,7 +69,9 @@ mod desktop {
 
     /// Sets up the application menu and its event handler.
     pub fn setup_menu(handle: &AppHandle, menu_bar_visible: bool) {
-        if menu_bar_visible {
+        // macOS always keeps the menu: without it, Cmd+C, Cmd+V, Cmd+Z and
+        // Cmd+Q stop working, so the setting only applies on other platforms.
+        if menu_bar_visible || cfg!(target_os = "macos") {
             match menu::create_menu(handle) {
                 Ok(menu) => {
                     if let Err(e) = handle.set_menu(menu) {
@@ -142,96 +96,44 @@ mod desktop {
         let _ = handle.plugin(tauri_plugin_updater::Builder::new().build());
     }
 
-    /// Performs synchronous setup on desktop: initializes context, menu, and registers listeners.
-    pub fn setup(handle: AppHandle, app_data_dir: &str) -> Result<(), Box<dyn std::error::Error>> {
-        // Initialize context synchronously (required before any commands can work)
-        let init_result = tauri::async_runtime::block_on(async {
-            context::initialize_context(app_data_dir).await
-        })?;
-        let context = Arc::new(init_result.context);
-        let event_receiver = init_result.event_receiver;
-        let sync_outbox_wake_receiver = init_result.sync_outbox_wake_receiver;
-
-        // Make context available to all commands
-        handle.manage(Arc::clone(&context));
-
+    /// Opens the database asynchronously so the startup gate can render.
+    pub fn setup(handle: AppHandle) {
         // Embedded MCP server: clear any stale lock file from an unclean
-        // shutdown, then auto-start when enabled + auto-start are both set.
+        // shutdown before the runtime's workers may start it again.
         mcp::remove_stale_lock(&handle);
-        {
-            let mcp_handle = handle.clone();
-            let mcp_context = Arc::clone(&context);
-            tauri::async_runtime::spawn(async move {
-                mcp::start_if_enabled(&mcp_handle, &mcp_context).await;
-            });
-        }
-
-        #[cfg(feature = "device-sync")]
-        start_sync_outbox_wake_worker(sync_outbox_wake_receiver, Arc::clone(&context));
-
-        // Start the domain event queue worker now that context is managed
-        // This must be done in an async context since it spawns a tokio task
-        let worker_handle = handle.clone();
-        let worker_context = Arc::clone(&context);
+        // Let the window render while the database opens. Database-dependent
+        // commands stay gated until initialization succeeds; DatabaseRuntime
+        // owns the background workers and retains their handles.
         tauri::async_runtime::spawn(async move {
-            domain_events::TauriDomainEventSink::start_queue_worker(
-                event_receiver,
-                worker_handle,
-                worker_context,
-            );
+            let context = handle
+                .state::<profile_startup::ProfileStartup>()
+                .initialize(&handle)
+                .await;
+            let menu_bar_visible = context
+                .as_ref()
+                .ok()
+                .and_then(|context| context.as_ref())
+                .and_then(|context| context.settings_service().get_settings().ok())
+                .map(|settings| settings.menu_bar_visible)
+                .unwrap_or(true);
+            if let Err(error) = &context {
+                // Keep the window open so the recovery gate can show the error.
+                error!("Failed to open the database: {}", error);
+            }
+            let ready_handle = handle.clone();
+            // Install the native menu and its handlers once, on the main thread,
+            // after initialization has resolved the menu visibility setting.
+            if let Err(error) = handle.run_on_main_thread(move || {
+                setup_menu(&ready_handle, menu_bar_visible);
+                // Preserve readiness notifications on failure too; the recovery
+                // gate reads the runtime's stored status. On success, frontend
+                // startup hooks own the initial portfolio update and update check.
+                emit_app_ready(&ready_handle);
+            }) {
+                error!("Failed to finish desktop setup: {}", error);
+                emit_app_ready(&handle);
+            }
         });
-
-        // Menu setup is synchronous (no I/O)
-        let menu_bar_visible = context
-            .settings_service()
-            .get_settings()
-            .map(|s| s.menu_bar_visible)
-            .unwrap_or(true);
-        setup_menu(&handle, menu_bar_visible);
-
-        // Notify frontend that app is ready
-        // The frontend will trigger the initial portfolio update and update check after it's mounted
-        emit_app_ready(&handle);
-
-        if portfolio_history_backfill_needed(&context) {
-            emit_portfolio_trigger_recalculate(&handle, PortfolioRequestPayload::builder().build());
-        }
-
-        // Trigger startup sync (async, non-blocking)
-        // After this, user manually triggers sync via button
-        let startup_handle = handle.clone();
-        let startup_context = Arc::clone(&context);
-        tauri::async_runtime::spawn(async move {
-            scheduler::run_startup_sync(&startup_handle, &startup_context).await;
-        });
-
-        // Start periodic market data sync (6h interval, 2min initial delay)
-        let periodic_quote_service = Arc::clone(&context.quote_service);
-        tauri::async_runtime::spawn(async move {
-            wealthfolio_core::quotes::scheduler::run_periodic_sync(
-                periodic_quote_service,
-                std::time::Duration::from_secs(120),
-                std::time::Duration::from_secs(6 * 3600),
-            )
-            .await;
-        });
-
-        // Start background device sync engine (self-skips when device is not READY).
-        #[cfg(feature = "device-sync")]
-        {
-            let device_sync_context = Arc::clone(&context);
-            tauri::async_runtime::spawn(async move {
-                if let Err(err) = crate::commands::device_sync::ensure_background_engine_started(
-                    device_sync_context,
-                )
-                .await
-                {
-                    log::warn!("Failed to start background device sync engine: {}", err);
-                }
-            });
-        }
-
-        Ok(())
     }
 }
 
@@ -248,75 +150,25 @@ mod mobile {
         let _ = handle.plugin(tauri_plugin_haptics::init());
         let _ = handle.plugin(tauri_plugin_barcode_scanner::init());
 
-        // iOS-specific: Web Auth plugin for ASWebAuthenticationSession (required for Google OAuth)
-        #[cfg(target_os = "ios")]
+        // Native mobile web auth for OAuth callbacks.
+        #[cfg(any(target_os = "android", target_os = "ios"))]
         {
             let _ = handle.plugin(tauri_plugin_web_auth::init());
+        }
+
+        // iOS-only native share sheet.
+        #[cfg(target_os = "ios")]
+        {
             let _ = handle.plugin(tauri_plugin_mobile_share::init());
         }
     }
 
     /// Performs async setup on mobile without blocking the main thread.
-    pub fn setup(handle: AppHandle, app_data_dir: String) {
+    pub fn setup(handle: AppHandle) {
         tauri::async_runtime::spawn(async move {
-            match context::initialize_context(&app_data_dir).await {
-                Ok(init_result) => {
-                    let context = Arc::new(init_result.context);
-                    let event_receiver = init_result.event_receiver;
-                    let sync_outbox_wake_receiver = init_result.sync_outbox_wake_receiver;
-
-                    handle.manage(Arc::clone(&context));
-
-                    #[cfg(feature = "device-sync")]
-                    start_sync_outbox_wake_worker(sync_outbox_wake_receiver, Arc::clone(&context));
-
-                    // Start the domain event queue worker now that context is managed
-                    domain_events::TauriDomainEventSink::start_queue_worker(
-                        event_receiver,
-                        handle.clone(),
-                        Arc::clone(&context),
-                    );
-
-                    // Notify frontend that app is ready
-                    // The frontend will trigger the initial portfolio update after it's mounted
-                    emit_app_ready(&handle);
-
-                    if portfolio_history_backfill_needed(&context) {
-                        emit_portfolio_trigger_recalculate(
-                            &handle,
-                            PortfolioRequestPayload::builder().build(),
-                        );
-                    }
-
-                    // Trigger startup broker sync (async, non-blocking).
-                    // After this, user manually triggers sync via button.
-                    let startup_handle = handle.clone();
-                    let startup_context = Arc::clone(&context);
-                    tauri::async_runtime::spawn(async move {
-                        scheduler::run_startup_sync(&startup_handle, &startup_context).await;
-                    });
-
-                    // Start background device sync while the mobile app is active.
-                    // The loop self-skips when identity is not configured, and frontend lifecycle
-                    // triggers still cover resume/online cases after iOS suspends the process.
-                    #[cfg(feature = "device-sync")]
-                    {
-                        let device_sync_context = Arc::clone(&context);
-                        tauri::async_runtime::spawn(async move {
-                            if let Err(err) =
-                                crate::commands::device_sync::ensure_background_engine_started(
-                                    device_sync_context,
-                                )
-                                .await
-                            {
-                                log::warn!(
-                                    "Failed to start background device sync engine: {}",
-                                    err
-                                );
-                            }
-                        });
-                    }
-                }
+            let startup = handle.state::<profile_startup::ProfileStartup>();
+            match startup.initialize(&handle).await {
+                Ok(_) => emit_app_ready(&handle),
                 Err(e) => {
                     error!("Failed to initialize context on mobile: {}", e);
                     // Emit ready so UI can show error state
@@ -388,6 +240,13 @@ pub fn run() {
             // Embedded MCP server state (commands need it managed up front)
             handle.manage(mcp::McpServerState::default());
 
+            // Registry failures are recoverable. Platform setup opens profiles
+            // asynchronously while this state serves the startup recovery UI.
+            handle.manage(profile_startup::ProfileStartup::new(
+                get_app_data_dir(&handle)?,
+                handle.config().identifier.clone(),
+            ));
+
             // Platform-specific plugin initialization
             #[cfg(desktop)]
             desktop::init_plugins(&handle);
@@ -395,11 +254,9 @@ pub fn run() {
             #[cfg(mobile)]
             mobile::init_plugins(&handle);
 
-            // Get app data directory
-            let app_data_dir = get_app_data_dir(&handle)?;
-
             // Setup event listeners (platform-agnostic)
-            listeners::setup_event_listeners(handle.clone());
+            profiles::start_lock_monitor(handle.clone());
+            profile_lifecycle::install(&handle);
 
             // Setup deep link handler
             let deep_link_handle = handle.clone();
@@ -407,23 +264,44 @@ pub fn run() {
                 let urls = event.urls();
                 log::debug!("Deep link received (count: {})", urls.len());
                 for url in urls {
+                    if url.as_str().starts_with("wealthfolio://auth/") {
+                        if let Some(profiles) =
+                            deep_link_handle.try_state::<profiles::NativeProfiles>()
+                        {
+                            let _ = profiles
+                                .registry
+                                .auth_flows
+                                .capture_native(profiles::NATIVE_OWNER, url.as_str());
+                        }
+                    }
                     let _ = deep_link_handle.emit("deep-link-received", url.to_string());
                 }
             });
 
             // Platform-specific setup
             #[cfg(desktop)]
-            desktop::setup(handle, &app_data_dir).map_err(|e| {
-                error!("Desktop setup failed: {}", e);
-                e
-            })?;
+            desktop::setup(handle);
 
             #[cfg(mobile)]
-            mobile::setup(handle, app_data_dir);
+            mobile::setup(handle);
 
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            profiles::get_profile_state,
+            profile_startup::retry_profile_startup,
+            profile_startup::start_new_profile_setup,
+            profile_startup::open_profile_data_folder,
+            profiles::profile_auth_storage,
+            profiles::capture_profile_auth_callback,
+            profiles::create_profile,
+            profiles::delete_profile,
+            profiles::unlock_profile,
+            profiles::lock_profile,
+            profiles::profile_activity,
+            profiles::update_profile,
+            profiles::set_profile_password,
+            profiles::recover_profile_password,
             // Account commands
             commands::account::get_accounts,
             commands::account::create_account,
@@ -557,6 +435,10 @@ pub fn run() {
             commands::limits::update_contribution_limit,
             commands::limits::delete_contribution_limit,
             commands::limits::calculate_deposits_for_contribution_limit,
+            commands::cloud_backups::cloud_backup_action,
+            commands::cloud_backups::cloud_backup_capture,
+            commands::cloud_backups::cloud_backup_download,
+            commands::cloud_backups::cloud_backup_restore_preview,
             // Utility commands
             commands::utilities::save_text_file_with_dialog,
             commands::utilities::save_file_with_dialog,
@@ -565,12 +447,24 @@ pub fn run() {
             commands::utilities::export_data_file,
             commands::utilities::open_external_url,
             commands::utilities::get_app_info,
+            commands::utilities::profile_transfer_file,
             commands::utilities::check_for_updates,
             commands::utilities::install_app_update,
             commands::utilities::backup_database,
-            commands::utilities::backup_database_to_pending_export,
-            commands::utilities::backup_database_to_path,
-            commands::utilities::restore_database,
+            commands::utilities::list_database_backups,
+            commands::utilities::open_database_backup_folder,
+            commands::utilities::delete_database_backup,
+            commands::utilities::export_database_backup,
+            commands::utilities::inspect_database_backup,
+            commands::utilities::inspect_saved_database_backup,
+            commands::utilities::discard_database_backup_import,
+            commands::utilities::restore_database_backup_import,
+            commands::utilities::recover_database_from_import,
+            commands::utilities::get_database_startup_status,
+            commands::utilities::retry_database_startup,
+            // Database encryption commands
+            commands::database::get_database_encryption_status,
+            commands::database::set_database_encryption_enabled,
             // Asset commands
             commands::asset::get_asset_profile,
             commands::asset::get_assets,
@@ -593,11 +487,19 @@ pub fn run() {
             commands::alternative_assets::get_net_worth,
             commands::alternative_assets::get_net_worth_history,
             commands::alternative_assets::get_alternative_holdings,
+            commands::alternative_assets::calculate_loan,
+            commands::alternative_assets::recalculate_loan,
+            commands::alternative_assets::apply_loan_action,
+            commands::alternative_assets::get_loan_payments,
+            commands::alternative_assets::preview_loan_terms,
+            commands::alternative_assets::link_loan_payment,
             // Market data commands
             commands::market_data::search_symbol,
             commands::market_data::resolve_symbol_quote,
             commands::market_data::synch_quotes,
             commands::market_data::sync_market_data,
+            commands::market_data::reset_provider_history,
+            commands::market_data::reset_all_provider_history,
             commands::market_data::update_quote,
             commands::market_data::delete_quote,
             commands::market_data::get_quote_history,
@@ -633,11 +535,15 @@ pub fn run() {
             // Secrets commands
             commands::secrets::set_secret,
             commands::secrets::get_secret,
+            commands::secrets::get_profile_sync_identity,
+            commands::secrets::update_profile_sync_identity,
             commands::secrets::delete_secret,
             commands::secrets::set_addon_secret,
             commands::secrets::get_addon_secret,
             commands::secrets::delete_addon_secret,
             commands::addon_network::addon_network_request,
+            commands::addon_network::register_dev_addon_manifest,
+            commands::addon_network::unregister_dev_addon_manifest,
             // Provider settings commands
             commands::providers_settings::get_market_data_providers_settings,
             commands::providers_settings::update_market_data_provider_settings,
@@ -698,6 +604,8 @@ pub fn run() {
             #[cfg(any(feature = "connect-sync", feature = "device-sync"))]
             commands::wealthfolio_connect::clear_sync_session,
             #[cfg(any(feature = "connect-sync", feature = "device-sync"))]
+            commands::wealthfolio_connect::get_sync_session_status,
+            #[cfg(any(feature = "connect-sync", feature = "device-sync"))]
             commands::wealthfolio_connect::restore_sync_session,
             #[cfg(feature = "connect-sync")]
             commands::brokers_sync::sync_broker_data,
@@ -731,8 +639,6 @@ pub fn run() {
             commands::brokers_sync::save_broker_sync_profile_rules,
             // Device sync commands
             #[cfg(feature = "device-sync")]
-            commands::device_sync::enroll_device,
-            #[cfg(feature = "device-sync")]
             commands::device_sync::get_device,
             #[cfg(feature = "device-sync")]
             commands::device_sync::list_devices,
@@ -742,27 +648,13 @@ pub fn run() {
             commands::device_sync::delete_device,
             #[cfg(feature = "device-sync")]
             commands::device_sync::revoke_device,
-            // Team keys (E2EE)
-            #[cfg(feature = "device-sync")]
-            commands::device_sync::initialize_team_keys,
-            #[cfg(feature = "device-sync")]
-            commands::device_sync::commit_initialize_team_keys,
-            #[cfg(feature = "device-sync")]
-            commands::device_sync::rotate_team_keys,
-            #[cfg(feature = "device-sync")]
-            commands::device_sync::commit_rotate_team_keys,
+            // Sync reset
             #[cfg(feature = "device-sync")]
             commands::device_sync::reset_team_sync,
-            #[cfg(feature = "device-sync")]
-            commands::device_sync::device_sync_bootstrap_snapshot_if_needed,
             #[cfg(feature = "device-sync")]
             commands::device_sync::device_sync_engine_status,
             #[cfg(feature = "device-sync")]
             commands::device_sync::device_sync_pairing_source_status,
-            #[cfg(feature = "device-sync")]
-            commands::device_sync::device_sync_bootstrap_overwrite_check,
-            #[cfg(feature = "device-sync")]
-            commands::device_sync::device_sync_reconcile_ready_state,
             #[cfg(feature = "device-sync")]
             commands::device_sync::device_sync_trigger_cycle,
             #[cfg(feature = "device-sync")]
@@ -794,17 +686,19 @@ pub fn run() {
             // Composite pairing endpoints
             #[cfg(feature = "device-sync")]
             commands::device_sync::complete_pairing_with_transfer,
+            // Restore operation (receiving device)
             #[cfg(feature = "device-sync")]
-            commands::device_sync::confirm_pairing_with_bootstrap,
-            // Pairing flow coordinator
+            commands::device_sync::device_sync_start_restore,
             #[cfg(feature = "device-sync")]
-            commands::device_sync::begin_pairing_confirm,
+            commands::device_sync::device_sync_get_restore,
             #[cfg(feature = "device-sync")]
-            commands::device_sync::get_pairing_flow_state,
+            commands::device_sync::device_sync_approve_restore,
             #[cfg(feature = "device-sync")]
-            commands::device_sync::approve_pairing_overwrite,
+            commands::device_sync::device_sync_retry_restore,
             #[cfg(feature = "device-sync")]
-            commands::device_sync::cancel_pairing_flow,
+            commands::device_sync::device_sync_cancel_restore,
+            #[cfg(feature = "device-sync")]
+            commands::device_sync::device_sync_begin_pairing_restore,
             // Device enroll service (high-level commands)
             #[cfg(feature = "device-sync")]
             commands::device_enroll_service::get_device_sync_state,
@@ -877,33 +771,62 @@ pub fn run() {
             commands::fire::run_retirement_stress_tests,
         ])
         .build(tauri::generate_context!())
+        // Failure to construct the application is terminal; no command runtime exists yet.
         .expect("Failed to build Wealthfolio application")
         .run(|_handle, event| {
-            #[cfg(desktop)]
-            if matches!(
-                event,
-                tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit
-            ) {
-                // Stop the embedded MCP server and delete mcp.lock.
-                if _handle.try_state::<mcp::McpServerState>().is_some() {
-                    let mcp_handle = _handle.clone();
-                    tauri::async_runtime::block_on(async move {
-                        mcp::stop_server(&mcp_handle).await;
-                    });
+            #[cfg(mobile)]
+            if let tauri::RunEvent::WindowEvent {
+                event: window_event,
+                ..
+            } = &event
+            {
+                let suspended = match window_event {
+                    tauri::WindowEvent::Suspended => Some(true),
+                    tauri::WindowEvent::Resumed => Some(false),
+                    _ => None,
+                };
+                if let Some(suspended) = suspended {
+                    if let Some(startup) = _handle.try_state::<profile_startup::ProfileStartup>() {
+                        startup
+                            .backup_suspended
+                            .store(suspended, std::sync::atomic::Ordering::SeqCst);
+                    }
+                    if let Some(profiles) = _handle.try_state::<profiles::NativeProfiles>() {
+                        if let Ok(Some(runtime)) = profiles.active() {
+                            runtime.backup_scheduler.set_paused(suspended);
+                        }
+                    }
                 }
-
-                #[cfg(feature = "device-sync")]
-                if let Some(context) = _handle.try_state::<Arc<context::ServiceContext>>() {
-                    let context = Arc::clone(context.inner());
-                    tauri::async_runtime::block_on(async move {
-                        if let Err(err) =
-                            crate::commands::device_sync::ensure_background_engine_stopped(context)
-                                .await
-                        {
-                            warn!("Failed to stop background device sync engine: {}", err);
+            }
+            #[cfg(mobile)]
+            if matches!(
+                &event,
+                tauri::RunEvent::WindowEvent {
+                    event: tauri::WindowEvent::Resumed,
+                    ..
+                }
+            ) {
+                if let Some(context) = _handle
+                    .try_state::<profiles::NativeProfiles>()
+                    .and_then(|profiles| profiles.try_context())
+                {
+                    listeners::refresh_portfolio_on_resume(_handle.clone(), context.clone());
+                    #[cfg(feature = "device-sync")]
+                    tauri::async_runtime::spawn(async move {
+                        if context.is_active() {
+                            let _ = commands::device_sync::share_backup_access(&context).await;
                         }
                     });
                 }
+            }
+
+            // Desktop quits and restarts end here, including macOS Quit, which
+            // skips ExitRequested. The Windows updater does not: its installer
+            // step exits the process itself. Releasing the database also stops
+            // the MCP server (deleting mcp.lock) and the device sync engine.
+            #[cfg(desktop)]
+            if matches!(event, tauri::RunEvent::Exit) {
+                profiles::release_for_exit(_handle);
             }
         });
 }

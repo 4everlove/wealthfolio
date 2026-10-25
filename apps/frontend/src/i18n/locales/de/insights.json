@@ -65,10 +65,19 @@
       "holdings_count_one": "{{count}} Position",
       "holdings_count_other": "{{count}} Positionen",
       "accounts_count_one": "{{count}} Konto",
-      "accounts_count_other": "{{count}} Konten"
+      "accounts_count_other": "{{count}} Konten",
+      "pnl_current_holdings": "Aktuelle Positionen"
     }
   },
   "networth": {
+    "attention": {
+      "title": "Handlungsbedarf",
+      "update_value": "Wert aktualisieren",
+      "update_balance": "Restschuld aktualisieren",
+      "link_property": "Immobilie mit {{name}} verknüpfen",
+      "add_property": "Immobilie für {{name}} hinzufügen",
+      "link_explanation": "Das Verknüpfen einer vorhandenen Immobilie ändert dein Nettovermögen nicht."
+    },
     "failed_to_load": "Nettovermögen konnte nicht geladen werden",
     "stale_valuations_tooltip": "Veraltete Bewertungen (90+ Tage):",
     "days_ago": "vor {{count}} T",
@@ -76,9 +85,6 @@
     "breakdown": "Aufschlüsselung",
     "no_assets_found": "Keine Vermögenswerte gefunden.",
     "add_first_asset": "Fügen Sie Ihren ersten Vermögenswert hinzu",
-    "update_valuations": "Aktualisieren Sie Ihre Bewertungen",
-    "assets_count_one": "{{count}} Vermögenswert",
-    "assets_count_other": "{{count}} Vermögenswerte",
     "not_updated_over_90_days": "Seit über 90 Tagen nicht aktualisiert.",
     "chart": {
       "net_worth": "Nettovermögen",
@@ -114,16 +120,49 @@
     },
     "velocity": {
       "monthly_pace": "Monatliches Tempo",
-      "over_months_one": "über {{count}} Monat",
-      "over_months_other": "über {{count}} Monate",
-      "trailing_pace": " · {{multiple}}× Tempo der letzten 12 Monate",
+      "since": "seit {{date}}",
+      "trailing_pace": " · {{multiple}}× der 12-Monats-Durchschnitt",
       "drivers_of_change": "Treiber der Veränderung",
-      "market_returns": "Marktrenditen",
+      "investment_gains": "Anlagegewinne",
+      "investment_losses": "Anlageverluste",
+      "other_assets": "Sonstige Vermögenswerte",
       "contributions": "Einzahlungen",
-      "equity_built": "Aufgebautes Eigenkapital",
+      "withdrawals": "Auszahlungen",
+      "debt_paid_down": "Schuldenabbau",
+      "debt_added": "Neue Schulden",
       "per_month": "/Mon."
     },
     "days_ago_one": "vor {{count}} T",
     "days_ago_other": "vor {{count}} T"
+  },
+  "highlights": {
+    "movers": "Größte Kursbewegungen",
+    "concentration": "Konzentration",
+    "daily": "Tagesänderung · aktuelle Positionen",
+    "rank_by": "Tagesänderungen sortieren nach",
+    "gainers": "Gewinner",
+    "losers": "Verlierer",
+    "no_moves": "Keine Kursbewegungen mit verfügbaren Daten.",
+    "portfolio_share": "Anteil am Portfoliowert einschließlich Barbestand",
+    "largest": "Größte Position",
+    "top_five": "Die fünf größten Positionen",
+    "concentration_unavailable": "Die Konzentration erfordert positive Positionswerte und ein Portfolio ohne Short-Positionen."
+  },
+  "customize": {
+    "edit": "Anpassen",
+    "widgets": "Widgets",
+    "reset": "Layout zurücksetzen",
+    "cancel": "Abbrechen",
+    "save": "Layout speichern",
+    "saving": "Wird gespeichert…",
+    "hint": "Widgets am Griff verschieben oder ihre Breite am rechten Rand anpassen.",
+    "description": "Wählen Sie die anzuzeigenden Widgets aus. Mit den Pfeilen ändern Sie die Reihenfolge, auch auf Mobilgeräten.",
+    "value": "Portfolioübersicht",
+    "breakdown": "Aufschlüsselung",
+    "move_up": "{{widget}} nach oben verschieben",
+    "move_down": "{{widget}} nach unten verschieben",
+    "hide": "{{widget}} ausblenden",
+    "drag": "{{widget}} ziehen",
+    "empty": "Keine Widgets ausgewählt. Passen Sie diese Seite an, um Widgets hinzuzufügen."
   }
 }
